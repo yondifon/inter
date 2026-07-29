@@ -1,0 +1,77 @@
+import type { Profile } from "./types";
+
+export function commandFor(profile: Profile, prompt: string, cwd: string, model = profile.model, hookUrl?: string): string[] {
+  if (profile.command) {
+    return profile.command.map((part) => part
+      .replaceAll("{prompt}", prompt)
+      .replaceAll("{model}", model)
+      .replaceAll("{cwd}", cwd));
+  }
+
+  switch (profile.provider) {
+    case "claude":
+      return [
+        "claude", "-p", "--output-format", "stream-json", "--verbose", "--model", model,
+        "--permission-mode", "auto",
+        ...(hookUrl ? ["--settings", claudeHookSettings(hookUrl)] : []),
+        prompt,
+      ];
+    case "codex":
+      return [
+        "codex", "exec", "--json", "--model", model, "--sandbox", "workspace-write",
+        "--cd", cwd, "--skip-git-repo-check", prompt,
+      ];
+    case "opencode":
+      return ["opencode", "run", "--format", "json", "--model", model, "--dir", cwd, "--auto", prompt];
+    case "antigravity":
+      return ["antigravity", "--model", model, prompt];
+  }
+}
+
+function claudeHookSettings(url: string): string {
+  const handler = [{ matcher: "", hooks: [{ type: "http", url, timeout: 10 }] }];
+  return JSON.stringify({
+    hooks: {
+      PreToolUse: handler,
+      PostToolUse: handler,
+      PostToolUseFailure: handler,
+      SubagentStart: handler,
+      SubagentStop: handler,
+      Notification: handler,
+      StopFailure: handler,
+    },
+  });
+}
+
+export function finalText(profile: Profile, raw: string): string {
+  if (profile.provider === "claude") {
+    const lines = raw.trim().split("\n");
+    for (let index = lines.length - 1; index >= 0; index--) {
+      try {
+        const parsed = JSON.parse(lines[index]!) as { result?: string };
+        if (typeof parsed.result === "string") return parsed.result;
+      } catch {}
+    }
+    return raw;
+  }
+
+  const lines = raw.trim().split("\n");
+  for (let index = lines.length - 1; index >= 0; index--) {
+    try {
+      const event = JSON.parse(lines[index]!) as Record<string, unknown>;
+      const item = object(event.item);
+      const part = object(event.part);
+      const message = object(event.message);
+      const text = event.text ?? event.message ?? event.content ?? event.result
+        ?? item.text ?? item.message ?? part.text ?? part.message ?? message.content;
+      if (typeof text === "string") return text;
+    } catch {}
+  }
+  return raw.trim();
+}
+
+function object(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}

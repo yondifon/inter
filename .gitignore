@@ -1,0 +1,14 @@
+node_modules/
+.build/
+dist/
+
+.env
+.env.*
+!.env.example
+
+*.db
+*.db-*
+*.log
+
+inter.config.json
+.DS_Store
