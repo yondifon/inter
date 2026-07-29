@@ -7,6 +7,7 @@ export interface TaskWaitResult {
 }
 
 type Listener = (taskId?: string) => void;
+const POLL_INTERVAL_MS = 100;
 
 export class TaskWaiter {
   private readonly listeners = new Set<Listener>();
@@ -37,9 +38,11 @@ export class TaskWaiter {
     return new Promise((resolve, reject) => {
       let settled = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
+      let poller: ReturnType<typeof setInterval> | undefined;
 
       const cleanup = () => {
         if (timer) clearTimeout(timer);
+        if (poller) clearInterval(poller);
         this.listeners.delete(onChange);
         signal?.removeEventListener("abort", onAbort);
       };
@@ -57,14 +60,22 @@ export class TaskWaiter {
       };
       const onChange: Listener = (changedId) => {
         if (changedId && !ids.includes(changedId)) return;
-        const tasks = this.tasks(ids);
-        const cursor = this.getCursor(ids);
-        if (tasks.some(needsAttention)) finish({ reason: "attention", tasks, cursor });
-        else if (cursor > baseline) finish({ reason: "progress", tasks, cursor });
+        try {
+          const tasks = this.tasks(ids);
+          const cursor = this.getCursor(ids);
+          if (tasks.some(needsAttention)) finish({ reason: "attention", tasks, cursor });
+          else if (cursor > baseline) finish({ reason: "progress", tasks, cursor });
+        } catch (error) {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          reject(error);
+        }
       };
 
       this.listeners.add(onChange);
       signal?.addEventListener("abort", onAbort, { once: true });
+      poller = setInterval(() => onChange(), POLL_INTERVAL_MS);
       timer = setTimeout(() => finish({
         reason: "timeout",
         tasks: this.tasks(ids),
