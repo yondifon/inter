@@ -27,22 +27,17 @@ struct ContentView: View {
                         Text("No tasks yet").font(.callout).foregroundStyle(.tertiary)
                     } else {
                         ForEach(store.tasks) { task in
-                            TaskRow(task: task).tag(SidebarSelection.task(task.id))
+                            TaskRow(
+                                task: task,
+                                worker: store.profiles.first { $0.id == task.profileId }?.label ?? task.profileId
+                            )
+                            .tag(SidebarSelection.task(task.id))
                         }
                     }
                 }
             }
             .listStyle(.sidebar)
             .navigationSplitViewColumnWidth(min: 240, ideal: 260)
-            .safeAreaInset(edge: .bottom) {
-                HStack(spacing: 7) {
-                    Circle().fill(statusColor).frame(width: 7, height: 7)
-                    Text(statusText).font(.callout).foregroundStyle(.secondary)
-                    Spacer()
-                }
-                .padding(.horizontal, 14).padding(.vertical, 10)
-                .background(.bar)
-            }
         } detail: {
             if case let .profile(id) = selection,
                let profile = store.profiles.first(where: { $0.id == id }) {
@@ -50,11 +45,20 @@ struct ContentView: View {
             } else if case let .task(id) = selection,
                       let task = store.tasks.first(where: { $0.id == id }) {
                 TaskDetail(task: task, store: store)
+                    .id(task.id)
             } else {
                 ContentUnavailableView("Choose a worker or task", systemImage: "point.3.connected.trianglepath.dotted")
             }
         }
         .toolbar {
+            ToolbarItem(placement: .navigation) {
+                HStack(spacing: 7) {
+                    Circle().fill(statusColor).frame(width: 7, height: 7)
+                    Text(statusText).font(.callout).foregroundStyle(.secondary)
+                }
+                .fixedSize()
+                .help(statusText)
+            }
             ToolbarItem {
                 Button("Install MCP", systemImage: "link.badge.plus") {
                     installResults = MCPConfigInjector.installEverywhere(profiles: store.profiles)
@@ -235,19 +239,25 @@ private struct WorkerRow: View {
 
 private struct TaskRow: View {
     let task: TaskSnapshot
+    let worker: String
 
     var body: some View {
         HStack(spacing: 8) {
             Circle().fill(stateColor).frame(width: 6, height: 6)
                 .frame(width: 18, alignment: .center)
             VStack(alignment: .leading, spacing: 1) {
-                Text(task.prompt).lineLimit(1)
-                Text("\(stateLabel) · \(task.model)").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                Text(title).lineLimit(1)
+                Text("\(stateLabel) · \(worker) · #\(task.id.prefix(6))")
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
         }
         .padding(.vertical, 3)
+        .help(task.prompt)
     }
 
+    private var title: String {
+        task.prompt.split(whereSeparator: \.isNewline).first.map(String.init) ?? "Untitled task"
+    }
     private var stateLabel: String { task.state.replacingOccurrences(of: "_", with: " ") }
     private var stateColor: Color {
         switch task.state {

@@ -53,8 +53,21 @@ struct TaskEventSnapshot: Codable, Identifiable, Hashable {
     var phase: String
     var title: String
     var detail: String?
+    var presentation: TaskEventPresentationSnapshot?
     var rawText: String?
     var createdAt: String
+}
+
+struct TaskEventPresentationSnapshot: Codable, Hashable {
+    var type: String
+    var path: String?
+    var change: String?
+    var command: String?
+    var status: String?
+    var exitCode: Int?
+    var text: String?
+    var completed: Int?
+    var total: Int?
 }
 
 struct TaskEventPage: Codable {

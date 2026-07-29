@@ -229,11 +229,12 @@ enum MarkdownParser {
 
 struct ReviewContentView: View {
     let source: String
+    var initiallyExpandJSON = true
 
     var body: some View {
         switch ReviewContent(source) {
         case .json(let value):
-            JSONTableView(value: value)
+            JSONTableView(value: value, initiallyExpanded: initiallyExpandJSON)
         case .markdown(let blocks):
             MarkdownDocumentView(blocks: blocks)
         }
@@ -355,6 +356,7 @@ private struct MarkdownTable: View {
 
 private struct JSONTableView: View {
     let value: JSONValue
+    let initiallyExpanded: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -367,7 +369,7 @@ private struct JSONTableView: View {
             .foregroundStyle(.secondary)
             .padding(.horizontal, 8).padding(.vertical, 7)
             .background(Color(nsColor: .textBackgroundColor))
-            JSONTreeRow(name: "Root", value: value, depth: 0, initiallyExpanded: true)
+            JSONTreeRow(name: "Root", value: value, depth: 0, initiallyExpanded: initiallyExpanded)
         }
         .clipShape(RoundedRectangle(cornerRadius: 6))
         .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(nsColor: .separatorColor)))
