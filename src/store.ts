@@ -38,6 +38,7 @@ interface TaskRow {
   scope_json: string;
   allow_questions: number;
   timeout_ms: number | null;
+  session_id: string | null;
   completion_json: string | null;
   created_at: string;
   updated_at: string;
@@ -168,16 +169,21 @@ export class StateStore {
       INSERT INTO tasks(
         id, profile_id, model, prompt, cwd, state, output, error, question,
         parent_task_id, child_task_id, scope_json, allow_questions, timeout_ms,
-        completion_json, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        session_id, completion_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       task.id, task.profileId, task.model, task.prompt, task.cwd, task.state,
       task.output, task.error ?? null, task.question ?? null, task.parentTaskId ?? null,
       task.childTaskId ?? null, JSON.stringify(task.scope), task.allowQuestions ? 1 : 0,
-      task.timeoutMs ?? null, task.completion ? JSON.stringify(task.completion) : null,
+      task.timeoutMs ?? null, task.sessionId ?? null,
+      task.completion ? JSON.stringify(task.completion) : null,
       task.createdAt, task.updatedAt,
     );
     this.addTaskEvent(task.id, "created", task.state, {});
+  }
+
+  setTaskSessionId(id: string, sessionId: string): void {
+    this.database.query("UPDATE tasks SET session_id = ? WHERE id = ?").run(sessionId, id);
   }
 
   saveTask(
@@ -245,7 +251,7 @@ export class StateStore {
     const row = this.database.query<TaskRow, [string]>(`
       SELECT id, profile_id, model, prompt, cwd, state, output, error, question,
              parent_task_id, child_task_id, scope_json, allow_questions, timeout_ms,
-             completion_json, created_at, updated_at
+             session_id, completion_json, created_at, updated_at
       FROM tasks WHERE id = ?
     `).get(id);
     return row ? taskFromRow(row) : undefined;
@@ -255,7 +261,7 @@ export class StateStore {
     return this.database.query<TaskRow, [number]>(`
       SELECT id, profile_id, model, prompt, cwd, state, output, error, question,
              parent_task_id, child_task_id, scope_json, allow_questions, timeout_ms,
-             completion_json, created_at, updated_at
+             session_id, completion_json, created_at, updated_at
       FROM tasks
       ORDER BY updated_at DESC, id DESC
       LIMIT ?
@@ -282,7 +288,7 @@ export class StateStore {
     const rows = this.database.query<TaskRow, Array<string | number>>(`
       SELECT id, profile_id, model, prompt, cwd, state, output, error, question,
              parent_task_id, child_task_id, scope_json, allow_questions, timeout_ms,
-             completion_json, created_at, updated_at
+             session_id, completion_json, created_at, updated_at
       FROM tasks
       ${where}
       ORDER BY updated_at DESC, id DESC
@@ -508,6 +514,7 @@ export class StateStore {
         scope_json TEXT NOT NULL DEFAULT '{"read":["**"],"write":["**"]}' CHECK(json_valid(scope_json)),
         allow_questions INTEGER NOT NULL DEFAULT 1 CHECK(allow_questions IN (0,1)),
         timeout_ms INTEGER,
+        session_id TEXT,
         completion_json TEXT CHECK(completion_json IS NULL OR json_valid(completion_json)),
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -537,6 +544,13 @@ export class StateStore {
       "PRAGMA table_info(tasks)",
     ).all().map(({ name }) => name));
     if (!columns.has("scope_json")) this.migrateTaskContract();
+    // Re-read: migrateTaskContract rebuilds the table without newer columns.
+    const taskColumns = new Set(this.database.query<{ name: string }, []>(
+      "PRAGMA table_info(tasks)",
+    ).all().map(({ name }) => name));
+    if (!taskColumns.has("session_id")) {
+      this.database.exec("ALTER TABLE tasks ADD COLUMN session_id TEXT");
+    }
     const failureColumns = new Set(this.database.query<{ name: string }, []>(
       "PRAGMA table_info(profile_failures)",
     ).all().map(({ name }) => name));
@@ -555,6 +569,10 @@ export class StateStore {
     this.database.query(`
       INSERT OR IGNORE INTO schema_migrations(version, name)
       VALUES (3, 'profile failure retry timestamps')
+    `).run();
+    this.database.query(`
+      INSERT OR IGNORE INTO schema_migrations(version, name)
+      VALUES (4, 'task worker session ids')
     `).run();
   }
 
@@ -716,6 +734,7 @@ function taskFromRow(row: TaskRow): Task {
     scope: JSON.parse(row.scope_json) as Task["scope"],
     allowQuestions: row.allow_questions === 1,
     ...(row.timeout_ms ? { timeoutMs: row.timeout_ms } : {}),
+    ...(row.session_id ? { sessionId: row.session_id } : {}),
     ...(row.completion_json
       ? { completion: JSON.parse(row.completion_json) as TaskCompletion }
       : {}),

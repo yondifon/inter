@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { commandFor, finalText } from "../src/adapters";
+import { canResumeSession, commandFor, finalText, resumeCommandFor, sessionIdFrom } from "../src/adapters";
 import type { Profile } from "../src/types";
 
 const base: Profile = {
@@ -47,5 +47,43 @@ describe("CLI adapters", () => {
     const settings = JSON.parse(command[command.indexOf("--settings") + 1]!);
     expect(settings.hooks.PreToolUse[0].hooks[0].url).toBe("http://127.0.0.1/hooks/task");
     expect(settings.hooks.SubagentStop).toBeDefined();
+  });
+
+  test("resumes a Claude session with the captured session id", () => {
+    const command = resumeCommandFor(base, "continue", "/repo", "sess-1", "sonnet", "http://127.0.0.1/hooks/task");
+    expect(command[command.indexOf("--resume") + 1]).toBe("sess-1");
+    expect(command).toContain("--settings");
+    expect(command.at(-1)).toBe("continue");
+  });
+
+  test("resumes Codex through the exec resume subcommand", () => {
+    const command = resumeCommandFor({ ...base, provider: "codex" }, "continue", "/repo", "thread-9");
+    expect(command.slice(0, 4)).toEqual(["codex", "exec", "resume", "thread-9"]);
+    expect(command).toContain("--json");
+    expect(command[command.indexOf("-c") + 1]).toBe('sandbox_mode="workspace-write"');
+  });
+
+  test("resumes OpenCode with the prior session flag", () => {
+    const command = resumeCommandFor({ ...base, provider: "opencode" }, "continue", "/repo", "ses_1");
+    expect(command[command.indexOf("--session") + 1]).toBe("ses_1");
+    expect(command[command.indexOf("--dir") + 1]).toBe("/repo");
+  });
+
+  test("refuses resume for custom commands and Antigravity", () => {
+    expect(canResumeSession(base)).toBe(true);
+    expect(canResumeSession({ ...base, command: ["agy", "{prompt}"] })).toBe(false);
+    expect(canResumeSession({ ...base, provider: "antigravity" })).toBe(false);
+    expect(() => resumeCommandFor({ ...base, provider: "antigravity" }, "p", "/repo", "s")).toThrow(
+      "profile cannot resume sessions",
+    );
+  });
+
+  test("extracts each provider's session id from its real event shape", () => {
+    expect(sessionIdFrom("claude", { type: "system", session_id: "11296fa9" })).toBe("11296fa9");
+    expect(sessionIdFrom("codex", { type: "thread.started", thread_id: "019fb42b" })).toBe("019fb42b");
+    expect(sessionIdFrom("opencode", { type: "step_start", sessionID: "ses_04bd" })).toBe("ses_04bd");
+    expect(sessionIdFrom("claude", { type: "assistant" })).toBeUndefined();
+    expect(sessionIdFrom("claude", { session_id: 42 })).toBeUndefined();
+    expect(sessionIdFrom("antigravity", { session_id: "x" })).toBeUndefined();
   });
 });

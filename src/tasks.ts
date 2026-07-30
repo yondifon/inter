@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, relative, resolve } from "node:path";
-import { commandFor, finalText } from "./adapters";
+import { canResumeSession, commandFor, finalText, resumeCommandFor, sessionIdFrom } from "./adapters";
 import { loadConfig, profileEnv } from "./config";
 import { taskEventView } from "./events";
 import { continuationPrompt, interpretWorkerOutcome, needsInputQuestion, workerPrompt } from "./task-protocol";
@@ -173,11 +173,11 @@ async function validateWorkspace(cwd: string): Promise<string> {
   return workspace;
 }
 
-function launchTask(task: Task, profile: Profile): void {
-  void runTask(task, profile);
+function launchTask(task: Task, profile: Profile, resumeSessionId?: string): void {
+  void runTask(task, profile, resumeSessionId);
 }
 
-async function runTask(task: Task, profile: Profile): Promise<void> {
+async function runTask(task: Task, profile: Profile, resumeSessionId?: string): Promise<void> {
   if (!update(task, { state: "running" }, ["queued"])) return;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   let active: ActiveWorker | undefined;
@@ -185,74 +185,121 @@ async function runTask(task: Task, profile: Profile): Promise<void> {
   try {
     scratchDir = mkdtempSync(resolve(tmpdir(), "inter-worker-"));
     const hookUrl = `${Bun.env.INTER_BROKER_URL ?? `http://127.0.0.1:${Bun.env.INTER_PORT ?? 7331}`}/api/hooks/${task.id}`;
-    const command = commandFor(
-      profile,
-      workerPrompt(task.prompt, task.allowQuestions),
-      task.cwd,
-      task.model,
-      hookUrl,
-    );
-    const child = Bun.spawn(sandboxedCommand(command, task.cwd, task.scope, profile, scratchDir), {
-      cwd: task.cwd,
-      detached: true,
-      env: {
-        ...Bun.env,
-        ...profileEnv(profile),
-        TMPDIR: scratchDir,
-        INTER_TASK_ID: task.id,
-        INTER_HOOK_URL: hookUrl,
-      },
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    active = { task, child, cancelled: false };
-    activeWorkers.set(task.id, active);
-    if (task.timeoutMs) {
-      active.timeout = setTimeout(() => {
-        void cancelTask(task.id, `task exceeded timeoutMs ${task.timeoutMs}`, true);
-      }, task.timeoutMs);
-    }
-    appendTaskEvent(task.id, "worker_spawned", task.state, {
-      provider: profile.provider,
-      model: task.model,
-    });
+    const prompt = workerPrompt(task.prompt, task.allowQuestions);
+    const env = {
+      ...Bun.env,
+      ...profileEnv(profile),
+      TMPDIR: scratchDir,
+      INTER_TASK_ID: task.id,
+      INTER_HOOK_URL: hookUrl,
+    };
     const startedAt = Date.now();
     let lastAgentEventAt = startedAt;
-    heartbeat = setInterval(() => {
-      const silentMs = Date.now() - lastAgentEventAt;
-      appendTaskEvent(task.id, "heartbeat", task.state, {
-        elapsedMs: Date.now() - startedAt,
-        silentMs,
-        stalled: silentMs >= 30_000,
-      });
-    }, 10_000);
     let eventCount = 0;
     let eventCaptureStopped = false;
-    const [stdout, stderr, exitCode] = await Promise.all([
-      readStream(child.stdout, (line) => {
-        if (eventCaptureStopped) return;
-        if (eventCount >= MAX_EVENTS || line.length > MAX_EVENT_LINE) {
-          if (!eventCaptureStopped) {
-            appendTaskEvent(task.id, "events_truncated", task.state, {});
-            eventCaptureStopped = true;
-          }
-          return;
+    let oversizedLine = false;
+    let resumeWith = resumeSessionId;
+    let stdout = "";
+    let stderr = "";
+    let exitCode = 0;
+    while (true) {
+      const command = resumeWith
+        ? resumeCommandFor(profile, prompt, task.cwd, resumeWith, task.model, hookUrl)
+        : commandFor(profile, prompt, task.cwd, task.model, hookUrl);
+      const child = Bun.spawn(sandboxedCommand(command, task.cwd, task.scope, profile, scratchDir), {
+        cwd: task.cwd,
+        detached: true,
+        env,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      if (active) {
+        active.child = child;
+      } else {
+        active = { task, child, cancelled: false };
+        activeWorkers.set(task.id, active);
+        if (task.timeoutMs) {
+          active.timeout = setTimeout(() => {
+            void cancelTask(task.id, `task exceeded timeoutMs ${task.timeoutMs}`, true);
+          }, task.timeoutMs);
         }
-        try {
-          const parsed = JSON.parse(line) as unknown;
-          const payload = parsed && typeof parsed === "object" && !Array.isArray(parsed)
-            ? parsed as Record<string, unknown>
-            : { value: parsed };
-          const kind = typeof payload.type === "string" ? payload.type : "event";
-          appendTaskEvent(task.id, `agent.${kind}`, task.state, payload);
-          lastAgentEventAt = Date.now();
-          eventCount++;
-        } catch {}
-      }),
-      readStream(child.stderr, undefined, MAX_EVENT_LINE),
-      child.exited,
-    ]);
-    if (active.cancelled || stateStore().getTask(task.id)?.state === "cancelled") return;
+        heartbeat = setInterval(() => {
+          const silentMs = Date.now() - lastAgentEventAt;
+          appendTaskEvent(task.id, "heartbeat", task.state, {
+            elapsedMs: Date.now() - startedAt,
+            silentMs,
+            stalled: silentMs >= 30_000,
+          });
+        }, 10_000);
+      }
+      appendTaskEvent(task.id, "worker_spawned", task.state, {
+        provider: profile.provider,
+        model: task.model,
+        ...(resumeWith ? { resumedSession: resumeWith } : {}),
+      });
+      let attemptEvents = 0;
+      [stdout, stderr, exitCode] = await Promise.all([
+        readStream(child.stdout, (line) => {
+          if (eventCaptureStopped) return;
+          if (eventCount >= MAX_EVENTS) {
+            appendTaskEvent(task.id, "events_truncated", task.state, { limit: MAX_EVENTS });
+            eventCaptureStopped = true;
+            return;
+          }
+          // One oversized payload — a large file read echoed back as a tool
+          // result — must cost only that line, not the rest of the trace.
+          if (line.length > MAX_EVENT_LINE) {
+            lastAgentEventAt = Date.now();
+            if (!oversizedLine) {
+              oversizedLine = true;
+              appendTaskEvent(task.id, "event_dropped", task.state, {
+                bytes: line.length,
+                limit: MAX_EVENT_LINE,
+              });
+              eventCount++;
+            }
+            return;
+          }
+          try {
+            const parsed = JSON.parse(line) as unknown;
+            const payload = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+              ? parsed as Record<string, unknown>
+              : { value: parsed };
+            const kind = typeof payload.type === "string" ? payload.type : "event";
+            appendTaskEvent(task.id, `agent.${kind}`, task.state, payload);
+            lastAgentEventAt = Date.now();
+            eventCount++;
+            attemptEvents++;
+            if (!task.sessionId) {
+              const sessionId = sessionIdFrom(profile.provider, payload);
+              if (sessionId) {
+                task.sessionId = sessionId;
+                stateStore().setTaskSessionId(task.id, sessionId);
+              }
+            }
+          } catch {}
+        }),
+        readStream(child.stderr, undefined, MAX_EVENT_LINE),
+        child.exited,
+      ]);
+      // A resume that dies before emitting a single agent event never reached the
+      // model (e.g. the session file was pruned); retry once as a fresh run so the
+      // caller's answer is not lost. Failures after events are real task failures.
+      if (
+        resumeWith && exitCode !== 0 && attemptEvents === 0 &&
+        !active.cancelled && stateStore().getTask(task.id)?.state !== "cancelled"
+      ) {
+        appendTaskEvent(task.id, "resume_fallback", task.state, {
+          resumedSession: resumeWith,
+          exitCode,
+          error: stderr.trim().slice(0, 500),
+        });
+        resumeWith = undefined;
+        continue;
+      }
+      break;
+    }
+    if (active?.cancelled || stateStore().getTask(task.id)?.state === "cancelled") return;
     const output = finalText(profile, stdout);
     const outcome = interpretWorkerOutcome(exitCode, output, stderr);
     const persisted = update(task, {
@@ -348,7 +395,10 @@ export async function reply(id: string, answer: string): Promise<Task> {
   );
   stateStore().createContinuation(old.id, task);
   taskWaiter.notify(old.id);
-  launchTask(task, profile);
+  // Continue inside the worker's own CLI session when the provider supports it;
+  // the continuation prompt stays self-sufficient so a fallback fresh run works.
+  const resumeSessionId = old.sessionId && canResumeSession(profile) ? old.sessionId : undefined;
+  launchTask(task, profile, resumeSessionId);
   return task;
 }
 

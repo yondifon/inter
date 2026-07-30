@@ -23,7 +23,9 @@ export function sandboxedCommand(
   if (process.platform !== "darwin" || !existsSync("/usr/bin/sandbox-exec")) {
     throw new Error("per-task scope enforcement requires macOS sandbox-exec");
   }
-  const executable = Bun.which(command[0]!) ?? command[0]!;
+  // Bun.which defaults to the PATH snapshot taken at process start; pass the
+  // live value so runtime PATH changes (tests, launchd relaunches) are honored.
+  const executable = Bun.which(command[0]!, { PATH: process.env.PATH }) ?? command[0]!;
   const resolvedCommand = [executable, ...command.slice(1)];
   return [
     "/usr/bin/sandbox-exec",
@@ -114,7 +116,7 @@ function fileRule(operation: string, cwd: string, rule: string): string {
 
 function runtimeReadPaths(profile: Profile, command: string[], scratchDir: string): string[] {
   const userHome = homedir();
-  const executable = Bun.which(command[0]!) ?? command[0]!;
+  const executable = Bun.which(command[0]!, { PATH: process.env.PATH }) ?? command[0]!;
   const paths = [
     "/System", "/usr", "/bin", "/sbin", "/Library", "/dev",
     "/private/etc", "/private/var/db", "/private/var/select", "/private/var/run",

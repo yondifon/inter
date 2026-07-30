@@ -84,6 +84,29 @@ describe("SQLite state store", () => {
     reopened.close();
   });
 
+  test("persists captured worker session ids, adding the column to older databases", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const saved = task();
+    store.createTask(saved);
+    expect(store.getTask(saved.id)?.sessionId).toBeUndefined();
+    store.setTaskSessionId(saved.id, "sess-123");
+    expect(store.getTask(saved.id)?.sessionId).toBe("sess-123");
+    store.close();
+
+    // Simulate a database created before the session_id migration.
+    const raw = new Database(db);
+    raw.exec("ALTER TABLE tasks DROP COLUMN session_id");
+    raw.exec("DELETE FROM schema_migrations WHERE version = 4");
+    raw.close();
+
+    const reopened = new StateStore({ path: db, seedProfiles: [profile] });
+    expect(reopened.getTask(saved.id)?.sessionId).toBeUndefined();
+    reopened.setTaskSessionId(saved.id, "sess-456");
+    expect(reopened.getTask(saved.id)?.sessionId).toBe("sess-456");
+    reopened.close();
+  });
+
   test("lists no tasks when empty and orders tasks by latest update", () => {
     const { db } = paths();
     const store = new StateStore({ path: db, seedProfiles: [profile] });

@@ -69,6 +69,7 @@ export interface Task {
   scope: TaskScope;
   allowQuestions: boolean;
   timeoutMs?: number;
+  sessionId?: string;
   completion?: TaskCompletion;
 }
 
