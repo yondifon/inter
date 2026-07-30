@@ -33,7 +33,9 @@ Agent flow:
    new authority.
 6. Call `reply` with the answer. It returns a linked continuation task; wait on
    that new task ID. The answered parent links forward to the child and stops
-   counting as open work.
+   counting as open work. The continuation resumes the worker's own CLI session
+   when the provider supports it, so the worker keeps everything it already
+   read and planned; if the session is gone it falls back to a fresh run.
 7. Call `cancel` when work is no longer useful, or set `timeoutMs` on `delegate`
    for automatic cancellation.
 
@@ -62,14 +64,42 @@ Agent flow:
 
 ## Project routing policy
 
-Add `.inter.toml` at a project's root to constrain automatic routing by task
-class. Rules name providers and model patterns, not local profile IDs, so the
-file can be committed and shared. Supported route keys are `mechanical`,
-`context`, `build`, `reasoning`, and `general`.
+Create `.inter.toml` in the project root:
+
+```bash
+touch .inter.toml
+```
+
+The file constrains automatic model routing for that project. It can be
+committed: rules name providers and models, never a user's local profile IDs.
+Inter still chooses between matching local accounts using their availability
+status.
+
+Start with this complete example, then remove or edit routes that do not fit the
+project:
 
 ```toml
 version = 1
 
+# Small, predictable edits. Change this to Opus if accuracy matters more than cost.
+[routes.mechanical]
+preference = "speed"
+min_quality = 2
+allow = [
+  { provider = "claude", model = "haiku" },
+  { provider = "codex", model = "*mini*" },
+]
+
+# Reading, reviewing, tracing, and investigation.
+[routes.context]
+preference = "quality"
+min_quality = 4
+allow = [
+  { provider = "claude", model = "sonnet" },
+  { provider = "opencode", model = "opencode-go/*" },
+]
+
+# Implementation must use the strongest allowed models.
 [routes.build]
 preference = "quality"
 min_quality = 5
@@ -78,19 +108,117 @@ allow = [
   { provider = "opencode", model = "opencode-go/*" },
 ]
 
+# Architecture, security, migrations, and hard research.
+# Codex is allowed here but intentionally omitted from routes.build.
 [routes.reasoning]
 preference = "quality"
+min_quality = 5
+allow = [
+  { provider = "claude", model = "opus" },
+  { provider = "codex", model = "*" },
+]
+
+# Tasks that do not match another class.
+[routes.general]
+preference = "balanced"
+min_quality = 3
 allow = [
   { provider = "claude", model = "*" },
+  { provider = "codex", model = "*" },
+  { provider = "opencode", model = "*" },
+  { provider = "antigravity", model = "*" },
+]
+```
+
+The example makes implementation accuracy-first, limits OpenCode build/context
+work to `opencode-go/*`, and reserves Codex for reasoning and general work.
+Routes do not need to contain every provider. Inter considers only installed,
+enabled profiles with a model matching the route.
+
+Route names describe the work:
+
+| Route | Used for |
+| --- | --- |
+| `mechanical` | Renames, formatting, simple generation, and other bounded edits |
+| `context` | Reading, tracing, reviewing, auditing, and investigation |
+| `build` | Implementation, fixes, debugging, refactors, and tests |
+| `reasoning` | Architecture, security, migrations, concurrency, and hard research |
+| `general` | Work that does not match another class |
+
+Each route supports:
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `allow` | Yes | Non-empty provider/model allowlist |
+| `preference` | No | `balanced`, `quality`, `cost`, or `speed` |
+| `min_quality` | No | Quality target `1`–`5`; penalizes lower models |
+
+`allow` is the hard constraint. `preference` and `min_quality` rank the models
+that remain. If a route must use one exact model, list only that model in
+`allow`.
+
+An `allow` entry has `provider` and `model`. Provider IDs are `claude`, `codex`,
+`opencode`, or `antigravity`. Model matching is case-insensitive, uses the full
+model ID, and supports `*` as an anchored wildcard:
+
+```toml
+allow = [
+  { provider = "claude", model = "opus" },          # exact model
+  { provider = "opencode", model = "opencode-go/*" }, # one model family
+  { provider = "codex", model = "*" },              # every Codex model
+]
+```
+
+Common variations:
+
+Use Opus even for simple mechanical work:
+
+```toml
+[routes.mechanical]
+preference = "quality"
+min_quality = 5
+allow = [
+  { provider = "claude", model = "opus" },
+]
+```
+
+Allow only one OpenCode model family for builds:
+
+```toml
+[routes.build]
+preference = "quality"
+allow = [
+  { provider = "opencode", model = "opencode-go/*" },
+]
+```
+
+Make Codex reasoning-only by adding it to `routes.reasoning` and leaving it out
+of every other route:
+
+```toml
+[routes.reasoning]
+preference = "quality"
+min_quality = 5
+allow = [
+  { provider = "claude", model = "opus" },
   { provider = "codex", model = "*" },
 ]
 ```
 
-Each route accepts `allow`, plus optional `preference` (`balanced`, `quality`,
-`cost`, or `speed`) and `min_quality` from 1 through 5. A route preview applies
-the policy only when its optional `cwd` is supplied; automatic delegation uses
-the delegate request's required `cwd`. Missing `.inter.toml` preserves global
-routing. An invalid file fails routing instead of silently falling back.
+Only the route matching the classified task applies. `[routes.general]` is not
+a fallback for missing route sections. If `[routes.build]` is absent, build work
+uses normal global routing.
+
+Automatic delegation reads `.inter.toml` from its required `cwd`. For a preview,
+pass that project path to the `route` tool as `cwd`. Omit `cwd` to preview global
+routing. Missing `.inter.toml` preserves global behavior. Invalid syntax,
+unknown fields, unsupported routes, empty allowlists, and invalid values fail
+with the file path and field instead of silently falling back.
+
+Personal account choice stays local. For example, a rule allowing
+`claude`/`opus` can route through `claude-work` when it is available and skip
+`claude-me` after an observed billing failure. Use the `status` tool to inspect
+the availability evidence before delegating.
 
 ## Develop
 
@@ -150,7 +278,8 @@ across projects.
 - `tasks`: list concise task summaries with `limit`, `state`, `since`, and
   `profile` filters. Use `inspect` for full prompt and output.
 - `reply`: answer `INTER_NEEDS_INPUT: <question>` and return a linked
-  continuation task.
+  continuation task that resumes the worker's CLI session (`claude --resume`,
+  `codex exec resume`, `opencode run --session`), with a fresh-run fallback.
 - `cancel`: stop a queued or running task and its worker process tree.
 - `profiles`: list available accounts and models without exposing secret-like env
   values.

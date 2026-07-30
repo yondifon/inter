@@ -273,8 +273,13 @@ async function runTask(task: Task, profile: Profile, resumeSessionId?: string): 
             if (!task.sessionId) {
               const sessionId = sessionIdFrom(profile.provider, payload);
               if (sessionId) {
-                task.sessionId = sessionId;
-                stateStore().setTaskSessionId(task.id, sessionId);
+                const store = stateStore();
+                if (store.captureTaskSessionId(task.id, profile.provider, sessionId)) {
+                  task.sessionId = sessionId;
+                  taskWaiter.notify(task.id);
+                } else {
+                  task.sessionId = store.getTask(task.id)?.sessionId;
+                }
               }
             }
           } catch {}

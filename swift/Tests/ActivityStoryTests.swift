@@ -10,13 +10,54 @@ final class ActivityStoryTests: XCTestCase {
         source: String = "claude",
         phase: String = "info",
         presentation: TaskEventPresentationSnapshot? = nil,
-        createdAt: String = "2026-07-30T15:00:00.000Z"
+        createdAt: String = "2026-07-30T15:00:00.000Z",
+        actionId: String? = nil
     ) -> TaskEventSnapshot {
         TaskEventSnapshot(
             id: id, taskId: "task", source: source, kind: kind, phase: phase,
             title: title, detail: detail, presentation: presentation,
-            rawText: nil, createdAt: createdAt
+            rawText: nil, createdAt: createdAt, actionId: actionId
         )
+    }
+
+    /// The echo and the hooks of one call interleave with another call's, so
+    /// only the shared id can pair them.
+    func testInterleavedEventsOfTwoActionsFoldToOneRowEach() {
+        let story = ActivityStory.compose([
+            event(1, kind: "file", title: "Read file", detail: "a.rs", actionId: "toolu_a"),
+            event(2, kind: "file", title: "Read file", detail: "a.rs",
+                  phase: "started", actionId: "toolu_a"),
+            event(3, kind: "file", title: "Read file", detail: "b.rs", actionId: "toolu_b"),
+            event(4, kind: "file", title: "Read file", detail: "b.rs",
+                  phase: "started", actionId: "toolu_b"),
+            event(5, kind: "file", title: "Read file", detail: "a.rs",
+                  phase: "completed", createdAt: "2026-07-30T15:00:09.000Z", actionId: "toolu_a"),
+            event(6, kind: "file", title: "Read file", detail: "b.rs · denied",
+                  phase: "failed", actionId: "toolu_b"),
+        ])
+        guard case .chapter(_, let rows) = story.blocks.first else {
+            return XCTFail("expected one chapter, got \(story.blocks)")
+        }
+        XCTAssertEqual(rows.map(\.id), [1, 3])
+        XCTAssertEqual(rows.map(\.phase), ["completed", "failed"])
+        XCTAssertEqual(rows[1].detail, "b.rs · denied")
+        // The row is stamped when the action began, not when its last hook landed.
+        XCTAssertEqual(rows[0].createdAt, "2026-07-30T15:00:00.000Z")
+    }
+
+    func testOnlyTheNewestStallEarnsASignal() {
+        let story = ActivityStory.compose([
+            event(1, kind: "lifecycle", title: "Heartbeat", detail: "No agent event for 35s"),
+            event(2, kind: "command", title: "Bash", detail: "ls"),
+            event(3, kind: "lifecycle", title: "Heartbeat", detail: "No agent event for 45s"),
+            event(4, kind: "lifecycle", title: "Heartbeat", detail: "No agent event for 55s"),
+        ])
+        let signals = story.blocks.compactMap { block -> TaskEventSnapshot? in
+            guard case .signal(let event) = block else { return nil }
+            return event
+        }
+        XCTAssertEqual(signals.map(\.id), [4])
+        XCTAssertEqual(story.technical.map(\.id), [1, 3])
     }
 
     func testCollapsesThinkingRunIntoOnePulse() {
@@ -74,10 +115,32 @@ final class ActivityStoryTests: XCTestCase {
             event(3, kind: "usage", title: "Run summary", presentation: final),
         ])
         XCTAssertEqual(story.technical.map(\.id), [1])
-        guard case .receipt(let receipt) = story.blocks.last else {
+        guard case .receipt(let receipt, _) = story.blocks.last else {
             return XCTFail("expected trailing receipt, got \(String(describing: story.blocks.last))")
         }
         XCTAssertEqual(receipt.id, 3)
+    }
+
+    /// The provider's counter restarts each turn, so only the deltas add up to
+    /// what the run actually spent on reasoning.
+    func testReceiptTotalsThinkingTokensAcrossTurnResets() {
+        func tick(_ id: Int, _ total: Int, delta: Int) -> TaskEventSnapshot {
+            event(id, kind: "reasoning", title: "Thinking", detail: "~\(total) tokens so far",
+                  presentation: TaskEventPresentationSnapshot(type: "usage", tokensThinking: delta))
+        }
+        let story = ActivityStory.compose([
+            tick(1, 450, delta: 450),
+            tick(2, 472, delta: 22),
+            event(3, kind: "command", title: "Bash", detail: "ls"),
+            tick(4, 50, delta: 50),
+            tick(5, 74, delta: 24),
+            event(6, kind: "usage", title: "Run summary",
+                  presentation: TaskEventPresentationSnapshot(type: "usage", tokensOut: 900)),
+        ])
+        guard case .receipt(_, let thinking) = story.blocks.last else {
+            return XCTFail("expected trailing receipt, got \(String(describing: story.blocks.last))")
+        }
+        XCTAssertEqual(thinking, 546)
     }
 
     func testSignalsBreakChaptersAndKeepOrder() {

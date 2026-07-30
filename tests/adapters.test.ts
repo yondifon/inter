@@ -84,6 +84,8 @@ describe("CLI adapters", () => {
     expect(sessionIdFrom("opencode", { type: "step_start", sessionID: "ses_04bd" })).toBe("ses_04bd");
     expect(sessionIdFrom("claude", { type: "assistant" })).toBeUndefined();
     expect(sessionIdFrom("claude", { session_id: 42 })).toBeUndefined();
+    expect(sessionIdFrom("claude", { session_id: "   " })).toBeUndefined();
+    expect(sessionIdFrom("codex", { thread_id: " thread-1 " })).toBe("thread-1");
     expect(sessionIdFrom("antigravity", { session_id: "x" })).toBeUndefined();
   });
 });

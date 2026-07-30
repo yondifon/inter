@@ -1,0 +1,41 @@
+version = 1
+
+# Routing policy for this repo: pin each task class to a provider so routing
+# does not collapse onto zero-cost opencode catalog entries.
+
+[routes.mechanical]
+preference = "speed"
+min_quality = 2
+allow = [
+  { provider = "claude", model = "haiku" },
+  { provider = "codex", model = "*mini*" },
+]
+
+[routes.general]
+preference = "cost"
+min_quality = 3
+allow = [
+  { provider = "opencode", model = "opencode-go/*" },
+  { provider = "codex", model = "*mini*" },
+]
+
+[routes.context]
+preference = "quality"
+min_quality = 4
+allow = [
+  { provider = "claude", model = "sonnet" },
+]
+
+[routes.build]
+preference = "quality"
+min_quality = 5
+allow = [
+  { provider = "claude", model = "opus" },
+]
+
+[routes.reasoning]
+preference = "quality"
+min_quality = 5
+allow = [
+  { provider = "codex", model = "*" },
+]

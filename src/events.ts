@@ -12,6 +12,12 @@ export interface TaskEventView {
   presentation?: TaskEventPresentation;
   rawText?: string;
   createdAt: string;
+  /// Provider-issued id for the action this event describes. One tool call
+  /// arrives as several events — the agent's own echo, a pre-hook, a post-hook,
+  /// and the result — and every provider tags them with the same id: Claude's
+  /// `tool_use_id`, OpenCode's `callID`, Codex's `item.id`. Rows sharing one
+  /// carry one action, so the trace can fold them into a single line.
+  actionId?: string;
   /// Plumbing the trace folds away by default: token tickers, step boundaries,
   /// duplicate tool results, hook bookkeeping, quiet heartbeats.
   minor?: boolean;
@@ -31,6 +37,7 @@ export interface TaskEventPresentation {
   tokensIn?: number;
   tokensOut?: number;
   tokensCached?: number;
+  tokensThinking?: number;
   turns?: number;
   durationMs?: number;
   level?: "info" | "warning" | "error";
@@ -45,17 +52,24 @@ export function taskEventView(event: TaskEvent, provider: Profile["provider"]): 
   };
   const rawText = Object.keys(event.payload).length ? JSON.stringify(event.payload, null, 2) : undefined;
   if (!event.type.startsWith("agent.")) {
-    const detail = event.payload.stalled === true
-      ? `No agent event for ${Math.round(Number(event.payload.silentMs ?? 0) / 1_000)}s`
-      : event.type === "heartbeat"
-        ? `Running for ${Math.round(Number(event.payload.elapsedMs ?? 0) / 1_000)}s`
-        : firstString(event.payload.provider, event.payload.model);
+    const dropped = event.type === "event_dropped"
+      ? `${formatBytes(Number(event.payload.bytes ?? 0))} payload over the ${formatBytes(Number(event.payload.limit ?? 0))} line limit — one event skipped, the trace continues`
+      : undefined;
+    const detail = event.type === "session_captured"
+      ? firstString(event.payload.sessionId)
+      : dropped
+      ?? (event.payload.stalled === true
+        ? `No agent event for ${Math.round(Number(event.payload.silentMs ?? 0) / 1_000)}s`
+        : event.type === "heartbeat"
+          ? `Running for ${Math.round(Number(event.payload.elapsedMs ?? 0) / 1_000)}s`
+          : firstString(event.payload.provider, event.payload.model));
     return {
       ...base,
       kind: event.type === "failed" ? "error" : "lifecycle",
       phase: phase(event.state),
       title: lifecycleTitle(event.type),
       ...(event.payload.error ? { detail: String(event.payload.error) } : detail ? { detail } : {}),
+      ...(dropped ? { presentation: { type: "signal" as const, level: "warning" as const, text: dropped } } : {}),
       ...(rawText ? { rawText } : {}),
       ...(event.type === "heartbeat" && event.payload.stalled !== true ? { minor: true } : {}),
     };
@@ -67,16 +81,25 @@ export function taskEventView(event: TaskEvent, provider: Profile["provider"]): 
     const toolName = string(payload.tool_name) ?? string(payload.toolName);
     const input = object(payload.tool_input ?? payload.toolInput);
     const presentation = toolPresentation(toolName, input);
-    const detail = presentationDetail(presentation) ??
-      firstString(payload.message, payload.error, payload.agent_type);
+    const failed = hookName.includes("Failure");
+    const error = firstString(payload.error, object(payload.tool_response).error);
+    // On a failure the reason is the point of the row; the tool's own summary
+    // (a file path, a command) alone would say nothing about what went wrong.
+    const detail = failed
+      ? joinDetail(presentationDetail(presentation), error)
+      : presentationDetail(presentation) ??
+        firstString(payload.message, payload.error, payload.agent_type);
+    const actionId = firstString(payload.tool_use_id, payload.toolUseId);
     if (hookName.includes("ToolUse")) {
       return { ...base, kind: presentation?.type === "file" ? "file"
         : presentation?.type === "command" ? "command" : "tool",
-        phase: hookName.startsWith("Pre") ? "started" : hookName.includes("Failure") ? "failed" : "completed",
-        title: toolName ? toolTitle(toolName) : humanize(hookName), detail, presentation, rawText };
+        phase: hookName.startsWith("Pre") ? "started" : failed ? "failed" : "completed",
+        title: toolName ? toolTitle(toolName) : humanize(hookName), detail, presentation,
+        ...(actionId ? { actionId } : {}), rawText };
     }
-    if (hookName.includes("Failure")) {
-      return { ...base, kind: "error", phase: "failed", title: humanize(hookName), detail, rawText };
+    if (failed) {
+      return { ...base, kind: "error", phase: "failed", title: humanize(hookName), detail,
+        ...(actionId ? { actionId } : {}), rawText };
     }
     return { ...base, kind: hookName === "Notification" ? "message" : "lifecycle", phase: "info",
       title: humanize(hookName), detail, rawText };
@@ -103,16 +126,26 @@ export function taskEventView(event: TaskEvent, provider: Profile["provider"]): 
     subject.text, subject.thinking, subject.message, subject.command, subject.file_path, subject.path,
     input.filePath, input.file_path, input.path, state.output, payload.result,
   );
+  // Claude tags a tool_use block with `id` and its result with `tool_use_id`;
+  // OpenCode uses `callID` on the part; Codex reuses `item.id` across started
+  // and completed. Whichever the provider sent identifies one action.
+  const action = firstString(
+    subject.callID, subject.call_id, subject.tool_use_id, subject.toolUseId,
+    subject.id, payload.tool_use_id,
+  );
+  const actionId = action ? { actionId: action } : {};
 
   if (subjectType.includes("error") || status === "failed") {
     const nested = object(subject.error);
     return { ...base, kind: "error", phase: "failed", title: tool ? `${tool} failed` : "Agent error",
-      detail: detail ?? firstString(nested.message, object(nested.data).message, subject.error), rawText };
+      detail: detail ?? firstString(nested.message, object(nested.data).message, subject.error),
+      ...actionId, rawText };
   }
   // Tool results echo work the matching tool event already reported.
   if (subjectType.includes("tool_result")) {
-    return { ...base, kind: "raw", phase: "info", title: "Tool result",
-      detail: detail ?? blockText(subject.content), minor: true, rawText };
+    return { ...base, kind: "raw", phase: subject.is_error === true ? "failed" : "info",
+      title: "Tool result", detail: detail ?? blockText(subject.content),
+      ...actionId, minor: true, rawText };
   }
   // "Reasoning", not "Thinking": the trace collapses same-titled "Thinking"
   // ticker events into one pulse line, and prose must not be pulled into it.
@@ -124,15 +157,15 @@ export function taskEventView(event: TaskEvent, provider: Profile["provider"]): 
   }
   if (subjectType.includes("command") || normalizedTool === "bash" || normalizedTool === "run_command") {
     return { ...base, kind: "command", phase: statusPhase(status),
-      title: tool ?? "Command", detail, presentation, rawText };
+      title: tool ?? "Command", detail, presentation, ...actionId, rawText };
   }
   if (subjectType.includes("file") || ["read", "write", "edit"].includes(normalizedTool ?? "")) {
     return { ...base, kind: "file", phase: statusPhase(status),
-      title: tool ? toolTitle(tool) : "File change", detail, presentation, rawText };
+      title: tool ? toolTitle(tool) : "File change", detail, presentation, ...actionId, rawText };
   }
   if (subjectType.includes("tool")) {
     return { ...base, kind: "tool", phase: statusPhase(status),
-      title: tool ? toolTitle(tool) : "Tool call", detail, presentation, rawText };
+      title: tool ? toolTitle(tool) : "Tool call", detail, presentation, ...actionId, rawText };
   }
   if (subjectType.includes("usage")) {
     return { ...base, kind: "usage", phase: "info", title: "Usage", detail, rawText };
@@ -161,8 +194,13 @@ function knownAgentEvent(
     const subtype = string(payload.subtype);
     if (subtype === "thinking_tokens") {
       const tokens = Math.max(0, Number(payload.estimated_tokens ?? 0));
+      // The counter restarts each turn, so the run total is only recoverable by
+      // adding the deltas up. Carry it; the trace sums what it collects.
+      const delta = Math.max(0, Number(payload.estimated_tokens_delta ?? 0));
       return { ...base, kind: "reasoning", phase: "started", title: "Thinking",
-        detail: `~${formatCount(tokens)} tokens so far`, minor: true, ...raw };
+        detail: `~${formatCount(tokens)} tokens so far`,
+        ...(delta ? { presentation: { type: "usage" as const, tokensThinking: delta } } : {}),
+        minor: true, ...raw };
     }
     if (subtype === "init") {
       const tools = Array.isArray(payload.tools) ? payload.tools.length : 0;
@@ -324,6 +362,10 @@ function formatCount(value: number): string {
   return String(Math.round(value));
 }
 
+function formatBytes(value: number): string {
+  return value >= 1_024 ? `${Math.round(value / 1_024)} KB` : `${value} B`;
+}
+
 function formatCost(value: number): string {
   return value >= 0.01 || value === 0 ? `$${value.toFixed(2)}` : `$${value.toFixed(4)}`;
 }
@@ -341,7 +383,8 @@ function lifecycleTitle(type: string): string {
   return ({ created: "Task queued", started: "Worker started", completed: "Task completed",
     failed: "Task failed", needs_input: "Worker needs input", answered: "Question answered",
     blocked: "Task blocked", cancelled: "Task cancelled", worker_spawned: "Worker spawned",
-    events_truncated: "Event capture limit reached" } as Record<string, string>)[type] ?? humanize(type);
+    events_truncated: "Event capture limit reached",
+    event_dropped: "Large event skipped" } as Record<string, string>)[type] ?? humanize(type);
 }
 
 function phase(state: TaskState): TaskEventView["phase"] {
@@ -596,7 +639,9 @@ function compactReplacement(oldLine: string, newLine: string): string {
 function shortPath(value?: string): string | undefined {
   if (!value) return undefined;
   const parts = value.split("/").filter(Boolean);
-  return parts.length > 3 ? parts.slice(-3).join("/") : value;
+  // Mark the elision: `http/html/csrf.rs` next to a whole `src/http/mod.rs`
+  // reads as two different trees rather than one truncated path.
+  return parts.length > 3 ? `…/${parts.slice(-3).join("/")}` : value;
 }
 
 function joinDetail(...parts: Array<string | undefined>): string | undefined {

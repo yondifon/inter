@@ -43,6 +43,9 @@ struct TaskSnapshot: Codable, Identifiable, Hashable {
     var error: String?
     var question: String?
     var parentTaskId: String?
+    /// Provider-native worker session. Copy this into the provider CLI when a
+    /// task must be resumed outside Inter.
+    var sessionId: String?
 }
 
 struct TaskEventSnapshot: Codable, Identifiable, Hashable {
@@ -58,6 +61,9 @@ struct TaskEventSnapshot: Codable, Identifiable, Hashable {
     var createdAt: String
     /// Broker-declared plumbing: folded into the technical list by default.
     var minor: Bool?
+    /// Provider id shared by every event describing one action — the agent's
+    /// echo, its hooks, its result. Rows carrying the same one are one action.
+    var actionId: String?
 }
 
 struct TaskEventPresentationSnapshot: Codable, Hashable {
@@ -74,6 +80,7 @@ struct TaskEventPresentationSnapshot: Codable, Hashable {
     var tokensIn: Int?
     var tokensOut: Int?
     var tokensCached: Int?
+    var tokensThinking: Int?
     var turns: Int?
     var durationMs: Int?
     var level: String?

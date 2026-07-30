@@ -237,7 +237,7 @@ async function createMcpServer(): Promise<McpServer> {
     await routeModel(prompt, { modelHint, preference, cwd }),
   ));
   server.registerTool("inspect", {
-    description: "Read one delegated task immediately. Prefer wait when work is still running.",
+    description: "Read one delegated task, including its provider-native resume sessionId when captured. Prefer wait when work is still running.",
     inputSchema: { taskId: z.string() },
   }, async ({ taskId }) => {
     const task = getTask(taskId);
@@ -245,7 +245,7 @@ async function createMcpServer(): Promise<McpServer> {
     return result(task);
   });
   server.registerTool("wait", {
-    description: "Block until meaningful progress or attention. Returns concise events since afterCursor, heartbeat progress, and current task snapshots.",
+    description: "Block until meaningful progress or attention. Returns events, progress, and task snapshots with provider-native sessionId when captured.",
     inputSchema: {
       taskIds: z.array(z.string()).min(1).max(8),
       timeoutMs: z.number().int().min(1).max(300_000).default(30_000),
@@ -259,7 +259,7 @@ async function createMcpServer(): Promise<McpServer> {
     inputSchema: {},
   }, async () => result({ status: "ok", version: VERSION, mcpContractVersion: MCP_CONTRACT_VERSION }));
   server.registerTool("tasks", {
-    description: "List concise delegated task summaries. Use inspect for full prompt and output.",
+    description: "List concise task summaries, including provider-native sessionId when captured. Use inspect for full prompt and output.",
     inputSchema: {
       limit: z.number().int().min(1).max(100).default(20),
       state: taskStateSchema.optional(),
@@ -268,7 +268,7 @@ async function createMcpServer(): Promise<McpServer> {
     },
   }, async (query) => result(listTaskSummaries(query)));
   server.registerTool("reply", {
-    description: "Answer a needs_input question and return a linked continuation task. Wait on the returned task ID.",
+    description: "Answer a needs_input question and return a linked continuation task, including sessionId once captured. Wait on the returned task ID.",
     inputSchema: { taskId: z.string(), answer: z.string().min(1) },
   }, async ({ taskId, answer }) => result(startedTask(await reply(taskId, answer))));
   server.registerTool("cancel", {

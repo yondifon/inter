@@ -86,6 +86,7 @@ export interface TaskSummary {
   question?: string;
   parentTaskId?: string;
   childTaskId?: string;
+  sessionId?: string;
   completion?: TaskCompletion;
 }
 

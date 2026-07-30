@@ -132,6 +132,11 @@ struct TaskDetail: View {
                 MetadataLabel(icon: "person.crop.circle", text: workerLabel)
                 MetadataLabel(icon: "cpu", text: task.model)
                 MetadataLabel(icon: "number", text: String(task.id.prefix(8)))
+                if let sessionId = task.sessionId?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !sessionId.isEmpty {
+                    MetadataLabel(icon: "terminal", text: "Session \(sessionId.prefix(8))")
+                    CopyIconButton(text: sessionId, label: "Copy provider session ID")
+                }
                 Spacer()
                 Text(task.cwd).scaledFont(.caption, design: .monospaced).foregroundStyle(.secondary)
                     .lineLimit(1).truncationMode(.middle)
@@ -292,8 +297,8 @@ private struct ActivityBlockView: View {
             ActivityReasoningRow(pulse: pulse)
         case .signal(let event):
             ActivitySignalCard(event: event)
-        case .receipt(let event):
-            ActivityReceiptCard(event: event)
+        case .receipt(let event, let thinkingTokens):
+            ActivityReceiptCard(event: event, thinkingTokens: thinkingTokens)
         }
     }
 }
@@ -503,6 +508,9 @@ private struct ActivitySignalCard: View {
 /// a JSON blob. Denials surface here because this is where they were buried.
 private struct ActivityReceiptCard: View {
     let event: TaskEventSnapshot
+    /// Summed from the per-turn thinking counters; the receipt itself never
+    /// carries a reasoning figure.
+    var thinkingTokens = 0
     @State private var showingRawDetails = false
 
     var body: some View {
@@ -563,9 +571,10 @@ private struct ActivityReceiptCard: View {
         if let turns = presentation.turns { values.append((String(turns), turns == 1 ? "turn" : "turns")) }
         if let duration = presentation.durationMs { values.append((ActivityFormat.duration(duration), "duration")) }
         if let out = presentation.tokensOut { values.append((ActivityFormat.count(out), "tokens out")) }
+        if thinkingTokens > 0 { values.append(("~\(ActivityFormat.count(thinkingTokens))", "reasoning")) }
         if let input = presentation.tokensIn { values.append((ActivityFormat.count(input), "tokens in")) }
         if let cached = presentation.tokensCached { values.append((ActivityFormat.count(cached), "cached")) }
-        return values.isEmpty ? [(event.detail ?? "—", "summary")] : Array(values.prefix(5))
+        return values.isEmpty ? [(event.detail ?? "—", "summary")] : Array(values.prefix(6))
     }
 }
 

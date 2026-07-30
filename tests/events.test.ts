@@ -508,4 +508,80 @@ describe("task event views", () => {
     expect(stalled.minor).toBeUndefined();
     expect(stalled.detail).toBe("No agent event for 109s");
   });
+
+  test("carries the thinking-token delta so a run total can be summed", () => {
+    const view = taskEventView({
+      id: 41, taskId: "task", type: "agent.system", state: "running",
+      payload: {
+        type: "system", subtype: "thinking_tokens",
+        estimated_tokens: 472, estimated_tokens_delta: 22,
+      },
+      createdAt: "now",
+    }, "claude");
+    expect(view.title).toBe("Thinking");
+    expect(view.detail).toBe("~472 tokens so far");
+    expect(view.presentation).toEqual({ type: "usage", tokensThinking: 22 });
+  });
+
+  test("keeps the reason on a failed tool hook", () => {
+    const view = taskEventView({
+      id: 36, taskId: "task", type: "agent.hook", state: "running",
+      payload: {
+        hook_event_name: "PostToolUseFailure",
+        tool_name: "Read",
+        tool_input: { file_path: "/repo/AGENTS.md" },
+        tool_use_id: "toolu_1",
+        error: "File does not exist.",
+      },
+      createdAt: "now",
+    }, "claude");
+    expect(view.phase).toBe("failed");
+    expect(view.detail).toBe("/repo/AGENTS.md · File does not exist.");
+    expect(view.actionId).toBe("toolu_1");
+  });
+
+  test("tags each provider's events with the id that pairs them", () => {
+    const claude = taskEventView({
+      id: 37, taskId: "task", type: "agent.assistant", state: "running",
+      payload: {
+        type: "assistant",
+        message: { content: [{ type: "tool_use", id: "toolu_1", name: "Read", input: { file_path: "a.ts" } }] },
+      },
+      createdAt: "now",
+    }, "claude");
+    const opencode = taskEventView({
+      id: 38, taskId: "task", type: "agent.tool_use", state: "running",
+      payload: {
+        type: "tool_use",
+        part: { type: "tool", tool: "read", callID: "call_9", id: "prt_9",
+          state: { status: "completed", input: { filePath: "a.ts" } } },
+      },
+      createdAt: "now",
+    }, "opencode");
+    const codex = taskEventView({
+      id: 39, taskId: "task", type: "agent.item.completed", state: "running",
+      payload: {
+        type: "item.completed",
+        item: { id: "item_2", type: "command_execution", command: "ls", status: "completed" },
+      },
+      createdAt: "now",
+    }, "codex");
+    expect(claude.actionId).toBe("toolu_1");
+    // The call id, not the part id: the part changes between started and done.
+    expect(opencode.actionId).toBe("call_9");
+    expect(codex.actionId).toBe("item_2");
+  });
+
+  test("reports a skipped oversized line without ending the trace", () => {
+    const view = taskEventView({
+      id: 40, taskId: "task", type: "event_dropped", state: "running",
+      payload: { bytes: 131_072, limit: 65_536 }, createdAt: "now",
+    }, "claude");
+    expect(view.title).toBe("Large event skipped");
+    expect(view.presentation).toEqual({
+      type: "signal",
+      level: "warning",
+      text: "128 KB payload over the 64 KB line limit — one event skipped, the trace continues",
+    });
+  });
 });

@@ -3,6 +3,7 @@ import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { Database } from "bun:sqlite";
 import { discoverProfiles } from "./profile-discovery";
+import { sessionIdFrom } from "./adapters";
 import type {
   BrokerSettings,
   Profile,
@@ -182,8 +183,25 @@ export class StateStore {
     this.addTaskEvent(task.id, "created", task.state, {});
   }
 
-  setTaskSessionId(id: string, sessionId: string): void {
-    this.database.query("UPDATE tasks SET session_id = ? WHERE id = ?").run(sessionId, id);
+  captureTaskSessionId(id: string, provider: Profile["provider"], sessionId: string): boolean {
+    const value = sessionId.trim();
+    if (!value) return false;
+    let captured = false;
+    this.transaction(() => {
+      const row = this.database.query<{ state: TaskState }, [string]>(`
+        SELECT state FROM tasks
+        WHERE id = ? AND COALESCE(TRIM(session_id), '') = ''
+      `).get(id);
+      if (!row) return;
+      const changed = this.database.query(`
+        UPDATE tasks SET session_id = ?
+        WHERE id = ? AND COALESCE(TRIM(session_id), '') = ''
+      `).run(value, id);
+      if (changed.changes !== 1) return;
+      this.addTaskEvent(id, "session_captured", row.state, { provider, sessionId: value });
+      captured = true;
+    });
+    return captured;
   }
 
   saveTask(
@@ -574,6 +592,43 @@ export class StateStore {
       INSERT OR IGNORE INTO schema_migrations(version, name)
       VALUES (4, 'task worker session ids')
     `).run();
+    const backfilled = this.database.query<{ version: number }, []>(
+      "SELECT version FROM schema_migrations WHERE version = 5",
+    ).get();
+    if (!backfilled) {
+      this.backfillTaskSessionIds();
+      this.database.query(`
+        INSERT INTO schema_migrations(version, name)
+        VALUES (5, 'backfill task worker session ids')
+      `).run();
+    }
+  }
+
+  private backfillTaskSessionIds(): void {
+    const rows = this.database.query<{
+      task_id: string;
+      provider: Profile["provider"];
+      payload: string;
+    }, []>(`
+      SELECT tasks.id AS task_id, profiles.provider, task_events.payload
+      FROM tasks
+      JOIN profiles ON profiles.id = tasks.profile_id
+      JOIN task_events ON task_events.task_id = tasks.id
+      WHERE COALESCE(TRIM(tasks.session_id), '') = ''
+      ORDER BY tasks.id, task_events.id
+    `).all();
+    const repaired = new Set<string>();
+    for (const row of rows) {
+      if (repaired.has(row.task_id)) continue;
+      try {
+        const payload = JSON.parse(row.payload) as unknown;
+        if (!payload || typeof payload !== "object" || Array.isArray(payload)) continue;
+        const sessionId = sessionIdFrom(row.provider, payload as Record<string, unknown>);
+        if (sessionId && this.captureTaskSessionId(row.task_id, row.provider, sessionId)) {
+          repaired.add(row.task_id);
+        }
+      } catch {}
+    }
   }
 
   private migrateTaskContract(): void {
@@ -756,6 +811,7 @@ function taskSummaryFromRow(row: TaskRow): TaskSummary {
     ...(task.question ? { question: task.question } : {}),
     ...(task.parentTaskId ? { parentTaskId: task.parentTaskId } : {}),
     ...(task.childTaskId ? { childTaskId: task.childTaskId } : {}),
+    ...(task.sessionId ? { sessionId: task.sessionId } : {}),
     ...(task.completion ? { completion: task.completion } : {}),
   };
 }

@@ -8,6 +8,7 @@ export const MCP_INSTRUCTIONS = [
   "Reuse approval while destination and scope stay within the user's stated grant.",
   "After approval, call delegate with the selected profile, model, and exact read/write scope; Inter enforces that scope.",
   "Pass each returned cursor to wait; wait returns meaningful events and heartbeat progress instead of raw provider noise.",
+  "Task results expose sessionId once known; it is the provider-native ID for manual console resume.",
   "Write prompt as structured markdown — Goal, Context, Scope with exact paths, numbered Instructions, Guardrails, Output Format — because workers lose scope and priority in one flattened paragraph.",
   "If a host policy blocks delegation, ask the same concise consent question; never show the raw policy rejection.",
   "Workers already know the needs_input protocol. Answer reversible in-scope questions yourself; ask the user about product intent, secrets, destructive actions, or new authority, then reply and wait on the linked task.",
@@ -22,6 +23,7 @@ export const DELEGATE_DESCRIPTION = [
   "The scope field is required and enforced relative to cwd; use literal paths or directory/** rules.",
   "Send prompt as structured markdown (Goal, Context, Scope with exact paths, numbered Instructions, Guardrails, Output Format), never one flattened paragraph.",
   "When fanning out several tasks for one goal, pass the first task's id as parent on the rest so the switchboard groups the batch.",
+  "The returned sessionId, when present, is the provider-native resume ID.",
 ].join(" ");
 
 export function dynamicDelegateDescription(profile: Profile): string {

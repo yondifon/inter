@@ -18,12 +18,19 @@ enum ActivityStory {
         let seconds: Int?
     }
 
-    static func compose(_ events: [TaskEventSnapshot]) -> Composition {
+    static func compose(_ rawEvents: [TaskEventSnapshot]) -> Composition {
+        let events = foldActions(rawEvents)
         var blocks: [ActivityBlock] = []
         var technical: [TaskEventSnapshot] = []
         var chapter: [TaskEventSnapshot] = []
         var pulse: [TaskEventSnapshot] = []
         let receiptID = events.last { $0.kind == "usage" }?.id
+        let stallID = events.last { isStalledHeartbeat($0) }?.id
+        // Reasoning tokens are only ever reported as a per-turn counter that
+        // restarts, so the run total has to be accumulated from the deltas and
+        // stamped on the receipt once every pulse has been counted.
+        var thinkingTokens = 0
+        var receiptIndex: Int?
 
         func flushChapter() {
             guard !chapter.isEmpty else { return }
@@ -32,6 +39,7 @@ enum ActivityStory {
         }
         func flushPulse() {
             guard let first = pulse.first, let last = pulse.last else { return }
+            thinkingTokens += pulse.reduce(0) { $0 + ($1.presentation?.tokensThinking ?? 0) }
             blocks.append(.reasoning(ReasoningPulse(
                 id: first.id,
                 detail: (last.detail ?? "Thinking").replacingOccurrences(of: " so far", with: ""),
@@ -48,12 +56,26 @@ enum ActivityStory {
                 continue
             }
             flushPulse()
+            if isStalledHeartbeat(event) {
+                // A stall is a live condition, not history. Only the newest
+                // tick earns a strip; the earlier ones repeat the same fact
+                // with a smaller number, and a stall the worker already broke
+                // out of is not worth interrupting the trace for.
+                if event.id == stallID {
+                    flushChapter()
+                    blocks.append(.signal(event))
+                } else {
+                    technical.append(event)
+                }
+                continue
+            }
             if event.kind == "usage" {
                 // Only the final usage event settles the run; earlier per-turn
                 // receipts repeat the same shape with smaller numbers.
                 if event.id == receiptID {
                     flushChapter()
-                    blocks.append(.receipt(event))
+                    receiptIndex = blocks.count
+                    blocks.append(.receipt(event, thinkingTokens: 0))
                 } else {
                     technical.append(event)
                 }
@@ -79,6 +101,9 @@ enum ActivityStory {
         }
         flushPulse()
         flushChapter()
+        if let index = receiptIndex, case .receipt(let event, _) = blocks[index], thinkingTokens > 0 {
+            blocks[index] = .receipt(event, thinkingTokens: thinkingTokens)
+        }
         return Composition(blocks: blocks, technical: technical)
     }
 
@@ -103,9 +128,52 @@ enum ActivityStory {
     /// Two events describe the same action when the row's identity — kind,
     /// title, and detail line — is identical. Phase, timestamp, and settled
     /// presentation state (an exit code arriving on the later event) may
-    /// differ; the later event wins.
+    /// differ; the later event wins. Used only for providers that send no
+    /// action id; `foldActions` handles the rest.
     private static func sameShape(_ a: TaskEventSnapshot, _ b: TaskEventSnapshot) -> Bool {
-        a.kind == b.kind && a.title == b.title && a.detail == b.detail
+        a.actionId == nil && b.actionId == nil
+            && a.kind == b.kind && a.title == b.title && a.detail == b.detail
+    }
+
+    /// One tool call reaches the trace up to four times: the agent's own echo
+    /// of the call, a pre-hook, a post-hook, and the result — and the calls
+    /// interleave, so adjacency alone never catches them. Every provider tags
+    /// the run with one id, so fold each id to where it first appeared and
+    /// carry the settled event forward: the later one knows the exit state.
+    static func foldActions(_ events: [TaskEventSnapshot]) -> [TaskEventSnapshot] {
+        var slot: [String: Int] = [:]
+        var folded: [TaskEventSnapshot] = []
+        for event in events {
+            guard let action = event.actionId, !action.isEmpty, !isTechnical(event) else {
+                folded.append(event)
+                continue
+            }
+            if let index = slot[action] {
+                folded[index] = settle(folded[index], with: event)
+            } else {
+                slot[action] = folded.count
+                folded.append(event)
+            }
+        }
+        return folded
+    }
+
+    /// The row keeps the first event's identity and clock — when the action
+    /// started — and takes everything the later event knows better. A failure
+    /// seen anywhere in the run is the outcome, even if a hook reports after
+    /// it.
+    private static func settle(
+        _ first: TaskEventSnapshot,
+        with later: TaskEventSnapshot
+    ) -> TaskEventSnapshot {
+        var merged = later
+        merged.id = first.id
+        merged.createdAt = first.createdAt
+        if merged.detail == nil { merged.detail = first.detail }
+        if merged.presentation == nil { merged.presentation = first.presentation }
+        if merged.rawText == nil { merged.rawText = first.rawText }
+        if first.phase == "failed" { merged.phase = "failed" }
+        return merged
     }
 
     /// Plumbing worth keeping reachable but not worth a row. The broker marks
@@ -136,14 +204,14 @@ enum ActivityBlock: Identifiable {
     case chapter(id: Int, events: [TaskEventSnapshot])
     case reasoning(ActivityStory.ReasoningPulse)
     case signal(TaskEventSnapshot)
-    case receipt(TaskEventSnapshot)
+    case receipt(TaskEventSnapshot, thinkingTokens: Int)
 
     var id: Int {
         switch self {
         case .chapter(let id, _): id
         case .reasoning(let pulse): pulse.id
         case .signal(let event): event.id
-        case .receipt(let event): event.id
+        case .receipt(let event, _): event.id
         }
     }
 }

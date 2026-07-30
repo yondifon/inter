@@ -90,8 +90,12 @@ describe("SQLite state store", () => {
     const saved = task();
     store.createTask(saved);
     expect(store.getTask(saved.id)?.sessionId).toBeUndefined();
-    store.setTaskSessionId(saved.id, "sess-123");
+    expect(store.captureTaskSessionId(saved.id, "claude", "sess-123")).toBe(true);
+    expect(store.captureTaskSessionId(saved.id, "claude", "sess-other")).toBe(false);
     expect(store.getTask(saved.id)?.sessionId).toBe("sess-123");
+    expect(store.listTaskSummaries()[0]?.sessionId).toBe("sess-123");
+    expect(store.listTaskEvents(saved.id).filter(({ type }) => type === "session_captured"))
+      .toHaveLength(1);
     store.close();
 
     // Simulate a database created before the session_id migration.
@@ -102,9 +106,50 @@ describe("SQLite state store", () => {
 
     const reopened = new StateStore({ path: db, seedProfiles: [profile] });
     expect(reopened.getTask(saved.id)?.sessionId).toBeUndefined();
-    reopened.setTaskSessionId(saved.id, "sess-456");
+    reopened.captureTaskSessionId(saved.id, "claude", "sess-456");
     expect(reopened.getTask(saved.id)?.sessionId).toBe("sess-456");
     reopened.close();
+  });
+
+  test("backfills earliest native session ids from historical provider events", () => {
+    const { db } = paths();
+    const profiles: Profile[] = [
+      profile,
+      { ...profile, id: "codex", provider: "codex" },
+      { ...profile, id: "opencode", provider: "opencode" },
+      { ...profile, id: "antigravity", provider: "antigravity" },
+    ];
+    const store = new StateStore({ path: db, seedProfiles: profiles });
+    const cases = [
+      ["claude-work", { session_id: 12 }, { session_id: "claude-first" }, { session_id: "claude-later" }],
+      ["codex", { thread_id: null }, { thread_id: "codex-first" }, { thread_id: "codex-later" }],
+      ["opencode", { sessionID: {} }, { sessionID: "opencode-first" }, { sessionID: "opencode-later" }],
+      ["antigravity", { session_id: "unsupported" }, { session_id: "still-unsupported" }],
+    ] as const;
+    const ids: Record<string, string> = {};
+    for (const [profileId, ...payloads] of cases) {
+      const saved = { ...task(), profileId };
+      ids[profileId] = saved.id;
+      store.createTask(saved);
+      for (const payload of payloads) {
+        store.appendTaskEvent(saved.id, "agent.event", saved.state, payload);
+      }
+    }
+    store.close();
+    const raw = new Database(db);
+    raw.exec("DELETE FROM schema_migrations WHERE version = 5");
+    raw.close();
+
+    const repaired = new StateStore({ path: db, seedProfiles: profiles });
+    expect(repaired.getTask(ids["claude-work"]!)?.sessionId).toBe("claude-first");
+    expect(repaired.getTask(ids.codex!)?.sessionId).toBe("codex-first");
+    expect(repaired.getTask(ids.opencode!)?.sessionId).toBe("opencode-first");
+    expect(repaired.getTask(ids.antigravity!)?.sessionId).toBeUndefined();
+    for (const profileId of ["claude-work", "codex", "opencode"]) {
+      expect(repaired.listTaskEvents(ids[profileId]!)
+        .filter(({ type }) => type === "session_captured")).toHaveLength(1);
+    }
+    repaired.close();
   });
 
   test("lists no tasks when empty and orders tasks by latest update", () => {

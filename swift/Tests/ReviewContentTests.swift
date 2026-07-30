@@ -68,6 +68,26 @@ final class ReviewContentTests: XCTestCase {
         )
     }
 
+    func testTaskSnapshotDecodesWithAndWithoutSessionId() throws {
+        let withoutSession = """
+        {"id":"t","profileId":"p","model":"m","prompt":"x","cwd":"/tmp","state":"running",
+        "createdAt":"2026-07-29T00:00:00Z","updatedAt":"2026-07-29T00:00:00Z","output":""}
+        """
+        let withSession = """
+        {"id":"t","profileId":"p","model":"m","prompt":"x","cwd":"/tmp","state":"running",
+        "createdAt":"2026-07-29T00:00:00Z","updatedAt":"2026-07-29T00:00:00Z","output":"",
+        "sessionId":"provider-native"}
+        """
+        let decoder = JSONDecoder()
+        XCTAssertNil(
+            try decoder.decode(TaskSnapshot.self, from: Data(withoutSession.utf8)).sessionId
+        )
+        XCTAssertEqual(
+            try decoder.decode(TaskSnapshot.self, from: Data(withSession.utf8)).sessionId,
+            "provider-native"
+        )
+    }
+
     private func technicalIDs(_ event: TaskEventSnapshot) -> [Int] {
         ActivityStory.compose([event]).technical.map(\.id)
     }

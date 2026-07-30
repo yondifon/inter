@@ -72,7 +72,9 @@ export function sessionIdFrom(provider: Provider, event: Record<string, unknown>
     : provider === "codex" ? event.thread_id
     : provider === "opencode" ? event.sessionID
     : undefined;
-  return typeof value === "string" && value.length > 0 ? value : undefined;
+  if (typeof value !== "string") return undefined;
+  const sessionId = value.trim();
+  return sessionId.length > 0 ? sessionId : undefined;
 }
 
 function claudeHookSettings(url: string): string {
