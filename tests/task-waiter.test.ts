@@ -169,6 +169,26 @@ describe("TaskWaiter", () => {
     }
   });
 
+  test("returns a captured provider session id as progress", async () => {
+    const { reader, writer } = stores();
+    try {
+      const work = task("session");
+      writer.createTask(work);
+      const afterCursor = writer.latestTaskEventId([work.id], true);
+      const waiting = storeWaiter(reader).wait([work.id], 2_000, undefined, afterCursor);
+
+      writer.captureTaskSessionId(work.id, profile.provider, "provider-session");
+
+      const result = await waiting;
+      expect(result.reason).toBe("progress");
+      expect(result.tasks[0]?.sessionId).toBe("provider-session");
+      expect(result.cursor).toBeGreaterThan(afterCursor);
+    } finally {
+      reader.close();
+      writer.close();
+    }
+  });
+
   test("does not wake on provider system noise", async () => {
     const { reader, writer } = stores();
     try {

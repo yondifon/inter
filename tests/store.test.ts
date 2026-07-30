@@ -94,8 +94,13 @@ describe("SQLite state store", () => {
     expect(store.captureTaskSessionId(saved.id, "claude", "sess-other")).toBe(false);
     expect(store.getTask(saved.id)?.sessionId).toBe("sess-123");
     expect(store.listTaskSummaries()[0]?.sessionId).toBe("sess-123");
-    expect(store.listTaskEvents(saved.id).filter(({ type }) => type === "session_captured"))
-      .toHaveLength(1);
+    const sessionEvents = store.listTaskEvents(saved.id)
+      .filter(({ type }) => type === "session_captured");
+    expect(sessionEvents).toHaveLength(1);
+    expect(sessionEvents[0]?.payload).toEqual({
+      provider: "claude",
+      sessionId: "sess-123",
+    });
     store.close();
 
     // Simulate a database created before the session_id migration.
@@ -135,6 +140,12 @@ describe("SQLite state store", () => {
         store.appendTaskEvent(saved.id, "agent.event", saved.state, payload);
       }
     }
+    const existing = task();
+    store.createTask(existing);
+    store.appendTaskEvent(existing.id, "agent.system", existing.state, {
+      session_id: "historical-id",
+    });
+    store.captureTaskSessionId(existing.id, "claude", "keep-existing");
     store.close();
     const raw = new Database(db);
     raw.exec("DELETE FROM schema_migrations WHERE version = 5");
@@ -145,6 +156,7 @@ describe("SQLite state store", () => {
     expect(repaired.getTask(ids.codex!)?.sessionId).toBe("codex-first");
     expect(repaired.getTask(ids.opencode!)?.sessionId).toBe("opencode-first");
     expect(repaired.getTask(ids.antigravity!)?.sessionId).toBeUndefined();
+    expect(repaired.getTask(existing.id)?.sessionId).toBe("keep-existing");
     for (const profileId of ["claude-work", "codex", "opencode"]) {
       expect(repaired.listTaskEvents(ids[profileId]!)
         .filter(({ type }) => type === "session_captured")).toHaveLength(1);

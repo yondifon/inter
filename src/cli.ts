@@ -27,7 +27,7 @@ import { DELEGATE_DESCRIPTION, MCP_INSTRUCTIONS, dynamicDelegateDescription } fr
 
 const port = Number(process.env.INTER_PORT ?? 7331);
 const VERSION = "0.3.0";
-const MCP_CONTRACT_VERSION = 4;
+const MCP_CONTRACT_VERSION = 5;
 const scopeSchema = z.object({
   read: z.array(z.string()).max(200),
   write: z.array(z.string()).max(200),
