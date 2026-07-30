@@ -8,7 +8,7 @@ import { loadConfig, profileEnv } from "./config";
 import { taskEventView } from "./events";
 import { continuationPrompt, interpretWorkerOutcome, needsInputQuestion, workerPrompt } from "./task-protocol";
 import { normalizeTaskScope, sandboxedCommand } from "./task-scope";
-import { stateStore, type TaskListQuery } from "./store";
+import { stateStore, type StateStore, type TaskListQuery } from "./store";
 import { TaskWaiter, type TaskWaitResult } from "./task-waiter";
 import type { Profile, Task, TaskScope, TaskSummary } from "./types";
 
@@ -263,18 +263,7 @@ async function runTask(task: Task, profile: Profile): Promise<void> {
       completion: outcome.completion,
     }, ["running"]);
     if (!persisted) return;
-    if (outcome.state === "completed") stateStore().clearProfileFailure(task.profileId);
-    if (outcome.state === "failed" && (
-      outcome.completion.code === "auth" ||
-      outcome.completion.code === "billing" ||
-      outcome.completion.code === "rate_limit"
-    )) {
-      stateStore().recordProfileFailure(
-        task.profileId,
-        outcome.completion.code,
-        outcome.completion.reason ?? outcome.error ?? "provider failure",
-      );
-    }
+    recordProfileTaskOutcome(stateStore(), task.profileId, outcome);
   } catch (error) {
     if (!active?.cancelled && stateStore().getTask(task.id)?.state !== "cancelled") {
       const message = String(error);
@@ -291,6 +280,25 @@ async function runTask(task: Task, profile: Profile): Promise<void> {
     activeWorkers.delete(task.id);
     if (scratchDir) rmSync(scratchDir, { recursive: true, force: true });
   }
+}
+
+export function recordProfileTaskOutcome(
+  store: Pick<StateStore, "clearProfileFailure" | "recordProfileFailure">,
+  profileId: string,
+  outcome: ReturnType<typeof interpretWorkerOutcome>,
+): void {
+  if (outcome.state === "completed") {
+    store.clearProfileFailure(profileId);
+    return;
+  }
+  if (outcome.state !== "failed") return;
+  const { code } = outcome.completion;
+  if (code !== "auth" && code !== "billing" && code !== "rate_limit") return;
+  store.recordProfileFailure(
+    profileId,
+    code,
+    outcome.completion.reason ?? outcome.error ?? "provider failure",
+  );
 }
 
 async function readStream(

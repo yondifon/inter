@@ -17,6 +17,7 @@ import {
 } from "./tasks";
 import { listModels } from "./models";
 import { routeModel } from "./model-router";
+import { listProfileStatuses } from "./profile-status";
 import { stateStore } from "./store";
 import type { Profile, Provider, Task } from "./types";
 import { dynamicProfileTools } from "./dynamic-tools";
@@ -26,7 +27,7 @@ import { DELEGATE_DESCRIPTION, MCP_INSTRUCTIONS, dynamicDelegateDescription } fr
 
 const port = Number(process.env.INTER_PORT ?? 7331);
 const VERSION = "0.3.0";
-const MCP_CONTRACT_VERSION = 3;
+const MCP_CONTRACT_VERSION = 4;
 const scopeSchema = z.object({
   read: z.array(z.string()).max(200),
   write: z.array(z.string()).max(200),
@@ -216,7 +217,7 @@ async function createMcpServer(): Promise<McpServer> {
       const task = await delegate(profile, prompt, cwd, model, parent, { scope, allowQuestions, timeoutMs });
       return result(startedTask(task));
     }
-    const selection = await routeModel(prompt, { preference, modelHint: model });
+    const selection = await routeModel(prompt, { preference, modelHint: model, cwd });
     const task = await delegate(selection.profileId, prompt, cwd, selection.model, parent, {
       scope,
       allowQuestions,
@@ -230,9 +231,10 @@ async function createMcpServer(): Promise<McpServer> {
       prompt: z.string().min(1).max(64_000),
       modelHint: z.string().min(1).max(200).optional(),
       preference: z.enum(["balanced", "quality", "cost", "speed"]).optional(),
+      cwd: z.string().min(1).optional(),
     },
-  }, async ({ prompt, modelHint, preference }) => result(
-    await routeModel(prompt, { modelHint, preference }),
+  }, async ({ prompt, modelHint, preference, cwd }) => result(
+    await routeModel(prompt, { modelHint, preference, cwd }),
   ));
   server.registerTool("inspect", {
     description: "Read one delegated task immediately. Prefer wait when work is still running.",
@@ -288,6 +290,15 @@ async function createMcpServer(): Promise<McpServer> {
       refresh: z.boolean().optional(),
     },
   }, async (query) => result(await listModels(query)));
+  server.registerTool("status", {
+    description: "Report normalized profile/model availability. Refresh uses safe catalog checks only and never sends a generation prompt.",
+    inputSchema: {
+      profile: z.string().optional(),
+      model: z.string().min(1).max(200).optional(),
+      provider: z.enum(["claude", "codex", "opencode", "antigravity"]).optional(),
+      refresh: z.boolean().optional(),
+    },
+  }, async (query) => result(await listProfileStatuses(query)));
   if (stateStore().getSettings().dynamicProfileTools) {
     for (const { name, profile } of dynamicProfileTools((await loadConfig()).profiles)) {
       server.registerTool(name, {

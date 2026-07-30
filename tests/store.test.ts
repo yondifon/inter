@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Database } from "bun:sqlite";
@@ -24,7 +24,7 @@ const profile: Profile = {
 function paths() {
   const root = mkdtempSync(join(tmpdir(), "inter-store-"));
   roots.push(root);
-  return { root, db: join(root, "inter.db"), legacy: join(root, "inter.config.json") };
+  return { root, db: join(root, "inter.db") };
 }
 
 function task(state: Task["state"] = "queued"): Task {
@@ -45,22 +45,22 @@ function task(state: Task["state"] = "queued"): Task {
 }
 
 describe("SQLite state store", () => {
-  test("imports legacy profiles once and preserves deliberate deletion", () => {
-    const { db, legacy } = paths();
-    writeFileSync(legacy, JSON.stringify({ profiles: [profile] }));
-    const first = new StateStore({ path: db, legacyConfigPath: legacy, seedProfiles: [] });
-    expect(first.listProfiles()).toEqual([profile]);
+  test("starts without default profiles and preserves user deletion", () => {
+    const { db } = paths();
+    const first = new StateStore({ path: db, seedProfiles: [] });
+    expect(first.listProfiles()).toEqual([]);
+    first.saveProfiles([profile]);
     first.saveProfiles([]);
     first.close();
 
-    const reopened = new StateStore({ path: db, legacyConfigPath: legacy, seedProfiles: [] });
+    const reopened = new StateStore({ path: db, seedProfiles: [] });
     expect(reopened.listProfiles()).toEqual([]);
     reopened.close();
   });
 
   test("persists terminal tasks and ordered lifecycle events", () => {
-    const { db, legacy } = paths();
-    const store = new StateStore({ path: db, legacyConfigPath: legacy, seedProfiles: [profile] });
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
     const saved = task();
     store.createTask(saved);
     store.appendTaskEvent(saved.id, "agent.tool", saved.state, { name: "read_file" });
@@ -78,15 +78,15 @@ describe("SQLite state store", () => {
     );
     store.close();
 
-    const reopened = new StateStore({ path: db, legacyConfigPath: legacy, seedProfiles: [profile] });
+    const reopened = new StateStore({ path: db, seedProfiles: [profile] });
     expect(reopened.getTask(saved.id)?.output).toBe("done");
     expect(reopened.getTask(saved.id)?.state).toBe("completed");
     reopened.close();
   });
 
   test("lists no tasks when empty and orders tasks by latest update", () => {
-    const { db, legacy } = paths();
-    const store = new StateStore({ path: db, legacyConfigPath: legacy, seedProfiles: [profile] });
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
     expect(store.listTasks()).toEqual([]);
 
     const older = task("completed");
@@ -101,13 +101,13 @@ describe("SQLite state store", () => {
   });
 
   test("marks running work failed after broker restart", () => {
-    const { db, legacy } = paths();
-    const store = new StateStore({ path: db, legacyConfigPath: legacy, seedProfiles: [profile] });
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
     const interrupted = task("running");
     store.createTask(interrupted);
     store.close();
 
-    const reopened = new StateStore({ path: db, legacyConfigPath: legacy, seedProfiles: [profile] });
+    const reopened = new StateStore({ path: db, seedProfiles: [profile] });
     expect(reopened.getTask(interrupted.id)?.state).toBe("failed");
     expect(reopened.listTaskEvents(interrupted.id).map(({ type }) => type))
       .toEqual(["created", "broker_restarted"]);
@@ -115,8 +115,8 @@ describe("SQLite state store", () => {
   });
 
   test("soft-deletes profiles without losing task history", () => {
-    const { db, legacy } = paths();
-    const store = new StateStore({ path: db, legacyConfigPath: legacy, seedProfiles: [profile] });
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
     const saved = task("completed");
     store.createTask(saved);
     store.saveProfiles([]);
@@ -126,20 +126,20 @@ describe("SQLite state store", () => {
   });
 
   test("persists dynamic profile tool setting", () => {
-    const { db, legacy } = paths();
-    const store = new StateStore({ path: db, legacyConfigPath: legacy, seedProfiles: [] });
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [] });
     expect(store.getSettings().dynamicProfileTools).toBe(false);
     store.saveSettings({ dynamicProfileTools: true });
     store.close();
 
-    const reopened = new StateStore({ path: db, legacyConfigPath: legacy, seedProfiles: [] });
+    const reopened = new StateStore({ path: db, seedProfiles: [] });
     expect(reopened.getSettings().dynamicProfileTools).toBe(true);
     reopened.close();
   });
 
   test("returns filtered summaries without full prompts or outputs", () => {
-    const { db, legacy } = paths();
-    const store = new StateStore({ path: db, legacyConfigPath: legacy, seedProfiles: [profile] });
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
     const saved = task("completed");
     saved.prompt = "x".repeat(500);
     saved.output = "secret output";
@@ -152,8 +152,8 @@ describe("SQLite state store", () => {
   });
 
   test("lists meaningful events for several tasks and latest heartbeat progress", () => {
-    const { db, legacy } = paths();
-    const store = new StateStore({ path: db, legacyConfigPath: legacy, seedProfiles: [profile] });
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
     const first = task("running");
     const second = task("running");
     store.createTask(first);
@@ -176,8 +176,8 @@ describe("SQLite state store", () => {
   });
 
   test("atomically marks a question answered and links its continuation", () => {
-    const { db, legacy } = paths();
-    const store = new StateStore({ path: db, legacyConfigPath: legacy, seedProfiles: [profile] });
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
     const parent = task("needs_input");
     parent.question = "Which file?";
     store.createTask(parent);
@@ -195,8 +195,8 @@ describe("SQLite state store", () => {
   });
 
   test("records and clears routable profile failures", () => {
-    const { db, legacy } = paths();
-    const store = new StateStore({ path: db, legacyConfigPath: legacy, seedProfiles: [profile] });
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
     store.recordProfileFailure(profile.id, "billing", "Insufficient balance");
     store.recordProfileFailure(profile.id, "billing", "Still empty");
     expect(store.listProfileFailures()[0]).toMatchObject({
@@ -209,9 +209,35 @@ describe("SQLite state store", () => {
     store.close();
   });
 
+  test("persists rate-limit retry times and successful generation evidence", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const retryAt = "2026-07-30T12:30:00.000Z";
+    store.recordProfileFailure(profile.id, "rate_limit", "Too many requests", retryAt);
+    expect(store.listProfileFailures()[0]).toMatchObject({
+      profileId: profile.id,
+      code: "rate_limit",
+      retryAt,
+    });
+
+    const completed = task("completed");
+    completed.updatedAt = "2026-07-30T12:45:00.000Z";
+    store.createTask(completed);
+    expect(store.listProfileSuccesses()).toEqual([{
+      profileId: profile.id,
+      succeededAt: completed.updatedAt,
+    }]);
+    store.close();
+
+    const reopened = new StateStore({ path: db, seedProfiles: [profile] });
+    expect(reopened.listProfileFailures()[0]?.retryAt).toBe(retryAt);
+    expect(reopened.listProfileSuccesses()[0]?.succeededAt).toBe(completed.updatedAt);
+    reopened.close();
+  });
+
   test("does not let worker completion overwrite cancellation", () => {
-    const { db, legacy } = paths();
-    const store = new StateStore({ path: db, legacyConfigPath: legacy, seedProfiles: [profile] });
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
     const running = task("running");
     store.createTask(running);
     expect(store.cancelTask(running.id, "stop", {
@@ -227,7 +253,7 @@ describe("SQLite state store", () => {
   });
 
   test("migrates existing task rows to the expanded lifecycle contract", () => {
-    const { db, legacy } = paths();
+    const { db } = paths();
     const old = new Database(db, { create: true });
     old.exec(`
       PRAGMA foreign_keys = ON;
@@ -268,7 +294,7 @@ describe("SQLite state store", () => {
     );
     old.close();
 
-    const store = new StateStore({ path: db, legacyConfigPath: legacy, seedProfiles: [profile] });
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
     expect(store.getTask(legacyTask.id)).toMatchObject({
       state: "completed",
       scope: { read: ["**"], write: ["**"] },

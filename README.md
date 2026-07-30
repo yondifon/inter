@@ -42,10 +42,12 @@ Agent flow:
 - Native SwiftUI menu-bar app with broker health and recent tasks.
 - Content zoom from **View ▸ Zoom In / Zoom Out / Actual Size** (`⌘+`, `⌘-`, `⌘0`),
   85%–200%, remembered across launches. Native controls keep their system size.
+- First launch detects locally installed or configured CLIs; no personal profiles
+  are hardcoded.
 - Add, edit, enable, disable, and delete any number of CLI profiles.
 - Per-profile model, capabilities, and arbitrary environment variables.
 - Separate Claude logins through `CLAUDE_CONFIG_DIR` (`.claude-work`,
-  `.claude-isern`, or any additional account).
+  `.claude-personal`, or any additional account).
 - One-click global MCP install for Codex, Claude Code and every Claude account,
   OpenCode, and Antigravity. Existing config gets a `.bak`.
 - Shared Streamable HTTP MCP at `http://127.0.0.1:7331/mcp`.
@@ -58,6 +60,38 @@ Agent flow:
 - Automatic model routing classifies task depth, rejects underpowered choices
   for deep work, then weighs live catalog price and estimated speed.
 
+## Project routing policy
+
+Add `.inter.toml` at a project's root to constrain automatic routing by task
+class. Rules name providers and model patterns, not local profile IDs, so the
+file can be committed and shared. Supported route keys are `mechanical`,
+`context`, `build`, `reasoning`, and `general`.
+
+```toml
+version = 1
+
+[routes.build]
+preference = "quality"
+min_quality = 5
+allow = [
+  { provider = "claude", model = "opus" },
+  { provider = "opencode", model = "opencode-go/*" },
+]
+
+[routes.reasoning]
+preference = "quality"
+allow = [
+  { provider = "claude", model = "*" },
+  { provider = "codex", model = "*" },
+]
+```
+
+Each route accepts `allow`, plus optional `preference` (`balanced`, `quality`,
+`cost`, or `speed`) and `min_quality` from 1 through 5. A route preview applies
+the policy only when its optional `cwd` is supplied; automatic delegation uses
+the delegate request's required `cwd`. Missing `.inter.toml` preserves global
+routing. An invalid file fails routing instead of silently falling back.
+
 ## Develop
 
 ```bash
@@ -67,8 +101,6 @@ make dev
 
 `make dev` launches the Swift app. It starts the Bun broker and stores profiles,
 task history, and lifecycle events in `~/.inter/inter.db` using SQLite WAL mode.
-An existing `~/.inter/inter.config.json` is imported once.
-
 Build the app bundle:
 
 ```bash
@@ -100,8 +132,17 @@ across projects.
 
 - `delegate`: auto-select a model and start scoped work; explicit profile/model
   wins. Supports `allowQuestions` and `timeoutMs`.
-- `route`: explain the selected model and top candidates without starting work.
+- `route`: explain the selected model and top candidates without starting work;
+  pass optional `cwd` to preview that project's `.inter.toml`.
 - `models`: list models by profile/provider; pass any returned ID to `delegate`.
+- `status`: return normalized profile/model availability, with optional
+  `profile`, `model`, `provider`, and `refresh` filters. Each record contains
+  `profile`, `provider`, `model`, `state`, `source`, `reason`, and `checkedAt`,
+  plus `retryAt` when known. States are `available`, `unavailable`, or
+  `unknown`; unknown never implies a usable balance. `refresh: true` bypasses
+  cached catalog data using safe catalog/auth checks only. It sends no generation
+  prompt, intentionally spends no inference credits, and does not claim an exact
+  provider credit balance.
 - `wait`: use `afterCursor` to receive meaningful events, heartbeat progress,
   attention, completion, or timeout.
 - `health`: report broker and MCP contract versions.

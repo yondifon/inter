@@ -56,6 +56,8 @@ struct TaskEventSnapshot: Codable, Identifiable, Hashable {
     var presentation: TaskEventPresentationSnapshot?
     var rawText: String?
     var createdAt: String
+    /// Broker-declared plumbing: folded into the technical list by default.
+    var minor: Bool?
 }
 
 struct TaskEventPresentationSnapshot: Codable, Hashable {

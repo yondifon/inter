@@ -1,6 +1,13 @@
 import { loadConfig } from "./config";
 import { listModels } from "./models";
-import { stateStore, type ProfileFailure } from "./store";
+import { normalizeProfileStatuses, type ProfileStatus } from "./profile-status";
+import {
+  loadRoutingPolicy,
+  modelAllowed,
+  routeForTask,
+  type RoutingPolicy,
+} from "./routing-policy";
+import { stateStore } from "./store";
 import type { ModelInfo, Profile } from "./types";
 
 export type RoutePreference = "balanced" | "quality" | "cost" | "speed";
@@ -36,11 +43,23 @@ export interface ModelRoute {
 export interface RouteOptions {
   preference?: RoutePreference;
   modelHint?: string;
+  cwd?: string;
 }
 
 export async function routeModel(prompt: string, options: RouteOptions = {}): Promise<ModelRoute> {
-  const [models, config] = await Promise.all([listModels(), loadConfig()]);
-  return chooseModel(prompt, models, config.profiles, options, stateStore().listProfileFailures());
+  const [models, config, policy] = await Promise.all([
+    listModels(),
+    loadConfig(),
+    options.cwd === undefined ? Promise.resolve(undefined) : loadRoutingPolicy(options.cwd),
+  ]);
+  const store = stateStore();
+  const statuses = normalizeProfileStatuses(
+    config.profiles,
+    models,
+    store.listProfileFailures(),
+    store.listProfileSuccesses(),
+  );
+  return chooseModel(prompt, models, config.profiles, options, statuses, policy);
 }
 
 export function chooseModel(
@@ -48,39 +67,71 @@ export function chooseModel(
   models: ModelInfo[],
   profiles: Profile[],
   options: RouteOptions = {},
-  failures: ProfileFailure[] = [],
+  statuses: ProfileStatus[] = [],
+  policy?: RoutingPolicy,
 ): ModelRoute {
   const demand = classifyTask(prompt);
-  const preference = options.preference ?? "balanced";
+  const policyRoute = policy ? routeForTask(policy, demand.taskClass) : undefined;
+  const preference = options.preference ?? policyRoute?.preference ?? "balanced";
+  const requiredQuality = Math.max(demand.requiredQuality, policyRoute?.minQuality ?? 0);
   const enabled = new Set(profiles.filter(({ enabled }) => enabled).map(({ id }) => id));
-  const cooldownCutoff = Date.now() - 10 * 60_000;
-  const unavailable = new Map(failures
-    .filter(({ code, failedAt }) =>
-      code === "auth" || code === "billing" || Date.parse(failedAt) >= cooldownCutoff
-    )
-    .map((failure) => [failure.profileId, failure]));
-  const warnings = [...unavailable.values()].map((failure) =>
-    `excluded profile ${failure.profileId}: unresolved ${failure.code} failure at ${failure.failedAt}`
-  );
-  const usable = models.filter((model) =>
+  const base = models.filter((model) =>
     enabled.has(model.profileId) &&
-    !unavailable.has(model.profileId) &&
     model.toolCall !== false &&
     !/(?:image|video|audio|embedding|tts)(?:[-/:]|$)/i.test(model.id)
   );
-  const hinted = options.modelHint ? matchHint(usable, options.modelHint) : usable;
-  if (hinted.length === 0) {
-    throw new Error(options.modelHint
-      ? `no available model matches: ${options.modelHint}`
-      : `no routable models are available${warnings.length ? `; ${warnings.join("; ")}` : ""}`);
+  const requested = options.modelHint ? matchHint(base, options.modelHint) : base;
+  if (options.modelHint && requested.length === 0) {
+    throw new Error(`no model matches hint: ${options.modelHint}`);
   }
 
-  const candidates = hinted.map((model) => {
+  const warnings: string[] = [];
+  const policyEligible = policyRoute
+    ? requested.filter((model) => {
+      const allowed = modelAllowed(policyRoute, model.provider, model.id);
+      if (!allowed) {
+        warnings.push(
+          `excluded model ${model.profileId}/${model.id}: not allowed by project policy route ${demand.taskClass}`,
+        );
+      }
+      return allowed;
+    })
+    : requested;
+
+  const statusByModel = new Map(statuses.map((status) => [
+    statusKey(status.profile, status.model),
+    status,
+  ]));
+  const usable = policyEligible.filter((model) => {
+    const status = statusByModel.get(statusKey(model.profileId, model.id));
+    if (!status) return true;
+    if (status.state === "unavailable") {
+      warnings.push(`excluded model ${model.profileId}/${model.id}: ${status.reason}${
+        status.retryAt ? `; retry at ${status.retryAt}` : ""
+      }`);
+      return false;
+    }
+    if (status.state === "unknown") {
+      warnings.push(
+        `availability unknown for ${model.profileId}/${model.id}: ${status.reason}`,
+      );
+    }
+    return true;
+  });
+
+  if (usable.length === 0) {
+    const detail = warnings.length ? `; ${warnings.join("; ")}` : "";
+    throw new Error(options.modelHint
+      ? `model hint ${options.modelHint} has no eligible model for ${demand.taskClass}${detail}`
+      : `no routable models are available${detail}`);
+  }
+
+  const candidates = usable.map((model) => {
     const traits = modelTraits(model);
     return {
       profileId: model.profileId,
       model: model.id,
-      score: score(traits, demand.requiredQuality, preference),
+      score: score(traits, requiredQuality, preference),
       traits,
     };
   }).sort((a, b) =>
@@ -94,8 +145,10 @@ export function chooseModel(
     model: selected.model,
     preference,
     taskClass: demand.taskClass,
-    requiredQuality: demand.requiredQuality,
-    reason: `${demand.reason}; selected quality ${selected.traits.quality}/5, cost ${selected.traits.cost}/5, speed ${selected.traits.speed}/5`,
+    requiredQuality,
+    reason: `${demand.reason}${
+      policyRoute ? `; applied project policy route ${demand.taskClass}` : ""
+    }; selected quality ${selected.traits.quality}/5, cost ${selected.traits.cost}/5, speed ${selected.traits.speed}/5`,
     candidates: diverseCandidates(candidates, 3),
     warnings: [
       ...warnings,
@@ -196,4 +249,8 @@ function matchHint(models: ModelInfo[], hint: string): ModelInfo[] {
 
 function canonical(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "").replace(/^kimik(?=\d)/, "kimi");
+}
+
+function statusKey(profileId: string, modelId: string): string {
+  return `${profileId}\0${modelId}`;
 }

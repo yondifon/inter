@@ -4,7 +4,7 @@ import {
   interpretWorkerOutcome,
   workerPrompt,
 } from "../src/task-protocol";
-import { needsInputQuestion } from "../src/tasks";
+import { needsInputQuestion, recordProfileTaskOutcome } from "../src/tasks";
 
 describe("needsInputQuestion", () => {
   test("reads a marker at the start of a line", () => {
@@ -61,5 +61,35 @@ describe("worker protocol", () => {
     expect(prompt).toContain("supersedes any conflicting instruction");
     expect(prompt.indexOf("# Resolved decision")).toBeGreaterThan(prompt.indexOf("# Original task"));
     expect(prompt).toContain("Do not ask the same question again");
+  });
+});
+
+describe("profile outcome recording", () => {
+  test("clears observed failures only after successful generation", () => {
+    const calls: string[] = [];
+    const store = {
+      clearProfileFailure: (profileId: string) => calls.push(`clear:${profileId}`),
+      recordProfileFailure: () => calls.push("record"),
+    };
+    recordProfileTaskOutcome(
+      store,
+      "claude-work",
+      interpretWorkerOutcome(0, "Done.\nINTER_RESULT: completed", ""),
+    );
+    expect(calls).toEqual(["clear:claude-work"]);
+  });
+
+  test("records auth, billing, and rate-limit failures", () => {
+    const calls: string[] = [];
+    const store = {
+      clearProfileFailure: () => calls.push("clear"),
+      recordProfileFailure: (_profileId: string, code: string) => calls.push(code),
+    };
+    recordProfileTaskOutcome(
+      store,
+      "claude-work",
+      interpretWorkerOutcome(1, "", "statusCode: 429 Too many requests"),
+    );
+    expect(calls).toEqual(["rate_limit"]);
   });
 });

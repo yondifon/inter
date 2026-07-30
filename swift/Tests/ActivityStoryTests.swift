@@ -37,6 +37,34 @@ final class ActivityStoryTests: XCTestCase {
         XCTAssertEqual(pulse.seconds, 46)
     }
 
+    func testCollapsesHookAndEchoRowsOfOneAction() {
+        let done = TaskEventPresentationSnapshot(type: "command", command: "bun test", exitCode: 0)
+        let story = ActivityStory.compose([
+            event(1, kind: "command", title: "Bash", detail: "bun test", phase: "started"),
+            event(2, kind: "command", title: "Bash", detail: "bun test", phase: "completed"),
+            event(3, kind: "command", title: "Bash", detail: "bun test", phase: "completed", presentation: done),
+            event(4, kind: "file", title: "Read file", detail: "src/a.ts"),
+        ])
+        guard case .chapter(_, let rows) = story.blocks[0] else {
+            return XCTFail("expected chapter, got \(story.blocks[0])")
+        }
+        XCTAssertEqual(rows.map(\.id), [3, 4])
+        XCTAssertEqual(rows[0].presentation?.exitCode, 0)
+    }
+
+    func testServerMinorFlagFoldsEventsAway() {
+        let story = ActivityStory.compose([
+            event(1, kind: "lifecycle", title: "Hook finished", detail: "SessionStart", presentation: nil),
+            event(2, kind: "command", title: "Bash", detail: "ls"),
+        ].enumerated().map { index, base in
+            var copy = base
+            copy.minor = index == 0
+            return copy
+        })
+        XCTAssertEqual(story.technical.map(\.id), [1])
+        XCTAssertEqual(story.blocks.count, 1)
+    }
+
     func testOnlyFinalUsageEventBecomesTheReceipt() {
         let turn = TaskEventPresentationSnapshot(type: "usage", tokensOut: 104)
         let final = TaskEventPresentationSnapshot(type: "usage", costUsd: 0.17, turns: 2)

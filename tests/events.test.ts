@@ -379,5 +379,133 @@ describe("task event views", () => {
     }, "claude");
     expect(view.kind).toBe("raw");
     expect(view.title).toBe("Tool result");
+    expect(view.detail).toBe("ok");
+    expect(view.minor).toBe(true);
+  });
+
+  test("renders a Claude thinking block as reasoning text", () => {
+    const view = taskEventView({
+      id: 28,
+      taskId: "task",
+      type: "agent.assistant",
+      state: "running",
+      payload: {
+        type: "assistant",
+        message: {
+          model: "claude-opus-5", role: "assistant",
+          content: [{ type: "thinking", thinking: "The 404 should read as an unrouted task.", signature: "sig" }],
+        },
+      },
+      createdAt: "now",
+    }, "claude");
+    expect(view.kind).toBe("reasoning");
+    expect(view.title).toBe("Reasoning");
+    expect(view.detail).toBe("The 404 should read as an unrouted task.");
+    expect(view.minor).toBeUndefined();
+  });
+
+  test("prefers the tool_use block when a message mixes thinking and tools", () => {
+    const view = taskEventView({
+      id: 29,
+      taskId: "task",
+      type: "agent.assistant",
+      state: "running",
+      payload: {
+        type: "assistant",
+        message: {
+          content: [
+            { type: "thinking", thinking: "", signature: "sig" },
+            { type: "tool_use", name: "Bash", input: { command: "bun test" } },
+          ],
+        },
+      },
+      createdAt: "now",
+    }, "claude");
+    expect(view.kind).toBe("command");
+    expect(view.presentation).toEqual({ type: "command", command: "bun test" });
+  });
+
+  test("folds the thinking token ticker away as minor", () => {
+    const view = taskEventView({
+      id: 30,
+      taskId: "task",
+      type: "agent.system",
+      state: "running",
+      payload: { type: "system", subtype: "thinking_tokens", estimated_tokens: 5250, estimated_tokens_delta: 100 },
+      createdAt: "now",
+    }, "claude");
+    expect(view.kind).toBe("reasoning");
+    expect(view.detail).toBe("~5.3k tokens so far");
+    expect(view.minor).toBe(true);
+  });
+
+  test("names hook plumbing instead of dumping JSON", () => {
+    const view = taskEventView({
+      id: 31,
+      taskId: "task",
+      type: "agent.system",
+      state: "running",
+      payload: {
+        type: "system", subtype: "hook_response",
+        hook_name: "SessionStart:startup", hook_event: "SessionStart",
+        outcome: "success", exit_code: 0,
+      },
+      createdAt: "now",
+    }, "claude");
+    expect(view.title).toBe("Hook finished");
+    expect(view.detail).toBe("SessionStart:startup · success");
+    expect(view.minor).toBe(true);
+  });
+
+  test("summarizes an OpenCode step finish as usage", () => {
+    const view = taskEventView({
+      id: 32,
+      taskId: "task",
+      type: "agent.step_finish",
+      state: "running",
+      payload: {
+        type: "step_finish",
+        part: {
+          type: "step-finish", reason: "tool-calls",
+          tokens: { total: 30820, input: 30650, output: 116, reasoning: 54, cache: { read: 28000, write: 0 } },
+        },
+      },
+      createdAt: "now",
+    }, "opencode");
+    expect(view.kind).toBe("usage");
+    expect(view.title).toBe("Step finished");
+    expect(view.detail).toBe("tool calls · 116 tokens out");
+    expect(view.presentation).toEqual({ type: "usage", tokensIn: 30650, tokensOut: 116, tokensCached: 28000 });
+    expect(view.minor).toBe(true);
+  });
+
+  test("surfaces a nested provider error message", () => {
+    const view = taskEventView({
+      id: 33,
+      taskId: "task",
+      type: "agent.error",
+      state: "running",
+      payload: {
+        type: "error",
+        error: { name: "APIError", data: { message: "Insufficient balance.", statusCode: 401 } },
+      },
+      createdAt: "now",
+    }, "opencode");
+    expect(view.kind).toBe("error");
+    expect(view.detail).toBe("Insufficient balance.");
+  });
+
+  test("keeps quiet heartbeats minor and stalled ones visible", () => {
+    const quiet = taskEventView({
+      id: 34, taskId: "task", type: "heartbeat", state: "running",
+      payload: { elapsedMs: 50_000, silentMs: 1_000, stalled: false }, createdAt: "now",
+    }, "claude");
+    const stalled = taskEventView({
+      id: 35, taskId: "task", type: "heartbeat", state: "running",
+      payload: { elapsedMs: 140_000, silentMs: 109_000, stalled: true }, createdAt: "now",
+    }, "claude");
+    expect(quiet.minor).toBe(true);
+    expect(stalled.minor).toBeUndefined();
+    expect(stalled.detail).toBe("No agent event for 109s");
   });
 });

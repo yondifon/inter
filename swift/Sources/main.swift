@@ -10,6 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private let zoom = AppZoom()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.applicationIconImage = makeApplicationIcon()
         NSApp.setActivationPolicy(.accessory)
         setupMenu()
         setupStatusItem()
@@ -88,6 +89,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         window.title = "Inter"
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
+        window.level = .normal
+        window.hidesOnDeactivate = false
         window.isReleasedWhenClosed = false
         window.delegate = self
         window.contentViewController = NSHostingController(
@@ -108,16 +111,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             statusItem.button?.performClick(nil)
             statusItem.menu = nil
         } else if window.isVisible {
-            window.orderOut(nil)
-            NSApp.setActivationPolicy(.accessory)
+            hideWindow()
         } else {
-            NSApp.setActivationPolicy(.regular)
-            NSApp.activate(ignoringOtherApps: true)
-            window.makeKeyAndOrderFront(nil)
+            showWindow()
         }
     }
 
-    func windowWillClose(_ notification: Notification) { NSApp.setActivationPolicy(.accessory) }
+    private func showWindow() {
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate()
+        window.level = .normal
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    private func hideWindow() {
+        window.orderOut(nil)
+        NSApp.setActivationPolicy(.accessory)
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { showWindow() }
+        return true
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        NSApp.setActivationPolicy(.accessory)
+    }
+
+    private func makeApplicationIcon() -> NSImage {
+        let size = NSSize(width: 512, height: 512)
+        let image = NSImage(size: size, flipped: false) { rect in
+            NSColor(calibratedRed: 0.10, green: 0.12, blue: 0.15, alpha: 1).setFill()
+            NSBezierPath(
+                roundedRect: rect.insetBy(dx: 24, dy: 24),
+                xRadius: 108,
+                yRadius: 108
+            ).fill()
+
+            let configuration = NSImage.SymbolConfiguration(
+                pointSize: 260,
+                weight: .medium
+            ).applying(.init(paletteColors: [.white]))
+            guard let symbol = NSImage(
+                systemSymbolName: "point.3.connected.trianglepath.dotted",
+                accessibilityDescription: "Inter"
+            )?.withSymbolConfiguration(configuration) else {
+                return false
+            }
+            symbol.draw(in: NSRect(x: 126, y: 126, width: 260, height: 260))
+            return true
+        }
+        image.isTemplate = false
+        return image
+    }
 }
 
 let app = NSApplication.shared

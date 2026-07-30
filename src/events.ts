@@ -12,6 +12,9 @@ export interface TaskEventView {
   presentation?: TaskEventPresentation;
   rawText?: string;
   createdAt: string;
+  /// Plumbing the trace folds away by default: token tickers, step boundaries,
+  /// duplicate tool results, hook bookkeeping, quiet heartbeats.
+  minor?: boolean;
 }
 
 export interface TaskEventPresentation {
@@ -54,6 +57,7 @@ export function taskEventView(event: TaskEvent, provider: Profile["provider"]): 
       title: lifecycleTitle(event.type),
       ...(event.payload.error ? { detail: String(event.payload.error) } : detail ? { detail } : {}),
       ...(rawText ? { rawText } : {}),
+      ...(event.type === "heartbeat" && event.payload.stalled !== true ? { minor: true } : {}),
     };
   }
 
@@ -83,7 +87,7 @@ export function taskEventView(event: TaskEvent, provider: Profile["provider"]): 
   const item = object(payload.item);
   const part = object(payload.part);
   const message = object(payload.message);
-  const content = Array.isArray(message.content) ? object(message.content[0]) : {};
+  const content = pickContentBlock(message.content);
   const subject = Object.keys(item).length ? item
     : Object.keys(part).length ? part
       : Object.keys(content).length ? content : payload;
@@ -91,29 +95,38 @@ export function taskEventView(event: TaskEvent, provider: Profile["provider"]): 
   const state = object(subject.state);
   const status = string(state.status) ?? string(subject.status);
   const tool = string(subject.tool) ?? string(subject.name) ?? string(state.tool);
+  const normalizedTool = tool?.toLowerCase();
   const input = Object.keys(object(state.input)).length ? object(state.input) : object(subject.input);
   const presentation = toolPresentation(tool, input, firstString(state.title, subject.title), state) ??
     subjectPresentation(subjectType, subject);
   const detail = presentationDetail(presentation) ?? firstString(
-    subject.text, subject.message, subject.command, subject.file_path, subject.path,
+    subject.text, subject.thinking, subject.message, subject.command, subject.file_path, subject.path,
     input.filePath, input.file_path, input.path, state.output, payload.result,
   );
 
   if (subjectType.includes("error") || status === "failed") {
-    return { ...base, kind: "error", phase: "failed", title: tool ? `${tool} failed` : "Agent error", detail, rawText };
+    const nested = object(subject.error);
+    return { ...base, kind: "error", phase: "failed", title: tool ? `${tool} failed` : "Agent error",
+      detail: detail ?? firstString(nested.message, object(nested.data).message, subject.error), rawText };
   }
   // Tool results echo work the matching tool event already reported.
   if (subjectType.includes("tool_result")) {
-    return { ...base, kind: "raw", phase: "info", title: "Tool result", detail, rawText };
+    return { ...base, kind: "raw", phase: "info", title: "Tool result",
+      detail: detail ?? blockText(subject.content), minor: true, rawText };
   }
-  if (subjectType.includes("reason")) {
-    return { ...base, kind: "reasoning", phase: statusPhase(status), title: "Reasoning", detail, rawText };
+  // "Reasoning", not "Thinking": the trace collapses same-titled "Thinking"
+  // ticker events into one pulse line, and prose must not be pulled into it.
+  // A block with no prose (redacted thinking carries only a signature) marks
+  // that the model paused, which is not worth a row.
+  if (subjectType.includes("reason") || subjectType.includes("think")) {
+    return { ...base, kind: "reasoning", phase: statusPhase(status), title: "Reasoning", detail,
+      ...(detail ? {} : { minor: true }), rawText };
   }
-  if (subjectType.includes("command") || tool === "bash" || tool === "run_command") {
+  if (subjectType.includes("command") || normalizedTool === "bash" || normalizedTool === "run_command") {
     return { ...base, kind: "command", phase: statusPhase(status),
       title: tool ?? "Command", detail, presentation, rawText };
   }
-  if (subjectType.includes("file") || ["read", "write", "edit"].includes(tool ?? "")) {
+  if (subjectType.includes("file") || ["read", "write", "edit"].includes(normalizedTool ?? "")) {
     return { ...base, kind: "file", phase: statusPhase(status),
       title: tool ? toolTitle(tool) : "File change", detail, presentation, rawText };
   }
@@ -149,7 +162,7 @@ function knownAgentEvent(
     if (subtype === "thinking_tokens") {
       const tokens = Math.max(0, Number(payload.estimated_tokens ?? 0));
       return { ...base, kind: "reasoning", phase: "started", title: "Thinking",
-        detail: `~${formatCount(tokens)} tokens so far`, ...raw };
+        detail: `~${formatCount(tokens)} tokens so far`, minor: true, ...raw };
     }
     if (subtype === "init") {
       const tools = Array.isArray(payload.tools) ? payload.tools.length : 0;
@@ -175,8 +188,31 @@ function knownAgentEvent(
       return { ...base, kind: "lifecycle", phase: "info", title: "API retry",
         detail: text, presentation: { type: "signal", level: "warning", text }, ...raw };
     }
-    // hook_started, hook_response, status, commands_changed: plumbing.
-    return { ...base, kind: "raw", phase: "info", title: humanize(subtype ?? "system"), ...raw };
+    // Remaining subtypes are plumbing; still name what happened instead of
+    // leaving a bare JSON row.
+    if (subtype === "hook_started" || subtype === "hook_response") {
+      const outcome = string(payload.outcome);
+      const exitCode = typeof payload.exit_code === "number" ? payload.exit_code : undefined;
+      return { ...base, kind: "lifecycle", phase: outcome === "success" || subtype === "hook_started" ? "info" : "failed",
+        title: subtype === "hook_started" ? "Hook started" : "Hook finished",
+        detail: joinDetail(
+          string(payload.hook_name) ?? string(payload.hook_event),
+          outcome,
+          exitCode !== undefined && exitCode !== 0 ? `exit ${exitCode}` : undefined,
+        ), minor: true, ...raw };
+    }
+    if (subtype === "commands_changed") {
+      const commands = Array.isArray(payload.commands) ? payload.commands.length : 0;
+      return { ...base, kind: "lifecycle", phase: "info", title: "Commands loaded",
+        ...(commands ? { detail: `${commands} command${commands === 1 ? "" : "s"}` } : {}),
+        minor: true, ...raw };
+    }
+    if (subtype === "status") {
+      return { ...base, kind: "lifecycle", phase: "info", title: "Status",
+        ...(string(payload.permissionMode) ? { detail: `permission ${payload.permissionMode}` } : {}),
+        minor: true, ...raw };
+    }
+    return { ...base, kind: "raw", phase: "info", title: humanize(subtype ?? "system"), minor: true, ...raw };
   }
 
   if (payloadType === "result") {
@@ -231,6 +267,37 @@ function knownAgentEvent(
       ), presentation, ...raw };
   }
 
+  if (payloadType === "turn.started") {
+    return { ...base, kind: "lifecycle", phase: "started", title: "Turn started", minor: true, ...raw };
+  }
+
+  if (payloadType === "thread.started") {
+    const thread = string(payload.thread_id);
+    return { ...base, kind: "lifecycle", phase: "info", title: "Session started",
+      ...(thread ? { detail: thread } : {}), minor: true, ...raw };
+  }
+
+  if (payloadType === "step_start" || payloadType === "step_finish") {
+    const part = object(payload.part);
+    if (payloadType === "step_start") {
+      return { ...base, kind: "lifecycle", phase: "started", title: "Step started", minor: true, ...raw };
+    }
+    const tokens = object(part.tokens);
+    const cached = object(tokens.cache);
+    const cachedTotal = Number(cached.read ?? 0) + Number(cached.write ?? 0);
+    const presentation: TaskEventPresentation = {
+      type: "usage",
+      ...(typeof tokens.input === "number" ? { tokensIn: tokens.input } : {}),
+      ...(typeof tokens.output === "number" ? { tokensOut: tokens.output } : {}),
+      ...(cachedTotal ? { tokensCached: cachedTotal } : {}),
+    };
+    return { ...base, kind: "usage", phase: "completed", title: "Step finished",
+      detail: joinDetail(
+        string(part.reason)?.replaceAll("-", " "),
+        typeof tokens.output === "number" ? `${formatCount(tokens.output)} tokens out` : undefined,
+      ), presentation, minor: true, ...raw };
+  }
+
   if (payloadType === "rate_limit_event") {
     const info = object(payload.rate_limit_info);
     const status = string(info.status);
@@ -273,7 +340,7 @@ function formatDuration(ms: number): string {
 function lifecycleTitle(type: string): string {
   return ({ created: "Task queued", started: "Worker started", completed: "Task completed",
     failed: "Task failed", needs_input: "Worker needs input", answered: "Question answered",
-    blocked: "Task blocked", cancelled: "Task cancelled",
+    blocked: "Task blocked", cancelled: "Task cancelled", worker_spawned: "Worker spawned",
     events_truncated: "Event capture limit reached" } as Record<string, string>)[type] ?? humanize(type);
 }
 
@@ -289,6 +356,34 @@ function statusPhase(status?: string): TaskEventView["phase"] {
   if (status === "completed" || status === "success") return "completed";
   if (status === "running" || status === "started" || status === "pending") return "started";
   return "info";
+}
+
+/// A provider message can carry several content blocks; one row can show only
+/// one. Prefer the block with the most signal: a tool call beats prose, prose
+/// beats a thinking block, and an empty thinking block (signature only) beats
+/// nothing.
+function pickContentBlock(content: unknown): Record<string, any> {
+  if (!Array.isArray(content) || content.length === 0) return {};
+  const blocks = content.map(object);
+  const rank = (block: Record<string, any>): number => {
+    const type = string(block.type) ?? "";
+    if (type.includes("tool_use")) return 0;
+    if (type === "text" && string(block.text)) return 1;
+    if (type.includes("think") && string(block.thinking)) return 2;
+    return 3;
+  };
+  return [...blocks].sort((a, b) => rank(a) - rank(b))[0] ?? {};
+}
+
+/// Flatten a tool_result content value — a plain string or an array of typed
+/// blocks — into one line of preview text.
+function blockText(content: unknown): string | undefined {
+  const text = typeof content === "string" ? content
+    : Array.isArray(content)
+      ? content.map((block) => string(object(block).text)).filter(Boolean).join(" ")
+      : undefined;
+  const compact = text?.replace(/\s+/g, " ").trim();
+  return compact ? truncate(compact, 160) : undefined;
 }
 
 function object(value: unknown): Record<string, any> {

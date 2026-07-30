@@ -12,7 +12,6 @@ const roots: string[] = [];
 afterEach(() => {
   closeStateStore();
   delete process.env.INTER_DB;
-  delete process.env.INTER_CONFIG;
   delete process.env.INTER_ROOTS;
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
@@ -21,7 +20,6 @@ function setup(command: string[]): { cwd: string; profile: Profile } {
   const root = mkdtempSync(join(tmpdir(), "inter-lifecycle-"));
   roots.push(root);
   process.env.INTER_DB = join(root, "inter.db");
-  process.env.INTER_CONFIG = join(root, "missing.json");
   process.env.INTER_ROOTS = root;
   const profile: Profile = {
     id: "fake",

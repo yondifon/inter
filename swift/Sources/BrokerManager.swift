@@ -18,8 +18,6 @@ final class BrokerManager {
         child.arguments = spec.arguments
         var env = ProcessInfo.processInfo.environment
         env["PATH"] = loginShellPath() ?? env["PATH"]
-        env["INTER_CONFIG"] = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".inter/inter.config.json").path
         env["INTER_DB"] = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".inter/inter.db").path
         env["INTER_ROOTS"] = FileManager.default.homeDirectoryForCurrentUser.path

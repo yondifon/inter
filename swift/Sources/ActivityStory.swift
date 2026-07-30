@@ -68,7 +68,14 @@ enum ActivityStory {
                 blocks.append(.signal(event))
                 continue
             }
-            chapter.append(event)
+            // One action often arrives several times — pre-hook, post-hook,
+            // and the provider's own echo of the same call. Keep the last of a
+            // same-shaped run: it carries the settled phase and exit state.
+            if let last = chapter.last, sameShape(last, event) {
+                chapter[chapter.count - 1] = event
+            } else {
+                chapter.append(event)
+            }
         }
         flushPulse()
         flushChapter()
@@ -93,16 +100,26 @@ enum ActivityStory {
         event.title == "Heartbeat" && (event.detail?.hasPrefix("No agent event") ?? false)
     }
 
-    /// Plumbing worth keeping reachable but not worth a row: known protocol
-    /// echoes, steady heartbeats, and lifecycle states the header already
-    /// shows. An unrecognized raw event stays visible — hiding a new
-    /// provider's events would bury the only trace of them.
+    /// Two events describe the same action when the row's identity — kind,
+    /// title, and detail line — is identical. Phase, timestamp, and settled
+    /// presentation state (an exit code arriving on the later event) may
+    /// differ; the later event wins.
+    private static func sameShape(_ a: TaskEventSnapshot, _ b: TaskEventSnapshot) -> Bool {
+        a.kind == b.kind && a.title == b.title && a.detail == b.detail
+    }
+
+    /// Plumbing worth keeping reachable but not worth a row. The broker marks
+    /// its own protocol echoes with `minor`; the title lists only cover events
+    /// stored before that flag existed. An unrecognized raw event stays
+    /// visible — hiding a new provider's events would bury the only trace of
+    /// them.
     private static let plumbing: Set<String> = [
         "Step Start", "Step Finish", "Tool result",
         "Hook Started", "Hook Response", "Status", "Commands Changed",
     ]
 
     private static func isTechnical(_ event: TaskEventSnapshot) -> Bool {
+        if event.minor == true { return !isStalledHeartbeat(event) }
         if event.kind == "raw" { return plumbing.contains(event.title) }
         if event.title == "Heartbeat" { return !isStalledHeartbeat(event) }
         return ["Task queued", "Worker started", "Task completed"].contains(event.title)

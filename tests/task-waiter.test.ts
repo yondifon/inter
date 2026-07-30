@@ -25,7 +25,7 @@ function stores() {
   const root = mkdtempSync(join(tmpdir(), "inter-waiter-"));
   roots.push(root);
   const path = join(root, "inter.db");
-  const options = { path, legacyConfigPath: join(root, "missing.json"), seedProfiles: [profile] };
+  const options = { path, seedProfiles: [profile] };
   return {
     reader: new StateStore(options),
     writer: new StateStore(options),

@@ -1,7 +1,8 @@
-import { chmodSync, mkdirSync, readFileSync } from "node:fs";
+import { chmodSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { Database } from "bun:sqlite";
+import { discoverProfiles } from "./profile-discovery";
 import type {
   BrokerSettings,
   Profile,
@@ -53,7 +54,6 @@ export interface TaskEvent {
 
 export interface StateStoreOptions {
   path?: string;
-  legacyConfigPath?: string;
   seedProfiles?: Profile[];
 }
 
@@ -70,6 +70,12 @@ export interface ProfileFailure {
   message: string;
   failedAt: string;
   consecutiveFailures: number;
+  retryAt?: string;
+}
+
+export interface ProfileSuccess {
+  profileId: string;
+  succeededAt: string;
 }
 
 export class StateStore {
@@ -83,7 +89,7 @@ export class StateStore {
     try { chmodSync(this.path, 0o600); } catch {}
     this.configure();
     this.migrate();
-    this.seed(options.legacyConfigPath ?? legacyConfigPath(), options.seedProfiles ?? defaultProfiles());
+    this.seed(options.seedProfiles ?? discoverProfiles());
     this.recoverInterruptedTasks();
   }
 
@@ -388,16 +394,24 @@ export class StateStore {
     profileId: string,
     code: ProfileFailure["code"],
     message: string,
+    retryAt?: string,
   ): void {
+    const failedAt = new Date().toISOString();
+    const resolvedRetryAt = code === "rate_limit"
+      ? retryAt ?? new Date(Date.parse(failedAt) + 10 * 60_000).toISOString()
+      : null;
     this.database.query(`
-      INSERT INTO profile_failures(profile_id, code, message, failed_at, consecutive_failures)
-      VALUES (?, ?, ?, ?, 1)
+      INSERT INTO profile_failures(
+        profile_id, code, message, failed_at, consecutive_failures, retry_at
+      )
+      VALUES (?, ?, ?, ?, 1, ?)
       ON CONFLICT(profile_id) DO UPDATE SET
         code = excluded.code,
         message = excluded.message,
         failed_at = excluded.failed_at,
-        consecutive_failures = profile_failures.consecutive_failures + 1
-    `).run(profileId, code, message.slice(0, 1_000), new Date().toISOString());
+        consecutive_failures = profile_failures.consecutive_failures + 1,
+        retry_at = excluded.retry_at
+    `).run(profileId, code, message.slice(0, 1_000), failedAt, resolvedRetryAt);
   }
 
   clearProfileFailure(profileId: string): void {
@@ -411,8 +425,9 @@ export class StateStore {
       message: string;
       failed_at: string;
       consecutive_failures: number;
+      retry_at: string | null;
     }, []>(`
-      SELECT profile_id, code, message, failed_at, consecutive_failures
+      SELECT profile_id, code, message, failed_at, consecutive_failures, retry_at
       FROM profile_failures
     `).all().map((row) => ({
       profileId: row.profile_id,
@@ -420,6 +435,22 @@ export class StateStore {
       message: row.message,
       failedAt: row.failed_at,
       consecutiveFailures: row.consecutive_failures,
+      ...(row.retry_at ? { retryAt: row.retry_at } : {}),
+    }));
+  }
+
+  listProfileSuccesses(): ProfileSuccess[] {
+    return this.database.query<{
+      profile_id: string;
+      succeeded_at: string;
+    }, []>(`
+      SELECT profile_id, MAX(updated_at) AS succeeded_at
+      FROM tasks
+      WHERE state = 'completed'
+      GROUP BY profile_id
+    `).all().map((row) => ({
+      profileId: row.profile_id,
+      succeededAt: row.succeeded_at,
     }));
   }
 
@@ -497,7 +528,8 @@ export class StateStore {
         code TEXT NOT NULL CHECK(code IN ('auth','billing','rate_limit')),
         message TEXT NOT NULL,
         failed_at TEXT NOT NULL,
-        consecutive_failures INTEGER NOT NULL
+        consecutive_failures INTEGER NOT NULL,
+        retry_at TEXT
       );
       INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (1, 'profiles tasks and events');
     `);
@@ -505,9 +537,24 @@ export class StateStore {
       "PRAGMA table_info(tasks)",
     ).all().map(({ name }) => name));
     if (!columns.has("scope_json")) this.migrateTaskContract();
+    const failureColumns = new Set(this.database.query<{ name: string }, []>(
+      "PRAGMA table_info(profile_failures)",
+    ).all().map(({ name }) => name));
+    if (!failureColumns.has("retry_at")) {
+      this.database.exec("ALTER TABLE profile_failures ADD COLUMN retry_at TEXT");
+      this.database.exec(`
+        UPDATE profile_failures
+        SET retry_at = strftime('%Y-%m-%dT%H:%M:%fZ', failed_at, '+10 minutes')
+        WHERE code = 'rate_limit'
+      `);
+    }
     this.database.query(`
       INSERT OR IGNORE INTO schema_migrations(version, name)
       VALUES (2, 'task scope lifecycle and completion')
+    `).run();
+    this.database.query(`
+      INSERT OR IGNORE INTO schema_migrations(version, name)
+      VALUES (3, 'profile failure retry timestamps')
     `).run();
   }
 
@@ -574,17 +621,12 @@ export class StateStore {
     }
   }
 
-  private seed(configPath: string, defaults: Profile[]): void {
+  private seed(profiles: Profile[]): void {
     const seeded = this.database.query<{ value: string }, [string]>(
       "SELECT value FROM settings WHERE key = ?",
     ).get("profiles_initialized");
     if (seeded) return;
 
-    let profiles = defaults;
-    try {
-      const legacy = JSON.parse(readFileSync(configPath, "utf8")) as { profiles?: Profile[] };
-      if (Array.isArray(legacy.profiles)) profiles = legacy.profiles;
-    } catch {}
     this.saveProfiles(profiles);
     this.database.query("INSERT INTO settings(key, value) VALUES (?, ?)").run("profiles_initialized", "1");
   }
@@ -640,13 +682,7 @@ export function closeStateStore(): void {
 
 export function databasePath(): string {
   if (process.env.INTER_DB) return resolve(process.env.INTER_DB);
-  const config = process.env.INTER_CONFIG;
-  if (config) return join(dirname(resolve(config)), "inter.db");
   return join(homedir(), ".inter", "inter.db");
-}
-
-function legacyConfigPath(): string {
-  return resolve(process.env.INTER_CONFIG ?? join(homedir(), ".inter", "inter.config.json"));
 }
 
 function profileFromRow(row: ProfileRow): Profile {
@@ -721,27 +757,4 @@ function taskEventFromRow(row: {
     payload: JSON.parse(row.payload) as Record<string, unknown>,
     createdAt: row.created_at,
   };
-}
-
-function defaultProfiles(): Profile[] {
-  return [
-    {
-      id: "claude-work",
-      label: "Claude · work",
-      provider: "claude",
-      model: "sonnet",
-      enabled: true,
-      env: { CLAUDE_CONFIG_DIR: "$HOME/.claude-work" },
-      capabilities: ["build", "review"],
-    },
-    {
-      id: "claude-isern",
-      label: "Claude · isern",
-      provider: "claude",
-      model: "sonnet",
-      enabled: true,
-      env: { CLAUDE_CONFIG_DIR: "$HOME/.claude-isern" },
-      capabilities: ["build", "review"],
-    },
-  ];
 }
