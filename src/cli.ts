@@ -13,6 +13,7 @@ import {
   listTasks,
   listTaskSummaries,
   reply,
+  resumeTask,
   waitForTasks,
 } from "./tasks";
 import { listModels } from "./models";
@@ -27,7 +28,7 @@ import { DELEGATE_DESCRIPTION, MCP_INSTRUCTIONS, dynamicDelegateDescription } fr
 
 const port = Number(process.env.INTER_PORT ?? 7331);
 const VERSION = "0.3.0";
-const MCP_CONTRACT_VERSION = 5;
+const MCP_CONTRACT_VERSION = 6;
 const scopeSchema = z.object({
   read: z.array(z.string()).max(200),
   write: z.array(z.string()).max(200),
@@ -271,6 +272,13 @@ async function createMcpServer(): Promise<McpServer> {
     description: "Answer a needs_input question and return a linked continuation task, including sessionId once captured. Wait on the returned task ID.",
     inputSchema: { taskId: z.string(), answer: z.string().min(1) },
   }, async ({ taskId, answer }) => result(startedTask(await reply(taskId, answer))));
+  server.registerTool("resume", {
+    description: "Resume a failed, cancelled, or blocked task in its captured provider session. Returns a linked continuation task; wait on the returned task ID.",
+    inputSchema: {
+      taskId: z.string(),
+      instruction: z.string().min(1).max(64_000).optional(),
+    },
+  }, async ({ taskId, instruction }) => result(startedTask(await resumeTask(taskId, instruction))));
   server.registerTool("cancel", {
     description: "Stop a queued or running task and its worker process tree.",
     inputSchema: {

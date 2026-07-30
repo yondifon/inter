@@ -9,12 +9,21 @@ enum TaskDetailSection: String, CaseIterable, Identifiable {
 
     var id: Self { self }
 
-    static func initial(for task: TaskSnapshot) -> Self {
-        switch task.state {
-        case "queued", "running":
-            return .activity
-        default:
-            return task.output.isEmpty && task.error == nil ? .activity : .response
+    /// Three silhouettes that stay apart with no word under them: what was sent,
+    /// what came back, what happened. All outline, all the same stroke weight.
+    var symbol: String {
+        switch self {
+        case .request: "paperplane"
+        case .response: "text.bubble"
+        case .activity: "list.bullet"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .request: "Request"
+        case .response: "Response"
+        case .activity: "Activity"
         }
     }
 }
@@ -22,35 +31,29 @@ enum TaskDetailSection: String, CaseIterable, Identifiable {
 struct TaskDetail: View {
     let task: TaskSnapshot
     let store: ProfileStore
-    @State private var section: TaskDetailSection
+    /// Activity is where a run is read — the response is one tab away, and landing
+    /// there mid-run would mean opening on an empty panel.
+    @State private var section: TaskDetailSection = .activity
     @State private var events: [TaskEventSnapshot] = []
     @State private var eventCursor = 0
     @State private var loadedInitialEvents = false
     @State private var loading = true
     @State private var loadFailed = false
     @State private var showingTechnicalEvents = false
+    @State private var showingRunFacts = false
     @Environment(\.uiScale) private var uiScale
-
-    init(task: TaskSnapshot, store: ProfileStore) {
-        self.task = task
-        self.store = store
-        _section = State(initialValue: TaskDetailSection.initial(for: task))
-    }
 
     var body: some View {
         VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 12) {
                 header
                 if task.state == "needs_input", let question = task.question {
                     NeedsInputBanner(question: question)
                 }
-                Picker("Task content", selection: $section) {
-                    Text("Request").tag(TaskDetailSection.request)
-                    Text(task.error == nil ? "Response" : "Error").tag(TaskDetailSection.response)
-                    Text("Activity").tag(TaskDetailSection.activity)
+                HStack(spacing: 0) {
+                    TaskSectionTabs(selection: $section, hasError: task.error != nil)
+                    Spacer(minLength: 0)
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
             }
             .frame(maxWidth: 980 * uiScale)
             .padding(.horizontal, 24)
@@ -67,7 +70,7 @@ struct TaskDetail: View {
             .scrollIndicators(.never)
             .id("\(task.id)-\(section.rawValue)")
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Surface.content)
         .task(id: task.id) {
             resetEventState()
             while !Task.isCancelled {
@@ -106,43 +109,47 @@ struct TaskDetail: View {
         }
     }
 
+    /// One identity line, one muted summary. Run facts are one click away rather
+    /// than spending the top of every task on ids the reader rarely needs.
     private var header: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 6) {
-                        StateMarker(state: state)
-                        Text(state.label.uppercased())
-                            .scaledFont(.caption2, weight: .semibold, design: .monospaced)
-                            .tracking(0.6)
-                            .foregroundStyle(.secondary)
-                    }
-                    Text(task.prompt.components(separatedBy: .newlines).first ?? "Task")
-                        .scaledFont(.title2, weight: .semibold)
-                        .lineLimit(2)
-                }
-                Spacer()
-                Button {
-                    NSWorkspace.shared.open(URL(fileURLWithPath: task.cwd))
-                } label: {
-                    Label("Open folder", systemImage: "folder")
-                }
+        HStack(spacing: 8) {
+            StateMarker(state: state, speaks: !state.wantsLabelBesideName)
+                .help(state.label)
+            Text(task.prompt.components(separatedBy: .newlines).first ?? "Task")
+                .scaledFont(.title3, weight: .semibold)
+                .lineLimit(1)
+            if state.wantsLabelBesideName {
+                TaskStateChip(state: state)
             }
-            HStack(spacing: 14) {
-                MetadataLabel(icon: "person.crop.circle", text: workerLabel)
-                MetadataLabel(icon: "cpu", text: task.model)
-                MetadataLabel(icon: "number", text: String(task.id.prefix(8)))
-                if let sessionId = task.sessionId?.trimmingCharacters(in: .whitespacesAndNewlines),
-                   !sessionId.isEmpty {
-                    MetadataLabel(icon: "terminal", text: "Session \(sessionId.prefix(8))")
-                    CopyIconButton(text: sessionId, label: "Copy provider session ID")
-                }
-                Spacer()
-                Text(task.cwd).scaledFont(.caption, design: .monospaced).foregroundStyle(.secondary)
-                    .lineLimit(1).truncationMode(.middle)
-                CopyIconButton(text: task.cwd, label: "Copy folder path")
+            TaskMetaChip(icon: "cpu", text: task.model, label: "Model")
+            Spacer(minLength: 8)
+            IconButton(symbol: "folder", label: "Open folder") {
+                NSWorkspace.shared.open(URL(fileURLWithPath: task.cwd))
             }
+            IconButton(symbol: "ellipsis", label: "Run details", rotation: .degrees(90)) {
+                showingRunFacts.toggle()
+            }
+            .popover(isPresented: $showingRunFacts, arrowEdge: .bottom) { runFactsPopover }
         }
+    }
+
+    private var runFactsPopover: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TaskFactRow(icon: "person.crop.circle", label: "Worker", value: workerLabel)
+            TaskFactRow(icon: "cpu", label: "Model", value: task.model)
+            TaskFactRow(icon: "number", label: "Task", value: task.id, copy: task.id)
+            if let sessionId {
+                TaskFactRow(icon: "terminal", label: "Session", value: sessionId, copy: sessionId)
+            }
+            TaskFactRow(icon: "folder", label: "Folder", value: task.cwd, copy: task.cwd)
+        }
+        .padding(14)
+        .frame(width: 380 * uiScale, alignment: .leading)
+    }
+
+    private var sessionId: String? {
+        let trimmed = task.sessionId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     @ViewBuilder private var eventContent: some View {
@@ -655,13 +662,133 @@ struct TaskEventPresentationView: View {
     }
 }
 
-private struct MetadataLabel: View {
+/// The word alone — the dot before the task name already carries the shape and
+/// the tint, and repeating it inside the chip would say it twice in one line.
+private struct TaskStateChip: View {
+    let state: TaskState
+    @Environment(\.uiScale) private var uiScale
+
+    var body: some View {
+        Text(state.label)
+            .scaledFont(.caption2, weight: .semibold)
+            .padding(.horizontal, 7 * uiScale)
+            .padding(.vertical, 3 * uiScale)
+            .background(state.tint.opacity(0.14), in: Capsule())
+            .accessibilityLabel("State: \(state.label)")
+    }
+}
+
+/// Icon carries the field, so the value starts at the same x on every row and the
+/// eye scans values, not labels. The name survives for VoiceOver and the tooltip.
+/// Neutral companion to the state chip: same shape, no semantic color, because a
+/// model name is an identifier and not a signal.
+private struct TaskMetaChip: View {
     let icon: String
     let text: String
+    let label: String
+    @Environment(\.uiScale) private var uiScale
+
     var body: some View {
-        Label(text, systemImage: icon)
-            .scaledFont(.caption, design: .monospaced)
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
+        HStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.system(size: 9 * uiScale, weight: .medium))
+            Text(text)
+                .scaledFont(.caption2, design: .monospaced)
+                .lineLimit(1)
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 7 * uiScale)
+        .padding(.vertical, 3 * uiScale)
+        .background(Surface.sunken, in: Capsule())
+        .help(label)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(label): \(text)")
+    }
+}
+
+/// Icon per tab, one lifted pill for the current section. Three sections is few
+/// enough to learn by glyph; the name lives on as the tooltip and the VoiceOver
+/// label, so nothing is lost by dropping the word.
+private struct TaskSectionTabs: View {
+    @Binding var selection: TaskDetailSection
+    let hasError: Bool
+    @Environment(\.uiScale) private var uiScale
+
+    var body: some View {
+        HStack(spacing: 2 * uiScale) {
+            ForEach(TaskDetailSection.allCases) { section in
+                tab(section)
+            }
+        }
+        .padding(2 * uiScale)
+        .background(Surface.sunken, in: RoundedRectangle(cornerRadius: Radius.medium))
+    }
+
+    private func tab(_ section: TaskDetailSection) -> some View {
+        let selected = section == selection
+        return Button {
+            withAnimation(.easeOut(duration: 0.12)) { selection = section }
+        } label: {
+            Image(systemName: symbol(section))
+                .font(.system(size: 11 * uiScale, weight: .regular))
+                .foregroundStyle(tint(section))
+                .frame(width: 32 * uiScale, height: 24 * uiScale)
+                .background {
+                    if selected {
+                        RoundedRectangle(cornerRadius: Radius.small).fill(Surface.panel)
+                    }
+                }
+                .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .help(label(section))
+        .accessibilityLabel(label(section))
+        .accessibilityAddTraits(selected ? [.isSelected] : [])
+    }
+
+    private func symbol(_ section: TaskDetailSection) -> String {
+        hasError && section == .response ? TaskState.failed.symbol : section.symbol
+    }
+
+    private func label(_ section: TaskDetailSection) -> String {
+        hasError && section == .response ? "Error" : section.label
+    }
+
+    /// The error tab is the one place a tab earns color; its glyph changes too, and
+    /// the tooltip and VoiceOver label both read "Error".
+    private func tint(_ section: TaskDetailSection) -> AnyShapeStyle {
+        hasError && section == .response
+            ? AnyShapeStyle(TaskState.failed.tint)
+            : AnyShapeStyle(section == selection ? .primary : .secondary)
+    }
+}
+
+private struct TaskFactRow: View {
+    let icon: String
+    let label: String
+    let value: String
+    var copy: String?
+    @Environment(\.uiScale) private var uiScale
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon)
+                .font(.system(size: 11 * uiScale))
+                .foregroundStyle(.tertiary)
+                .frame(width: 16 * uiScale, alignment: .center)
+                .help(label)
+                .accessibilityHidden(true)
+            Text(value)
+                .scaledFont(.caption, design: .monospaced)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+                .accessibilityLabel("\(label): \(value)")
+            Spacer(minLength: 0)
+            if let copy {
+                CopyIconButton(text: copy, label: "Copy \(label.lowercased())")
+            }
+        }
     }
 }

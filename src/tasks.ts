@@ -407,6 +407,45 @@ export async function reply(id: string, answer: string): Promise<Task> {
   return task;
 }
 
+export async function resumeTask(id: string, instruction?: string): Promise<Task> {
+  const old = stateStore().getTask(id);
+  if (!old) throw new Error(`unknown task: ${id}`);
+  if (!["failed", "cancelled", "blocked"].includes(old.state)) {
+    throw new Error(`task cannot be resumed from state ${old.state}: ${id}`);
+  }
+  if (!old.sessionId) throw new Error(`task has no captured session to resume: ${id}`);
+  const config = await loadConfig();
+  const profile = config.profiles.find((item) => item.id === old.profileId);
+  if (!profile || !canResumeSession(profile)) {
+    throw new Error(`task profile cannot resume sessions: ${old.profileId}`);
+  }
+  const resumeInstruction = instruction?.trim() || "Continue the original task from where the previous run stopped.";
+  const { task } = await prepareTask(
+    old.profileId,
+    [
+      "# Original task",
+      old.prompt,
+      "",
+      "# Resume instruction",
+      resumeInstruction,
+      "",
+      `The previous run ended in state \`${old.state}\`. Do not repeat completed work.`,
+    ].join("\n"),
+    old.cwd,
+    old.model,
+    old.id,
+    {
+      scope: old.scope,
+      allowQuestions: old.allowQuestions,
+      ...(old.timeoutMs ? { timeoutMs: old.timeoutMs } : {}),
+    },
+  );
+  stateStore().createResumption(old.id, task);
+  taskWaiter.notify(old.id);
+  launchTask(task, profile, old.sessionId);
+  return task;
+}
+
 export async function cancelTask(id: string, reason = "cancelled by caller", timedOut = false): Promise<Task> {
   const task = stateStore().getTask(id);
   if (!task) throw new Error(`unknown task: ${id}`);

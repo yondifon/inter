@@ -1,6 +1,6 @@
 # Inter
 
-Global coding-agent switchboard. Inter runs as a macOS menu-bar app, exposes one
+Global coding-agent switchboard. Inter runs as a macOS app with a menu-bar item, exposes one
 local MCP endpoint, and delegates bounded work to enabled Claude Code, Codex,
 OpenCode, or Antigravity profiles.
 
@@ -41,7 +41,8 @@ Agent flow:
 
 ## What works
 
-- Native SwiftUI menu-bar app with broker health and recent tasks.
+- Native SwiftUI app with broker health and recent tasks. Menu-bar item toggles
+  the window; the app keeps a Dock icon and appears in ⌘-Tab.
 - Content zoom from **View ▸ Zoom In / Zoom Out / Actual Size** (`⌘+`, `⌘-`, `⌘0`),
   85%–200%, remembered across launches. Native controls keep their system size.
 - First launch detects locally installed or configured CLIs; no personal profiles
@@ -280,6 +281,8 @@ across projects.
 - `reply`: answer `INTER_NEEDS_INPUT: <question>` and return a linked
   continuation task that resumes the worker's CLI session (`claude --resume`,
   `codex exec resume`, `opencode run --session`), with a fresh-run fallback.
+- `resume`: continue a failed, cancelled, or blocked task in its captured
+  provider session, returning a linked continuation task.
 - `cancel`: stop a queued or running task and its worker process tree.
 - `profiles`: list available accounts and models without exposing secret-like env
   values.

@@ -1,7 +1,7 @@
 DIST := dist
 APP := $(DIST)/Inter.app
 
-.PHONY: dev server swift-build bundle install clean
+.PHONY: dev server swift-build app-icon bundle install clean
 
 dev:
 	cd swift && swift run
@@ -13,16 +13,25 @@ server:
 swift-build:
 	cd swift && swift build -c release
 
-bundle: server swift-build
+app-icon:
+	CLANG_MODULE_CACHE_PATH=/tmp/inter-icon-clang-cache swift scripts/generate-app-icon.swift $(DIST)/Inter.iconset
+	iconutil -c icns --output $(DIST)/Inter.icns $(DIST)/Inter.iconset
+
+bundle: server swift-build app-icon
 	rm -rf $(APP)
 	mkdir -p $(APP)/Contents/MacOS $(APP)/Contents/Resources
 	cp swift/.build/release/Inter $(APP)/Contents/MacOS/Inter
 	cp $(DIST)/inter-server $(APP)/Contents/Resources/inter-server
+	cp $(DIST)/Inter.icns $(APP)/Contents/Resources/Inter.icns
 	cp Info.plist.template $(APP)/Contents/Info.plist
 	codesign --force --deep --sign - $(APP)
 
 install: bundle
 	pkill -x Inter || true
+	# The broker outlives the app it was spawned from, and the next launch finds
+	# port 7331 already answering /health — so it reports healthy while serving
+	# the previous build's contract. Retire it with the app.
+	pkill -f 'Contents/Resources/inter-server' || true
 	rm -rf /Applications/Inter.app
 	cp -R $(APP) /Applications/Inter.app
 	open /Applications/Inter.app

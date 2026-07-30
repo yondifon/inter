@@ -12,3 +12,21 @@ dist/
 
 inter.config.json
 .DS_Store
+
+# Local Swift and Xcode state
+.swiftpm/
+DerivedData/
+*.xcuserdatad/
+*.xcuserstate
+
+# Icon staging, rebuilt by `make bundle`
+*.iconset/
+*.icns
+
+# Output of delegated field-test runs, not part of the product
+examples/
+
+# Scratch and planning
+.plans/
+scratchpad/
+*.original.md

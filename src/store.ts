@@ -265,6 +265,23 @@ export class StateStore {
     });
   }
 
+  createResumption(parentId: string, child: Task): void {
+    this.transaction(() => {
+      this.createTask(child);
+      const changed = this.database.query(`
+        UPDATE tasks
+        SET child_task_id = ?, updated_at = ?
+        WHERE id = ?
+          AND state IN ('failed', 'cancelled', 'blocked')
+          AND child_task_id IS NULL
+      `).run(child.id, child.createdAt, parentId);
+      if (changed.changes !== 1) throw new Error(`task cannot be resumed: ${parentId}`);
+      this.addTaskEvent(parentId, "resumed", this.getTask(parentId)?.state ?? "failed", {
+        childTaskId: child.id,
+      });
+    });
+  }
+
   getTask(id: string): Task | undefined {
     const row = this.database.query<TaskRow, [string]>(`
       SELECT id, profile_id, model, prompt, cwd, state, output, error, question,

@@ -1,0 +1,13 @@
+<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <g id="tile">
+    <rect x="24" y="24" width="464" height="464" rx="107" fill="#1C1C1C"/>
+  </g>
+  <g id="wire">
+    <circle cx="142" cy="311" r="34" fill="#FFFFFF"/>
+    <circle cx="370" cy="311" r="34" fill="#FFFFFF"/>
+  </g>
+  <g id="letterform">
+    <circle cx="256" cy="147" r="32" fill="#FFFFFF"/>
+    <rect x="224" y="207" width="64" height="190" rx="32" fill="#FFFFFF"/>
+  </g>
+</svg>

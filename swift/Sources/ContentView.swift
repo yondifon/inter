@@ -66,6 +66,11 @@ struct ContentView: View {
             }
             .listStyle(.sidebar)
             .scrollIndicators(.never)
+            // The system sidebar material is translucent and cooler than the content
+            // column. A flat neutral fill, run under the titlebar so no seam shows at
+            // the toolbar, keeps the whole column one plane.
+            .scrollContentBackground(.hidden)
+            .background { Surface.sidebar.ignoresSafeArea() }
             .navigationSplitViewColumnWidth(min: 240, ideal: 260)
             // Graphite-style selection. The system accent turns a scanned list into
             // a blue slab; a neutral fill keeps the type as the loudest thing.

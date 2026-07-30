@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { cancelTask, delegate, getTask, reply, waitForTasks } from "../src/tasks";
+import { cancelTask, delegate, getTask, reply, resumeTask, waitForTasks } from "../src/tasks";
 import { closeStateStore, stateStore } from "../src/store";
 import type { Profile } from "../src/types";
 
@@ -191,5 +191,30 @@ describe("task lifecycle integration", () => {
     const types = stateStore().listTaskEvents(child.id).map(({ type }) => type);
     expect(types.filter((type) => type === "worker_spawned")).toHaveLength(2);
     expect(types).toContain("resume_fallback");
+  });
+
+  integrationTest("resumes a failed task in its captured worker session", async () => {
+    const { cwd, profile } = setupClaudeBin([
+      "#!/bin/sh",
+      "case \"$*\" in",
+      "  *--resume*)",
+      "    printf '%s\\n' '{\"type\":\"result\",\"session_id\":\"sess-failed\",\"result\":\"Done.\\nINTER_RESULT: completed\"}'",
+      "    exit 0",
+      "    ;;",
+      "esac",
+      "printf '%s\\n' '{\"type\":\"system\",\"session_id\":\"sess-failed\"}'",
+      "printf '%s\\n' 'worker crashed' >&2",
+      "exit 1",
+    ].join("\n"));
+    const failed = await delegate(profile.id, "do work", cwd, undefined, undefined, {
+      scope: { read: [], write: [] },
+    });
+    await waitForAttention(failed.id);
+    expect(getTask(failed.id)).toMatchObject({ state: "failed", sessionId: "sess-failed" });
+
+    const resumed = await resumeTask(failed.id, "Finish the remaining work.");
+    await waitForAttention(resumed.id);
+    expect(getTask(resumed.id)).toMatchObject({ state: "completed", parentTaskId: failed.id });
+    expect(getTask(failed.id)?.childTaskId).toBe(resumed.id);
   });
 });

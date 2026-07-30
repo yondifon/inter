@@ -2,7 +2,7 @@ import Cocoa
 import SwiftUI
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var statusItem: NSStatusItem!
     private var window: NSWindow!
     private let broker = BrokerManager()
@@ -10,8 +10,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private let zoom = AppZoom()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.applicationIconImage = makeApplicationIcon()
-        NSApp.setActivationPolicy(.accessory)
+        if Bundle.main.object(forInfoDictionaryKey: "CFBundleIconFile") == nil {
+            NSApp.applicationIconImage = InterMark.appIcon()
+        }
+        NSApp.setActivationPolicy(.regular)
         setupMenu()
         setupStatusItem()
         setupWindow()
@@ -24,7 +26,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let main = NSMenu()
         let appItem = NSMenuItem()
         main.addItem(appItem)
-        let appMenu = NSMenu()
+        let appMenu = NSMenu(title: "Inter")
+        appMenu.addItem(withTitle: "About Inter",
+                        action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
+                        keyEquivalent: "")
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Hide Inter", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        let hideOthers = NSMenuItem(title: "Hide Others",
+                                    action: #selector(NSApplication.hideOtherApplications(_:)),
+                                    keyEquivalent: "h")
+        hideOthers.keyEquivalentModifierMask = [.command, .option]
+        appMenu.addItem(hideOthers)
+        appMenu.addItem(withTitle: "Show All",
+                        action: #selector(NSApplication.unhideAllApplications(_:)),
+                        keyEquivalent: "")
+        appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Quit Inter", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
 
@@ -75,8 +91,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        statusItem.button?.image = NSImage(systemSymbolName: "point.3.connected.trianglepath.dotted",
-                                           accessibilityDescription: "Inter")
+        statusItem.button?.image = InterMark.statusItemImage()
+        statusItem.button?.image?.accessibilityDescription = "Inter"
         statusItem.button?.target = self
         statusItem.button?.action = #selector(toggleWindow)
         statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
@@ -87,12 +103,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                           styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                           backing: .buffered, defer: false)
         window.title = "Inter"
+        // Detail views paint their own plane; this catches what they do not cover —
+        // the profile pane, the empty state, and the strip behind the toolbar.
+        window.backgroundColor = Surface.contentColor
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         window.level = .normal
         window.hidesOnDeactivate = false
         window.isReleasedWhenClosed = false
-        window.delegate = self
         window.contentViewController = NSHostingController(
             rootView: RootView(store: store, broker: broker, zoom: zoom)
         )
@@ -110,59 +128,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             statusItem.menu = menu
             statusItem.button?.performClick(nil)
             statusItem.menu = nil
-        } else if window.isVisible {
+        } else if window.isVisible && NSApp.isActive {
             hideWindow()
         } else {
+            // A visible window behind another app means the click asked for focus, not a hide.
             showWindow()
         }
     }
 
     private func showWindow() {
-        NSApp.setActivationPolicy(.regular)
         NSApp.activate()
-        window.level = .normal
         window.makeKeyAndOrderFront(nil)
     }
 
     private func hideWindow() {
         window.orderOut(nil)
-        NSApp.setActivationPolicy(.accessory)
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag { showWindow() }
         return true
-    }
-
-    func windowWillClose(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)
-    }
-
-    private func makeApplicationIcon() -> NSImage {
-        let size = NSSize(width: 512, height: 512)
-        let image = NSImage(size: size, flipped: false) { rect in
-            NSColor(calibratedRed: 0.10, green: 0.12, blue: 0.15, alpha: 1).setFill()
-            NSBezierPath(
-                roundedRect: rect.insetBy(dx: 24, dy: 24),
-                xRadius: 108,
-                yRadius: 108
-            ).fill()
-
-            let configuration = NSImage.SymbolConfiguration(
-                pointSize: 260,
-                weight: .medium
-            ).applying(.init(paletteColors: [.white]))
-            guard let symbol = NSImage(
-                systemSymbolName: "point.3.connected.trianglepath.dotted",
-                accessibilityDescription: "Inter"
-            )?.withSymbolConfiguration(configuration) else {
-                return false
-            }
-            symbol.draw(in: NSRect(x: 126, y: 126, width: 260, height: 260))
-            return true
-        }
-        image.isTemplate = false
-        return image
     }
 }
 

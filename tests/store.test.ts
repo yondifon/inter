@@ -274,6 +274,24 @@ describe("SQLite state store", () => {
     store.close();
   });
 
+  test("links one resumption without changing the failed parent state", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const parent = task("failed");
+    store.createTask(parent);
+    const child = task();
+    child.parentTaskId = parent.id;
+    store.createResumption(parent.id, child);
+    expect(store.getTask(parent.id)).toMatchObject({
+      state: "failed",
+      childTaskId: child.id,
+    });
+    expect(store.getTask(child.id)?.parentTaskId).toBe(parent.id);
+    expect(() => store.createResumption(parent.id, { ...task(), parentTaskId: parent.id }))
+      .toThrow("task cannot be resumed");
+    store.close();
+  });
+
   test("records and clears routable profile failures", () => {
     const { db } = paths();
     const store = new StateStore({ path: db, seedProfiles: [profile] });

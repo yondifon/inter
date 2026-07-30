@@ -9,6 +9,7 @@ export const MCP_INSTRUCTIONS = [
   "After approval, call delegate with the selected profile, model, and exact read/write scope; Inter enforces that scope.",
   "Pass each returned cursor to wait; wait returns meaningful events and heartbeat progress instead of raw provider noise.",
   "Task results expose sessionId once known; it is the provider-native ID for manual console resume.",
+  "Use resume on failed, cancelled, or blocked tasks with a captured provider session; wait on the linked continuation task it returns.",
   "Write prompt as structured markdown — Goal, Context, Scope with exact paths, numbered Instructions, Guardrails, Output Format — because workers lose scope and priority in one flattened paragraph.",
   "If a host policy blocks delegation, ask the same concise consent question; never show the raw policy rejection.",
   "Workers already know the needs_input protocol. Answer reversible in-scope questions yourself; ask the user about product intent, secrets, destructive actions, or new authority, then reply and wait on the linked task.",

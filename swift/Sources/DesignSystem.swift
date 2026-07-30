@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Shared visual tokens. Two radii, one hairline, one hit-target floor.
@@ -9,9 +10,27 @@ enum Radius {
 /// Depth comes from fill, not outlines. A panel lifts off the window because it is
 /// lighter; code and raw data sink into the panel because they are darker. Strokes
 /// would say the same thing twice and clutter the window doing it.
+///
+/// Flat neutral greys, not the system window/control pair: those two put the
+/// sidebar *above* the content and carry a cool cast. Reading happens in the
+/// content column, so it stays near the top of the scale and the sidebar drops one
+/// step below it — the columns part without a rule between them.
 enum Surface {
-    static let panel = Color(nsColor: .controlBackgroundColor)
+    static let sidebar = Color(nsColor: sidebarColor)
+    static let content = Color(nsColor: contentColor)
+    static let panel = Color(nsColor: panelColor)
     static let sunken = Color.primary.opacity(0.05)
+
+    static let sidebarColor = neutral(light: 0.925, dark: 0.105)
+    static let contentColor = neutral(light: 0.965, dark: 0.140)
+    static let panelColor = neutral(light: 1.000, dark: 0.180)
+
+    private static func neutral(light: CGFloat, dark: CGFloat) -> NSColor {
+        NSColor(name: nil) { appearance in
+            let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            return NSColor(white: isDark ? dark : light, alpha: 1)
+        }
+    }
 }
 
 /// One switch for the app's voice. `.data` puts every machine-produced string —
@@ -152,12 +171,25 @@ enum TaskState: String {
         }
     }
 
-    /// Shape backs up the color so state survives color-blind vision. Outlines,
-    /// not fills — filled glyphs on every row read as a wall of color.
+    /// Fill backs up the color so state survives color-blind vision: a run that
+    /// landed is a solid dot, one that has not is a ring, and live work pulses.
+    var dot: StateDot {
+        switch self {
+        case .running: .pulse
+        case .completed, .blocked, .needsInput: .filled
+        case .failed, .queued, .answered, .cancelled, .unknown: .ring
+        }
+    }
+
+    /// The dot already says completed and failed on its own. Every other state
+    /// still spends a word next to the task name.
+    var wantsLabelBesideName: Bool { self != .completed && self != .failed }
+
+    /// Glyph form, for the few places a dot is too quiet — currently the Error tab.
     var symbol: String {
         switch self {
         case .completed: "checkmark"
-        case .failed: "exclamationmark.triangle.fill"
+        case .failed: "exclamationmark.triangle"
         case .blocked: "hand.raised"
         case .cancelled: "xmark"
         case .needsInput: "questionmark.circle"
@@ -177,17 +209,46 @@ enum TaskState: String {
     }
 }
 
-/// State marker that follows zoom and never carries meaning alone — callers
-/// always render the state name beside it.
+enum StateDot {
+    case filled, ring, pulse
+}
+
+/// One dot for state, sized off zoom. It sits before the task name everywhere a
+/// task appears, so a row and its detail header read the same way.
 struct StateMarker: View {
     let state: TaskState
+    /// Set where nothing else names the state — a lone dot has to speak for itself.
+    var speaks = false
+
     @Environment(\.uiScale) private var uiScale
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var pulsing = false
 
     var body: some View {
-        Image(systemName: state.symbol)
-            .font(.system(size: 10 * uiScale, weight: .medium))
-            .foregroundStyle(state.tint)
-            .accessibilityHidden(true)
+        marker
+            .frame(width: 8 * uiScale, height: 8 * uiScale)
+            .accessibilityHidden(!speaks)
+            .accessibilityLabel("State: \(state.label)")
+    }
+
+    @ViewBuilder private var marker: some View {
+        switch state.dot {
+        case .filled:
+            Circle().fill(state.tint)
+        case .ring:
+            Circle().strokeBorder(state.tint, lineWidth: 1.5 * uiScale)
+        case .pulse:
+            Circle()
+                .fill(state.tint)
+                .opacity(pulsing ? 0.3 : 1)
+                .scaleEffect(pulsing ? 0.72 : 1)
+                .onAppear {
+                    guard !reduceMotion else { return }
+                    withAnimation(.easeInOut(duration: 0.85).repeatForever(autoreverses: true)) {
+                        pulsing = true
+                    }
+                }
+        }
     }
 }
 
@@ -199,6 +260,8 @@ struct IconButton: View {
     let symbol: String
     let label: String
     var tint: AnyShapeStyle = AnyShapeStyle(.secondary)
+    /// macOS 14 ships no vertical ellipsis, so a kebab is `ellipsis` turned 90°.
+    var rotation: Angle = .zero
     let action: () -> Void
 
     @Environment(\.uiScale) private var uiScale
@@ -206,6 +269,7 @@ struct IconButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: symbol)
+                .rotationEffect(rotation)
                 .frame(width: 24 * uiScale, height: 24 * uiScale)
                 .contentShape(.rect)
         }
