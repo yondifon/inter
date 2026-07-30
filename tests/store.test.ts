@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { Database } from "bun:sqlite";
 import { StateStore } from "../src/store";
 import type { Profile, Task } from "../src/types";
 
@@ -36,6 +37,8 @@ function task(state: Task["state"] = "queued"): Task {
     cwd: "/tmp/project",
     state,
     output: "",
+    scope: { read: ["**"], write: ["**"] },
+    allowQuestions: true,
     createdAt: now,
     updatedAt: now,
   };
@@ -132,5 +135,149 @@ describe("SQLite state store", () => {
     const reopened = new StateStore({ path: db, legacyConfigPath: legacy, seedProfiles: [] });
     expect(reopened.getSettings().dynamicProfileTools).toBe(true);
     reopened.close();
+  });
+
+  test("returns filtered summaries without full prompts or outputs", () => {
+    const { db, legacy } = paths();
+    const store = new StateStore({ path: db, legacyConfigPath: legacy, seedProfiles: [profile] });
+    const saved = task("completed");
+    saved.prompt = "x".repeat(500);
+    saved.output = "secret output";
+    store.createTask(saved);
+    const [summary] = store.listTaskSummaries({ limit: 1, state: "completed", profile: profile.id });
+    expect(summary?.promptPreview.length).toBe(240);
+    expect(summary).not.toHaveProperty("output");
+    expect(store.listTaskSummaries({ state: "failed" })).toEqual([]);
+    store.close();
+  });
+
+  test("lists meaningful events for several tasks and latest heartbeat progress", () => {
+    const { db, legacy } = paths();
+    const store = new StateStore({ path: db, legacyConfigPath: legacy, seedProfiles: [profile] });
+    const first = task("running");
+    const second = task("running");
+    store.createTask(first);
+    store.createTask(second);
+    const cursor = store.latestTaskEventId([first.id, second.id], true);
+    store.appendTaskEvent(first.id, "agent.system", first.state, { noise: true });
+    store.appendTaskEvent(second.id, "heartbeat", second.state, {
+      elapsedMs: 10_000,
+      silentMs: 4_000,
+      stalled: false,
+    });
+    expect(store.listTaskEventsForTasks([first.id, second.id], cursor, 10, true)
+      .map(({ type }) => type)).toEqual(["heartbeat"]);
+    expect(store.latestTaskProgress([first.id, second.id])[second.id]).toMatchObject({
+      elapsedMs: 10_000,
+      silentMs: 4_000,
+      stalled: false,
+    });
+    store.close();
+  });
+
+  test("atomically marks a question answered and links its continuation", () => {
+    const { db, legacy } = paths();
+    const store = new StateStore({ path: db, legacyConfigPath: legacy, seedProfiles: [profile] });
+    const parent = task("needs_input");
+    parent.question = "Which file?";
+    store.createTask(parent);
+    const child = task();
+    child.parentTaskId = parent.id;
+    store.createContinuation(parent.id, child);
+    expect(store.getTask(parent.id)).toMatchObject({
+      state: "answered",
+      childTaskId: child.id,
+    });
+    expect(store.getTask(child.id)?.parentTaskId).toBe(parent.id);
+    expect(() => store.createContinuation(parent.id, { ...task(), parentTaskId: parent.id }))
+      .toThrow("does not need input");
+    store.close();
+  });
+
+  test("records and clears routable profile failures", () => {
+    const { db, legacy } = paths();
+    const store = new StateStore({ path: db, legacyConfigPath: legacy, seedProfiles: [profile] });
+    store.recordProfileFailure(profile.id, "billing", "Insufficient balance");
+    store.recordProfileFailure(profile.id, "billing", "Still empty");
+    expect(store.listProfileFailures()[0]).toMatchObject({
+      profileId: profile.id,
+      code: "billing",
+      consecutiveFailures: 2,
+    });
+    store.clearProfileFailure(profile.id);
+    expect(store.listProfileFailures()).toEqual([]);
+    store.close();
+  });
+
+  test("does not let worker completion overwrite cancellation", () => {
+    const { db, legacy } = paths();
+    const store = new StateStore({ path: db, legacyConfigPath: legacy, seedProfiles: [profile] });
+    const running = task("running");
+    store.createTask(running);
+    expect(store.cancelTask(running.id, "stop", {
+      blocked: true,
+      code: "cancelled",
+      reason: "stop",
+    })?.state).toBe("cancelled");
+    running.state = "completed";
+    running.completion = { blocked: false, code: "completed" };
+    expect(store.saveTask(running, "completed", {}, ["running"])).toBe(false);
+    expect(store.getTask(running.id)?.state).toBe("cancelled");
+    store.close();
+  });
+
+  test("migrates existing task rows to the expanded lifecycle contract", () => {
+    const { db, legacy } = paths();
+    const old = new Database(db, { create: true });
+    old.exec(`
+      PRAGMA foreign_keys = ON;
+      CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT);
+      CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE profiles(
+        id TEXT PRIMARY KEY, label TEXT NOT NULL, provider TEXT NOT NULL,
+        default_model TEXT NOT NULL, enabled INTEGER NOT NULL, env_json TEXT NOT NULL,
+        capabilities_json TEXT NOT NULL, command_json TEXT, created_at TEXT, updated_at TEXT,
+        deleted_at TEXT
+      );
+      CREATE TABLE tasks(
+        id TEXT PRIMARY KEY, profile_id TEXT NOT NULL REFERENCES profiles(id), model TEXT NOT NULL,
+        prompt TEXT NOT NULL, cwd TEXT NOT NULL, state TEXT NOT NULL, output TEXT NOT NULL,
+        error TEXT, question TEXT, parent_task_id TEXT REFERENCES tasks(id),
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE task_events(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL REFERENCES tasks(id),
+        event_type TEXT NOT NULL, state TEXT NOT NULL, payload TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+      );
+    `);
+    old.query(`
+      INSERT INTO profiles(
+        id, label, provider, default_model, enabled, env_json, capabilities_json,
+        command_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, 1, '{}', '[]', NULL, ?, ?)
+    `).run(profile.id, profile.label, profile.provider, profile.model, new Date().toISOString(), new Date().toISOString());
+    const legacyTask = task("completed");
+    old.query(`
+      INSERT INTO tasks(
+        id, profile_id, model, prompt, cwd, state, output, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      legacyTask.id, legacyTask.profileId, legacyTask.model, legacyTask.prompt,
+      legacyTask.cwd, legacyTask.state, legacyTask.output, legacyTask.createdAt, legacyTask.updatedAt,
+    );
+    old.close();
+
+    const store = new StateStore({ path: db, legacyConfigPath: legacy, seedProfiles: [profile] });
+    expect(store.getTask(legacyTask.id)).toMatchObject({
+      state: "completed",
+      scope: { read: ["**"], write: ["**"] },
+      allowQuestions: true,
+    });
+    const migrated = store.getTask(legacyTask.id)!;
+    migrated.state = "cancelled";
+    store.saveTask(migrated, "cancelled");
+    expect(store.getTask(legacyTask.id)?.state).toBe("cancelled");
+    store.close();
   });
 });

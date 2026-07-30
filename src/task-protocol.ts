@@ -1,0 +1,131 @@
+import type { CompletionCode, TaskCompletion } from "./types";
+
+const NEEDS_INPUT = /(?:^|\r?\n)[\t ]*(?:INTER_NEEDS_INPUT|NEEDS_INPUT)\s*:\s*([^\r\n]+)[\t ]*$/i;
+const COMPLETED = /(?:^|\r?\n)[\t ]*INTER_RESULT\s*:\s*completed[\t ]*$/i;
+const BLOCKED = /(?:^|\r?\n)[\t ]*INTER_BLOCKED\s*:\s*([a-z_]+)(?:\s*[:|]\s*(.+))?[\t ]*$/i;
+const PERMISSION_BLOCK = /\b(?:awaiting|need(?:ing)?|requires?) (?:your )?(?:permission|approval)\b|\bcannot proceed\b.*\bpermission\b/i;
+
+export interface WorkerOutcome {
+  state: "needs_input" | "blocked" | "completed" | "failed";
+  output: string;
+  question?: string;
+  error?: string;
+  completion: TaskCompletion;
+}
+
+export function workerPrompt(prompt: string, allowQuestions: boolean): string {
+  return [
+    prompt,
+    "",
+    "<inter_protocol>",
+    "This reporting protocol is part of the task contract.",
+    allowQuestions
+      ? "If a product choice, secret, destructive action, or new authority is required, stop and end with: INTER_NEEDS_INPUT: <one clear question>"
+      : "Do not ask questions. If required information or authority is missing, report a blocked result.",
+    "If the requested work is fully done, end with: INTER_RESULT: completed",
+    "If work cannot be completed, end with: INTER_BLOCKED: <permission_denied|needs_authority|worker_error> | <short reason>",
+    "Emit exactly one of those status lines as the final non-empty line. Do not claim completion before the work is done.",
+    "</inter_protocol>",
+  ].join("\n");
+}
+
+export function continuationPrompt(original: string, question: string, answer: string): string {
+  return [
+    "# Original task",
+    "Treat this as context. The resolved decision below supersedes any conflicting instruction in it.",
+    "",
+    original,
+    "",
+    "# Resolved decision",
+    `Question: ${question}`,
+    `Answer: ${answer}`,
+    "",
+    "# Current instruction",
+    "Continue and finish the original task using the resolved decision. Do not ask the same question again.",
+  ].join("\n");
+}
+
+export function needsInputQuestion(output: string): string | undefined {
+  return output.match(NEEDS_INPUT)?.[1]?.trim() || undefined;
+}
+
+export function interpretWorkerOutcome(exitCode: number, output: string, stderr: string): WorkerOutcome {
+  const question = needsInputQuestion(output);
+  if (question) {
+    return {
+      state: "needs_input",
+      output,
+      question,
+      completion: { exitCode, blocked: true, code: "needs_authority", reason: question },
+    };
+  }
+  if (exitCode !== 0) {
+    const error = stderr.trim() || output.trim() || `exit ${exitCode}`;
+    const code = classifyFailure(`${stderr}\n${output}`);
+    return {
+      state: "failed",
+      output,
+      error,
+      completion: { exitCode, blocked: true, code, reason: compact(error) },
+    };
+  }
+  const block = output.match(BLOCKED);
+  if (block) {
+    const code = completionCode(block[1]);
+    const reason = block[2]?.trim() || "worker reported blocked";
+    return {
+      state: "blocked",
+      output,
+      completion: { exitCode, blocked: true, code, reason },
+    };
+  }
+  if (PERMISSION_BLOCK.test(output)) {
+    return {
+      state: "blocked",
+      output,
+      completion: {
+        exitCode,
+        blocked: true,
+        code: "permission_denied",
+        reason: compact(output),
+      },
+    };
+  }
+  if (COMPLETED.test(output)) {
+    return {
+      state: "completed",
+      output: output.replace(COMPLETED, "").trim(),
+      completion: { exitCode, blocked: false, code: "completed" },
+    };
+  }
+  return {
+    state: "blocked",
+    output,
+    completion: {
+      exitCode,
+      blocked: true,
+      code: "unverified",
+      reason: "worker exited without an Inter completion marker",
+    },
+  };
+}
+
+export function classifyFailure(value: string): CompletionCode {
+  if (/\b(?:insufficient balance|credits?error|billing|payment required)\b/i.test(value)) return "billing";
+  if (/\b(?:unauthorized|invalid api key|authentication|not logged in)\b|statusCode["': ]+401/i.test(value)) {
+    return "auth";
+  }
+  if (/\b(?:rate limit|too many requests)\b|statusCode["': ]+429/i.test(value)) return "rate_limit";
+  if (/\b(?:permission denied|operation not permitted|sandbox)\b/i.test(value)) return "permission_denied";
+  return "worker_error";
+}
+
+function completionCode(value: string | undefined): CompletionCode {
+  return value === "permission_denied" || value === "needs_authority" || value === "worker_error"
+    ? value
+    : "worker_error";
+}
+
+function compact(value: string): string {
+  return value.replace(/\s+/g, " ").trim().slice(0, 500);
+}

@@ -21,21 +21,27 @@ Agent flow:
    CLI account. If the user has not approved a destination and data scope, call
    `route` without reading file contents, then ask: “Allow Inter to share
    `<scope>` with `<provider>` profile `<label>` for this task?”
-2. After approval, call `delegate` with explicit scope, files, success criteria,
-   and checks. Reuse approval while destination and scope stay within the grant.
+2. After approval, call `delegate` with `scope.read` and `scope.write` paths
+   relative to `cwd`, plus explicit success criteria and checks. Inter enforces
+   literal paths and recursive `directory/**` rules with the macOS process sandbox.
 3. Pass the routed `profile` and `model`, or the user's explicit choice.
-4. Keep the returned task ID and event cursor. Call `wait` with `afterCursor`;
-   it returns on progress, terminal state, needed input, or timeout. Heartbeats
-   report elapsed and silent time and mark 30-second stalls.
+4. Keep the returned task ID and cursor. Call `wait` with `afterCursor`; it
+   returns concise new events and per-task heartbeat progress. Provider system
+   noise does not wake it. Heartbeats mark 30-second stalls.
 5. If input is needed, answer reversible, in-scope implementation details
    directly. Ask the user about product intent, secrets, destructive actions, or
    new authority.
 6. Call `reply` with the answer. It returns a linked continuation task; wait on
-   that new task ID.
+   that new task ID. The answered parent links forward to the child and stops
+   counting as open work.
+7. Call `cancel` when work is no longer useful, or set `timeoutMs` on `delegate`
+   for automatic cancellation.
 
 ## What works
 
 - Native SwiftUI menu-bar app with broker health and recent tasks.
+- Content zoom from **View ▸ Zoom In / Zoom Out / Actual Size** (`⌘+`, `⌘-`, `⌘0`),
+  85%–200%, remembered across launches. Native controls keep their system size.
 - Add, edit, enable, disable, and delete any number of CLI profiles.
 - Per-profile model, capabilities, and arbitrary environment variables.
 - Separate Claude logins through `CLAUDE_CONFIG_DIR` (`.claude-work`,
@@ -44,7 +50,9 @@ Agent flow:
   OpenCode, and Antigravity. Existing config gets a `.bak`.
 - Shared Streamable HTTP MCP at `http://127.0.0.1:7331/mcp`.
 - Cursor-based progress contract: `delegate` → `wait(afterCursor)` → optional
-  `reply`, with 10-second heartbeat and 30-second stall signals.
+  `reply`, with summarized events, 10-second heartbeat, and 30-second stall signals.
+- Enforced per-task read/write scope for worker subprocesses.
+- Explicit completed, blocked, failed, cancelled, needs-input, and answered states.
 - Model catalog per account. One profile can run any listed model through a
   per-task `model` override.
 - Automatic model routing classifies task depth, rejects underpowered choices
@@ -90,15 +98,19 @@ across projects.
 
 ## MCP tools
 
-- `delegate`: auto-select a model and start work; explicit profile/model wins.
+- `delegate`: auto-select a model and start scoped work; explicit profile/model
+  wins. Supports `allowQuestions` and `timeoutMs`.
 - `route`: explain the selected model and top candidates without starting work.
 - `models`: list models by profile/provider; pass any returned ID to `delegate`.
-- `wait`: use `afterCursor` to wake on progress, attention, completion, or timeout.
+- `wait`: use `afterCursor` to receive meaningful events, heartbeat progress,
+  attention, completion, or timeout.
 - `health`: report broker and MCP contract versions.
 - `inspect`: return one task snapshot immediately.
-- `tasks`: list delegated tasks, newest updated first.
+- `tasks`: list concise task summaries with `limit`, `state`, `since`, and
+  `profile` filters. Use `inspect` for full prompt and output.
 - `reply`: answer `INTER_NEEDS_INPUT: <question>` and return a linked
   continuation task.
+- `cancel`: stop a queued or running task and its worker process tree.
 - `profiles`: list available accounts and models without exposing secret-like env
   values.
 

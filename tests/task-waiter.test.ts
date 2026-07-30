@@ -36,7 +36,7 @@ function stores() {
 function storeWaiter(store: StateStore): TaskWaiter {
   return new TaskWaiter(
     (id) => store.getTask(id),
-    (ids) => store.latestTaskEventId(ids),
+    (ids) => store.latestTaskEventId(ids, true),
   );
 }
 
@@ -50,6 +50,8 @@ function task(id: string, state: Task["state"] = "running"): Task {
     cwd: "/tmp/project",
     state,
     output: "",
+    scope: { read: ["**"], write: ["**"] },
+    allowQuestions: true,
     createdAt: now,
     updatedAt: now,
   };
@@ -165,6 +167,27 @@ describe("TaskWaiter", () => {
       reader.close();
       writer.close();
     }
+  });
+
+  test("does not wake on provider system noise", async () => {
+    const { reader, writer } = stores();
+    try {
+      const work = task("noise");
+      writer.createTask(work);
+      const afterCursor = writer.latestTaskEventId([work.id], true);
+      const waiting = storeWaiter(reader).wait([work.id], 30, undefined, afterCursor);
+      writer.appendTaskEvent(work.id, "agent.system", work.state, { estimated_tokens_delta: 50 });
+      expect((await waiting).reason).toBe("timeout");
+    } finally {
+      reader.close();
+      writer.close();
+    }
+  });
+
+  test("answered parents stop requesting attention", async () => {
+    const answered = task("answered", "answered");
+    const waiter = new TaskWaiter((id) => id === answered.id ? answered : undefined);
+    expect((await waiter.wait([answered.id], 1)).reason).toBe("timeout");
   });
 
   test("detects restart recovery from another store", async () => {

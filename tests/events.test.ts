@@ -227,4 +227,157 @@ describe("task event views", () => {
     expect(view.title).toBe("Mystery Tool");
     expect(view.presentation).toEqual({ type: "tool", text: "Doing something opaque" });
   });
+
+  test("turns a Claude result into a run summary with cost, turns, and tokens", () => {
+    const view = taskEventView({
+      id: 20,
+      taskId: "task",
+      type: "agent.result",
+      state: "completed",
+      payload: {
+        type: "result", subtype: "success", is_error: false,
+        duration_ms: 11311, num_turns: 2, total_cost_usd: 0.1691551,
+        usage: {
+          input_tokens: 4, cache_creation_input_tokens: 23873,
+          cache_read_input_tokens: 71197, output_tokens: 259,
+        },
+        permission_denials: [],
+      },
+      createdAt: "now",
+    }, "claude");
+    expect(view.kind).toBe("usage");
+    expect(view.title).toBe("Run summary");
+    expect(view.presentation).toMatchObject({
+      type: "usage", costUsd: 0.1691551, turns: 2, durationMs: 11311,
+      tokensOut: 259, tokensIn: 23877, tokensCached: 71197,
+    });
+    expect(view.detail).toBe("$0.17 · 2 turns · 11s");
+  });
+
+  test("surfaces permission denials on the run summary", () => {
+    const view = taskEventView({
+      id: 21,
+      taskId: "task",
+      type: "agent.result",
+      state: "completed",
+      payload: {
+        type: "result",
+        permission_denials: [
+          { tool_name: "Bash", tool_input: { command: "ls" } },
+          { tool_name: "Write", tool_input: { file_path: "a.md" } },
+          { tool_name: "Bash", tool_input: { command: "pwd" } },
+        ],
+      },
+      createdAt: "now",
+    }, "claude");
+    expect(view.presentation?.level).toBe("warning");
+    expect(view.presentation?.text).toBe("3 permission denials: Bash, Write");
+  });
+
+  test("turns Codex turn usage into token counts with cached input split out", () => {
+    const view = taskEventView({
+      id: 22,
+      taskId: "task",
+      type: "agent.turn.completed",
+      state: "running",
+      payload: {
+        type: "turn.completed",
+        usage: { input_tokens: 37309, cached_input_tokens: 28160, output_tokens: 104 },
+      },
+      createdAt: "now",
+    }, "codex");
+    expect(view.kind).toBe("usage");
+    expect(view.presentation).toEqual({
+      type: "usage", tokensIn: 9149, tokensCached: 28160, tokensOut: 104,
+    });
+    expect(view.detail).toBe("104 tokens out · 28k cached");
+  });
+
+  test("presents thinking progress as reasoning instead of raw JSON", () => {
+    const view = taskEventView({
+      id: 23,
+      taskId: "task",
+      type: "agent.system",
+      state: "running",
+      payload: { type: "system", subtype: "thinking_tokens", estimated_tokens: 5250 },
+      createdAt: "now",
+    }, "claude");
+    expect(view.kind).toBe("reasoning");
+    expect(view.title).toBe("Thinking");
+    expect(view.detail).toBe("~5.3k tokens so far");
+  });
+
+  test("summarizes session init instead of dumping the tool list", () => {
+    const view = taskEventView({
+      id: 24,
+      taskId: "task",
+      type: "agent.system",
+      state: "running",
+      payload: {
+        type: "system", subtype: "init", model: "claude-sonnet-5",
+        permissionMode: "auto", tools: ["Bash", "Read", "Write"],
+        mcp_servers: [{ name: "inter", status: "pending" }],
+      },
+      createdAt: "now",
+    }, "claude");
+    expect(view.kind).toBe("lifecycle");
+    expect(view.title).toBe("Session started");
+    expect(view.detail).toBe("claude-sonnet-5 · 3 tools · 1 MCP server · permission auto");
+  });
+
+  test("presents an API retry as a warning signal", () => {
+    const view = taskEventView({
+      id: 25,
+      taskId: "task",
+      type: "agent.system",
+      state: "running",
+      payload: {
+        type: "system", subtype: "api_retry",
+        attempt: 1, max_retries: 10, retry_delay_ms: 603, error: "unknown",
+      },
+      createdAt: "now",
+    }, "claude");
+    expect(view.title).toBe("API retry");
+    expect(view.presentation).toEqual({
+      type: "signal", level: "warning", text: "Attempt 1 of 10 · retry in 603ms",
+    });
+  });
+
+  test("keeps an allowed rate limit event informational", () => {
+    const view = taskEventView({
+      id: 26,
+      taskId: "task",
+      type: "agent.rate_limit_event",
+      state: "running",
+      payload: {
+        type: "rate_limit_event",
+        rate_limit_info: {
+          status: "allowed", rateLimitType: "five_hour",
+          resetsAt: Math.round(Date.now() / 1_000) + 120,
+          overageStatus: "rejected", isUsingOverage: false,
+        },
+      },
+      createdAt: "now",
+    }, "claude");
+    expect(view.title).toBe("Rate limit");
+    expect(view.presentation?.level).toBe("info");
+    expect(view.presentation?.text).toContain("five hour · allowed · resets in");
+    expect(view.presentation?.text).toContain("overage off");
+  });
+
+  test("marks Claude tool results as technical echoes", () => {
+    const view = taskEventView({
+      id: 27,
+      taskId: "task",
+      type: "agent.user",
+      state: "running",
+      payload: {
+        type: "user",
+        message: { content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "ok" }] },
+      },
+      createdAt: "now",
+    }, "claude");
+    expect(view.kind).toBe("raw");
+    expect(view.title).toBe("Tool result");
+  });
 });

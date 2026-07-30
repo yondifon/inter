@@ -68,6 +68,13 @@ struct TaskEventPresentationSnapshot: Codable, Hashable {
     var text: String?
     var completed: Int?
     var total: Int?
+    var costUsd: Double?
+    var tokensIn: Int?
+    var tokensOut: Int?
+    var tokensCached: Int?
+    var turns: Int?
+    var durationMs: Int?
+    var level: String?
 }
 
 struct TaskEventPage: Codable {

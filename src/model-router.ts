@@ -1,5 +1,6 @@
 import { loadConfig } from "./config";
 import { listModels } from "./models";
+import { stateStore, type ProfileFailure } from "./store";
 import type { ModelInfo, Profile } from "./types";
 
 export type RoutePreference = "balanced" | "quality" | "cost" | "speed";
@@ -9,7 +10,7 @@ export interface ModelTraits {
   quality: number;
   cost: number;
   speed: number;
-  costSource: "catalog" | "heuristic";
+  costSource: "catalog" | "heuristic" | "unknown";
   estimatedInputUsdPerMillion?: number;
   estimatedOutputUsdPerMillion?: number;
 }
@@ -29,6 +30,7 @@ export interface ModelRoute {
   requiredQuality: number;
   reason: string;
   candidates: ModelCandidate[];
+  warnings: string[];
 }
 
 export interface RouteOptions {
@@ -38,7 +40,7 @@ export interface RouteOptions {
 
 export async function routeModel(prompt: string, options: RouteOptions = {}): Promise<ModelRoute> {
   const [models, config] = await Promise.all([listModels(), loadConfig()]);
-  return chooseModel(prompt, models, config.profiles, options);
+  return chooseModel(prompt, models, config.profiles, options, stateStore().listProfileFailures());
 }
 
 export function chooseModel(
@@ -46,12 +48,23 @@ export function chooseModel(
   models: ModelInfo[],
   profiles: Profile[],
   options: RouteOptions = {},
+  failures: ProfileFailure[] = [],
 ): ModelRoute {
   const demand = classifyTask(prompt);
   const preference = options.preference ?? "balanced";
   const enabled = new Set(profiles.filter(({ enabled }) => enabled).map(({ id }) => id));
+  const cooldownCutoff = Date.now() - 10 * 60_000;
+  const unavailable = new Map(failures
+    .filter(({ code, failedAt }) =>
+      code === "auth" || code === "billing" || Date.parse(failedAt) >= cooldownCutoff
+    )
+    .map((failure) => [failure.profileId, failure]));
+  const warnings = [...unavailable.values()].map((failure) =>
+    `excluded profile ${failure.profileId}: unresolved ${failure.code} failure at ${failure.failedAt}`
+  );
   const usable = models.filter((model) =>
     enabled.has(model.profileId) &&
+    !unavailable.has(model.profileId) &&
     model.toolCall !== false &&
     !/(?:image|video|audio|embedding|tts)(?:[-/:]|$)/i.test(model.id)
   );
@@ -59,7 +72,7 @@ export function chooseModel(
   if (hinted.length === 0) {
     throw new Error(options.modelHint
       ? `no available model matches: ${options.modelHint}`
-      : "no routable models are available");
+      : `no routable models are available${warnings.length ? `; ${warnings.join("; ")}` : ""}`);
   }
 
   const candidates = hinted.map((model) => {
@@ -83,7 +96,14 @@ export function chooseModel(
     taskClass: demand.taskClass,
     requiredQuality: demand.requiredQuality,
     reason: `${demand.reason}; selected quality ${selected.traits.quality}/5, cost ${selected.traits.cost}/5, speed ${selected.traits.speed}/5`,
-    candidates: candidates.slice(0, 3),
+    candidates: diverseCandidates(candidates, 3),
+    warnings: [
+      ...warnings,
+      ...candidates
+        .filter(({ traits }) => traits.costSource === "unknown")
+        .slice(0, 1)
+        .map(() => "some candidates have unknown price data; cost was scored neutrally"),
+    ],
   };
 }
 
@@ -131,21 +151,38 @@ export function modelTraits(model: ModelInfo): ModelTraits {
       estimatedOutputUsdPerMillion: model.cost.output,
     };
   }
-  const cost = /free/.test(id) ? 0
-    : /(?:haiku|nano|mini|flash|spark|lite)/.test(id) ? 1
-    : /(?:opus|fable|(?:^|[-/])sol|pro|max|ultra)/.test(id) ? 5
-    : 3;
-  return { quality, cost, speed, costSource: "heuristic" };
+  if (/(?:free|haiku|nano|mini|flash|spark|lite|opus|fable|(?:^|[-/])sol|pro|max|ultra)/.test(id)) {
+    const cost = /free/.test(id) ? 0 : /(?:haiku|nano|mini|flash|spark|lite)/.test(id) ? 1 : 5;
+    return { quality, cost, speed, costSource: "heuristic" };
+  }
+  return { quality, cost: 2, speed, costSource: "unknown" };
 }
 
 function score(traits: ModelTraits, requiredQuality: number, preference: RoutePreference): number {
   const qualityGap = traits.quality - requiredQuality;
-  const fit = qualityGap < 0 ? 50 + qualityGap * 30 : 50 - qualityGap * 2;
+  const fit = qualityGap < 0 ? 50 + qualityGap * 30 : 50;
   const weights = preference === "quality" ? { cost: 1, speed: 1, quality: 5 }
     : preference === "cost" ? { cost: 8, speed: 2, quality: 0 }
     : preference === "speed" ? { cost: 2, speed: 6, quality: 0 }
     : { cost: 4, speed: 2, quality: 0 };
   return fit - traits.cost * weights.cost + traits.speed * weights.speed + traits.quality * weights.quality;
+}
+
+function diverseCandidates(candidates: ModelCandidate[], limit: number): ModelCandidate[] {
+  const selected: ModelCandidate[] = [];
+  const profiles = new Set<string>();
+  for (const candidate of candidates) {
+    if (profiles.has(candidate.profileId)) continue;
+    selected.push(candidate);
+    profiles.add(candidate.profileId);
+    if (selected.length === limit) return selected;
+  }
+  for (const candidate of candidates) {
+    if (selected.includes(candidate)) continue;
+    selected.push(candidate);
+    if (selected.length === limit) break;
+  }
+  return selected;
 }
 
 function matchHint(models: ModelInfo[], hint: string): ModelInfo[] {

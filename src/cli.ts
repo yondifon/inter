@@ -5,19 +5,35 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { z } from "zod/v4";
 import { randomUUID } from "node:crypto";
 import { loadConfig, saveConfig } from "./config";
-import { appendTaskEvent, delegate, getTask, listTasks, reply, waitForTasks } from "./tasks";
+import {
+  appendTaskEvent,
+  cancelTask,
+  delegate,
+  getTask,
+  listTasks,
+  listTaskSummaries,
+  reply,
+  waitForTasks,
+} from "./tasks";
 import { listModels } from "./models";
 import { routeModel } from "./model-router";
 import { stateStore } from "./store";
-import type { Profile, Provider } from "./types";
+import type { Profile, Provider, Task } from "./types";
 import { dynamicProfileTools } from "./dynamic-tools";
 import { finalText } from "./adapters";
 import { taskEventView } from "./events";
 import { DELEGATE_DESCRIPTION, MCP_INSTRUCTIONS, dynamicDelegateDescription } from "./mcp-copy";
 
 const port = Number(process.env.INTER_PORT ?? 7331);
-const VERSION = "0.2.0";
-const MCP_CONTRACT_VERSION = 2;
+const VERSION = "0.3.0";
+const MCP_CONTRACT_VERSION = 3;
+const scopeSchema = z.object({
+  read: z.array(z.string()).max(200),
+  write: z.array(z.string()).max(200),
+});
+const taskStateSchema = z.enum([
+  "queued", "running", "needs_input", "answered", "blocked", "completed", "failed", "cancelled",
+]);
 
 Bun.serve({
   port,
@@ -132,9 +148,37 @@ Bun.serve({
       return new Response(null, { status: 204 });
     }
     if (url.pathname === "/api/tasks" && request.method === "POST") {
-      const body = await request.json() as { profile: string; prompt: string; cwd: string; model?: string };
+      const body = await request.json() as {
+        profile: string;
+        prompt: string;
+        cwd: string;
+        model?: string;
+        parent?: string;
+        scope?: { read: string[]; write: string[] };
+        allowQuestions?: boolean;
+        timeoutMs?: number;
+      };
       try {
-        return Response.json(await delegate(body.profile, body.prompt, body.cwd, body.model), { status: 202 });
+        const task = await delegate(body.profile, body.prompt, body.cwd, body.model, body.parent, {
+          scope: body.scope,
+          allowQuestions: body.allowQuestions,
+          timeoutMs: body.timeoutMs,
+        });
+        return Response.json(
+          startedTask(task),
+          { status: 202 },
+        );
+      } catch (error) {
+        return Response.json({ error: String(error) }, { status: 400 });
+      }
+    }
+    const cancelTaskId = url.pathname.match(/^\/api\/tasks\/([^/]+)$/)?.[1];
+    if (cancelTaskId && request.method === "DELETE") {
+      try {
+        return Response.json(await cancelTask(
+          decodeURIComponent(cancelTaskId),
+          url.searchParams.get("reason") ?? undefined,
+        ));
       } catch (error) {
         return Response.json({ error: String(error) }, { status: 400 });
       }
@@ -162,12 +206,23 @@ async function createMcpServer(): Promise<McpServer> {
       preference: z.enum(["balanced", "quality", "cost", "speed"]).optional(),
       prompt: z.string().min(1).max(64_000),
       cwd: z.string().min(1),
+      parent: z.string().optional(),
+      scope: scopeSchema,
+      allowQuestions: z.boolean().default(true),
+      timeoutMs: z.number().int().min(1).max(86_400_000).optional(),
     },
-  }, async ({ profile, model, preference, prompt, cwd }) => {
-    if (profile) return result(await delegate(profile, prompt, cwd, model));
+  }, async ({ profile, model, preference, prompt, cwd, parent, scope, allowQuestions, timeoutMs }) => {
+    if (profile) {
+      const task = await delegate(profile, prompt, cwd, model, parent, { scope, allowQuestions, timeoutMs });
+      return result(startedTask(task));
+    }
     const selection = await routeModel(prompt, { preference, modelHint: model });
-    const task = await delegate(selection.profileId, prompt, cwd, selection.model);
-    return result({ ...task, selection });
+    const task = await delegate(selection.profileId, prompt, cwd, selection.model, parent, {
+      scope,
+      allowQuestions,
+      timeoutMs,
+    });
+    return result({ ...startedTask(task), selection });
   });
   server.registerTool("route", {
     description: "Preview Inter's model choice and top candidates without starting work.",
@@ -188,7 +243,7 @@ async function createMcpServer(): Promise<McpServer> {
     return result(task);
   });
   server.registerTool("wait", {
-    description: "Block until any listed task needs input, completes, or fails. Returns all current task snapshots; timeout is not a failure.",
+    description: "Block until meaningful progress or attention. Returns concise events since afterCursor, heartbeat progress, and current task snapshots.",
     inputSchema: {
       taskIds: z.array(z.string()).min(1).max(8),
       timeoutMs: z.number().int().min(1).max(300_000).default(30_000),
@@ -202,13 +257,25 @@ async function createMcpServer(): Promise<McpServer> {
     inputSchema: {},
   }, async () => result({ status: "ok", version: VERSION, mcpContractVersion: MCP_CONTRACT_VERSION }));
   server.registerTool("tasks", {
-    description: "List delegated tasks, newest updated first.",
-    inputSchema: {},
-  }, async () => result(listTasks()));
+    description: "List concise delegated task summaries. Use inspect for full prompt and output.",
+    inputSchema: {
+      limit: z.number().int().min(1).max(100).default(20),
+      state: taskStateSchema.optional(),
+      since: z.string().datetime().optional(),
+      profile: z.string().optional(),
+    },
+  }, async (query) => result(listTaskSummaries(query)));
   server.registerTool("reply", {
     description: "Answer a needs_input question and return a linked continuation task. Wait on the returned task ID.",
     inputSchema: { taskId: z.string(), answer: z.string().min(1) },
-  }, async ({ taskId, answer }) => result(await reply(taskId, answer)));
+  }, async ({ taskId, answer }) => result(startedTask(await reply(taskId, answer))));
+  server.registerTool("cancel", {
+    description: "Stop a queued or running task and its worker process tree.",
+    inputSchema: {
+      taskId: z.string(),
+      reason: z.string().min(1).max(500).optional(),
+    },
+  }, async ({ taskId, reason }) => result(await cancelTask(taskId, reason)));
   server.registerTool("profiles", {
     description: "List CLI accounts and their default models.",
     inputSchema: {},
@@ -229,8 +296,19 @@ async function createMcpServer(): Promise<McpServer> {
           model: z.string().min(1).max(200).optional(),
           prompt: z.string().min(1).max(64_000),
           cwd: z.string().min(1),
+          parent: z.string().optional(),
+          scope: scopeSchema,
+          allowQuestions: z.boolean().default(true),
+          timeoutMs: z.number().int().min(1).max(86_400_000).optional(),
         },
-      }, async ({ model, prompt, cwd }) => result(await delegate(profile.id, prompt, cwd, model)));
+      }, async ({ model, prompt, cwd, parent, scope, allowQuestions, timeoutMs }) => {
+        const task = await delegate(profile.id, prompt, cwd, model, parent, {
+          scope,
+          allowQuestions,
+          timeoutMs,
+        });
+        return result(startedTask(task));
+      });
     }
   }
   return server;
@@ -251,6 +329,13 @@ async function handleMcp(request: Request): Promise<Response> {
 
 function result(value: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] };
+}
+
+function startedTask(task: Task) {
+  return {
+    ...task,
+    cursor: stateStore().latestTaskEventId([task.id], true),
+  };
 }
 
 function publicProfiles(profiles: Profile[]) {

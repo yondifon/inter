@@ -99,7 +99,7 @@ struct TaskDetail: View {
             }
         case .activity:
             VStack(alignment: .leading, spacing: 12) {
-                TaskPanel { eventContent }
+                eventContent
                 Text("Local trace may contain prompts, tool arguments, file paths, and command output.")
                     .scaledFont(.caption).foregroundStyle(.tertiary)
             }
@@ -142,44 +142,45 @@ struct TaskDetail: View {
 
     @ViewBuilder private var eventContent: some View {
         if loading {
-            HStack { ProgressView().controlSize(.small); Text("Loading trace…").foregroundStyle(.secondary) }
-                .frame(minHeight: 56)
+            TaskPanel {
+                HStack { ProgressView().controlSize(.small); Text("Loading trace…").foregroundStyle(.secondary) }
+                    .frame(minHeight: 56)
+            }
         } else if loadFailed {
-            HStack {
-                Label("Couldn’t load activity.", systemImage: "exclamationmark.triangle")
-                Spacer()
-                Button("Retry") { Task { await loadEvents() } }
-            }.frame(minHeight: 56)
+            TaskPanel {
+                HStack {
+                    Label("Couldn’t load activity.", systemImage: "exclamationmark.triangle")
+                    Spacer()
+                    Button("Retry") { Task { await loadEvents() } }
+                }.frame(minHeight: 56)
+            }
         } else if events.isEmpty {
-            Text("No structured events for this run. New delegated runs stream activity here.")
-                .scaledFont(.body).foregroundStyle(.secondary).frame(minHeight: 56)
+            TaskPanel {
+                Text("No structured events for this run. New delegated runs stream activity here.")
+                    .scaledFont(.body).foregroundStyle(.secondary).frame(minHeight: 56)
+            }
         } else {
-            LazyVStack(spacing: 0) {
-                ForEach(Array(visibleEvents.enumerated()), id: \.element.id) { index, event in
-                    TaskEventRow(event: event, showLine: index < visibleEvents.count - 1)
+            let story = ActivityStory.compose(events)
+            LazyVStack(alignment: .leading, spacing: 10) {
+                ForEach(story.blocks) { block in
+                    ActivityBlockView(block: block)
                 }
-                if technicalEventCount > 0 {
+                if showingTechnicalEvents, !story.technical.isEmpty {
+                    ActivityChapterCard(events: story.technical, muted: true)
+                }
+                if !story.technical.isEmpty {
                     Button(showingTechnicalEvents
                            ? "Hide technical events"
-                           : "Show \(technicalEventCount) technical events") {
+                           : "Show \(story.technical.count) technical events") {
                         showingTechnicalEvents.toggle()
                     }
                     .buttonStyle(.plain)
                     .scaledFont(.caption)
                     .foregroundStyle(.secondary)
-                    .padding(.leading, 34 * uiScale)
-                    .padding(.top, 6)
+                    .padding(.top, 2)
                 }
             }
         }
-    }
-
-    private var visibleEvents: [TaskEventSnapshot] {
-        showingTechnicalEvents ? events : events.filter { !$0.isTechnicalNoise }
-    }
-
-    private var technicalEventCount: Int {
-        events.count - events.filter { !$0.isTechnicalNoise }.count
     }
 
     private var workerLabel: String {
@@ -280,95 +281,295 @@ private struct TaskPanel<Content: View>: View {
     }
 }
 
-private struct TaskEventRow: View {
-    let event: TaskEventSnapshot
-    let showLine: Bool
-    @State private var showingRawDetails = false
-
-    @Environment(\.uiScale) private var uiScale
+private struct ActivityBlockView: View {
+    let block: ActivityBlock
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            VStack(spacing: 0) {
-                Image(systemName: icon).scaledFont(.caption, weight: .semibold)
-                    .foregroundStyle(tint)
-                    .frame(width: 22 * uiScale, height: 22 * uiScale)
-                    .background(rail, in: Circle())
-                    .accessibilityHidden(true)
-                if showLine {
-                    Rectangle().fill(Color(nsColor: .separatorColor))
-                        .frame(width: 1).frame(minHeight: 20 * uiScale)
-                }
-            }
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 7) {
-                    Text(event.title).scaledFont(.callout, weight: .medium, design: .monospaced)
-                    Text(event.source).scaledFont(.caption2, design: .monospaced).foregroundStyle(.tertiary)
-                    if event.rawText != nil {
-                        IconButton(
-                            symbol: showingRawDetails ? "chevron.down" : "chevron.right",
-                            label: showingRawDetails ? "Hide raw details" : "Show raw details",
-                            tint: AnyShapeStyle(.tertiary)
-                        ) { showingRawDetails.toggle() }
-                        .scaledFont(.caption2, weight: .semibold)
-                    }
-                    Spacer()
-                    Text(timeLabel).scaledFont(.caption2, design: .monospaced).foregroundStyle(.tertiary)
-                        .help(event.createdAt)
-                }
-                if let presentation = event.presentation {
-                    TaskEventPresentationView(presentation: presentation)
-                } else if let detail = event.detail {
-                    Text(detail)
-                        .scaledFont(.caption, design: isCode ? .monospaced : .default)
-                        .foregroundStyle(.secondary).textSelection(.enabled)
-                        .lineLimit(event.kind == "file" ? 1 : 6)
-                }
-                if showingRawDetails, let raw = event.rawText {
-                    ReviewContentView(source: raw, initiallyExpandJSON: false)
-                        .padding(.top, 5)
-                }
-            }
-            .padding(.bottom, showLine ? 8 : 0)
+        switch block {
+        case .chapter(_, let events):
+            ActivityChapterCard(events: events, muted: false)
+        case .reasoning(let pulse):
+            ActivityReasoningRow(pulse: pulse)
+        case .signal(let event):
+            ActivitySignalCard(event: event)
+        case .receipt(let event):
+            ActivityReceiptCard(event: event)
         }
-    }
-
-    private var timeLabel: String {
-        TaskEventTime.format(event.createdAt)
-    }
-
-    private var isCode: Bool {
-        event.kind == "command" || event.kind == "file"
-    }
-
-    private var icon: String {
-        switch event.kind {
-        case "message": "text.bubble"
-        case "reasoning": "brain"
-        case "tool": "wrench.and.screwdriver"
-        case "command": "terminal"
-        case "file": "doc"
-        case "error": "exclamationmark.triangle"
-        case "usage": "gauge"
-        case "lifecycle": event.phase == "completed" ? "checkmark" : "circle"
-        default: "ellipsis"
-        }
-    }
-
-    /// Color earns its place only when a run failed. Everything else reads neutral
-    /// so a long trace stays scannable.
-    private var tint: Color {
-        event.phase == "failed" ? .red : .secondary
-    }
-
-    private var rail: Color {
-        event.phase == "failed"
-            ? Color.red.opacity(0.12)
-            : Color(nsColor: .separatorColor).opacity(0.35)
     }
 }
 
-private struct TaskEventPresentationView: View {
+/// A run of consecutive work events on one flat card: no rails, no dots. Each
+/// row leads with what happened; the clock stays out of the way on the right.
+struct ActivityChapterCard: View {
+    let events: [TaskEventSnapshot]
+    var muted = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(events.enumerated()), id: \.element.id) { index, event in
+                ActivityWorkRow(event: event, muted: muted)
+                if index < events.count - 1 {
+                    Divider().opacity(0.4)
+                }
+            }
+        }
+        .padding(.vertical, 4)
+        .padding(.horizontal, 14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Surface.panel, in: RoundedRectangle(cornerRadius: Radius.medium))
+        .opacity(muted ? 0.72 : 1)
+    }
+}
+
+private struct ActivityWorkRow: View {
+    let event: TaskEventSnapshot
+    var muted = false
+    @State private var showingRawDetails = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                if isQuote {
+                    quoteContent
+                } else {
+                    Text(event.title)
+                        .scaledFont(.callout, weight: .medium, design: .monospaced)
+                        .foregroundStyle(event.phase == "failed" ? AnyShapeStyle(.red) : AnyShapeStyle(.primary))
+                        .layoutPriority(1)
+                    inlineContent
+                }
+                Spacer(minLength: 12)
+                if event.rawText != nil {
+                    IconButton(
+                        symbol: showingRawDetails ? "chevron.down" : "chevron.right",
+                        label: showingRawDetails ? "Hide raw details" : "Show raw details",
+                        tint: AnyShapeStyle(.tertiary)
+                    ) { showingRawDetails.toggle() }
+                    .scaledFont(.caption2, weight: .semibold)
+                }
+                Text(EventClock.time(event.createdAt))
+                    .scaledFont(.caption2, design: .monospaced)
+                    .foregroundStyle(.tertiary)
+                    .help(event.createdAt)
+            }
+            if let presentation = blockPresentation {
+                TaskEventPresentationView(presentation: presentation)
+            }
+            if showingRawDetails, let raw = event.rawText {
+                ReviewContentView(source: raw, initiallyExpandJSON: false)
+                    .padding(.top, 3)
+            }
+        }
+        .padding(.vertical, 8)
+    }
+
+    /// Agent prose reads as a quotation, not as a titled row.
+    private var isQuote: Bool {
+        event.kind == "message" || (event.kind == "reasoning" && event.title != "Thinking")
+    }
+
+    @ViewBuilder private var quoteContent: some View {
+        HStack(alignment: .top, spacing: 9) {
+            RoundedRectangle(cornerRadius: 1)
+                .fill(Color(nsColor: .separatorColor))
+                .frame(width: 2)
+            Text(event.presentation?.text ?? event.detail ?? event.title)
+                .scaledFont(.callout)
+                .foregroundStyle(.secondary)
+                .lineLimit(6)
+                .textSelection(.enabled)
+        }
+    }
+
+    /// Compact one-line details stay on the title line; anything taller drops
+    /// below it. Usage and signal shapes render in their own cards, so a stray
+    /// one here (a superseded turn receipt in the technical list) shows its
+    /// plain detail text instead of nothing.
+    private var blockPresentation: TaskEventPresentationSnapshot? {
+        guard !isQuote, let presentation = event.presentation else {
+            return isQuote ? nil : fallbackDetail
+        }
+        switch presentation.type {
+        case "file":
+            return nil
+        case "usage", "signal":
+            guard let detail = event.detail else { return nil }
+            return TaskEventPresentationSnapshot(type: "message", text: detail)
+        default:
+            return presentation
+        }
+    }
+
+    private var fallbackDetail: TaskEventPresentationSnapshot? {
+        guard event.presentation == nil, let detail = event.detail else { return nil }
+        return TaskEventPresentationSnapshot(type: "message", text: detail)
+    }
+
+    @ViewBuilder private var inlineContent: some View {
+        if let presentation = event.presentation, presentation.type == "file" {
+            HStack(spacing: 8) {
+                if let path = presentation.path {
+                    Text(path).scaledFont(.caption, design: .monospaced).foregroundStyle(.secondary)
+                        .lineLimit(1).truncationMode(.middle)
+                }
+                if let change = presentation.change {
+                    Text(change).scaledFont(.caption, weight: .medium, design: .monospaced)
+                        .lineLimit(1)
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(Surface.sunken, in: RoundedRectangle(cornerRadius: Radius.small))
+                }
+            }
+            .textSelection(.enabled)
+        }
+    }
+}
+
+/// Thinking bursts become one quiet line between chapters instead of a row
+/// per counter tick.
+private struct ActivityReasoningRow: View {
+    let pulse: ActivityStory.ReasoningPulse
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "brain").scaledFont(.caption2).foregroundStyle(.tertiary)
+                .accessibilityHidden(true)
+            Text(label).scaledFont(.caption, design: .monospaced).foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 2)
+    }
+
+    private var label: String {
+        var parts = [pulse.detail.replacingOccurrences(of: "~", with: "Reasoned ~")]
+        if let seconds = pulse.seconds { parts.append("\(seconds)s") }
+        return parts.joined(separator: " · ")
+    }
+}
+
+/// Retries, rate limits, stalls, questions, and broker failures get one loud
+/// strip each. This is the only place the trace uses color before failure.
+private struct ActivitySignalCard: View {
+    let event: TaskEventSnapshot
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 9) {
+            Image(systemName: symbol).scaledFont(.caption, weight: .semibold)
+                .foregroundStyle(tint)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(event.title).scaledFont(.callout, weight: .medium)
+                if let text = event.presentation?.text ?? event.detail {
+                    Text(text).scaledFont(.caption).foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+            }
+            Spacer(minLength: 12)
+            Text(EventClock.time(event.createdAt))
+                .scaledFont(.caption2, design: .monospaced)
+                .foregroundStyle(.tertiary)
+                .help(event.createdAt)
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(tint.opacity(0.09), in: RoundedRectangle(cornerRadius: Radius.medium))
+    }
+
+    private var severity: String {
+        if event.kind == "error" { return "error" }
+        return event.presentation?.level ?? "warning"
+    }
+
+    private var tint: Color {
+        switch severity {
+        case "error": .red
+        case "info": .secondary
+        default: .orange
+        }
+    }
+
+    private var symbol: String {
+        switch event.title {
+        case "Worker needs input": "questionmark.bubble"
+        case "Rate limit": "hourglass"
+        case "API retry": "arrow.clockwise"
+        case "Heartbeat": "zzz"
+        default: "exclamationmark.triangle"
+        }
+    }
+}
+
+/// The run's settlement: cost, turns, duration, and tokens as stats instead of
+/// a JSON blob. Denials surface here because this is where they were buried.
+private struct ActivityReceiptCard: View {
+    let event: TaskEventSnapshot
+    @State private var showingRawDetails = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text(event.phase == "failed" ? "Run failed" : "Run settled")
+                    .scaledFont(.caption, weight: .semibold, design: .monospaced)
+                    .tracking(0.5)
+                    .foregroundStyle(event.phase == "failed" ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
+                    .textCase(.uppercase)
+                Spacer()
+                if event.rawText != nil {
+                    IconButton(
+                        symbol: showingRawDetails ? "chevron.down" : "chevron.right",
+                        label: showingRawDetails ? "Hide raw details" : "Show raw details",
+                        tint: AnyShapeStyle(.tertiary)
+                    ) { showingRawDetails.toggle() }
+                    .scaledFont(.caption2, weight: .semibold)
+                }
+                Text(EventClock.time(event.createdAt))
+                    .scaledFont(.caption2, design: .monospaced).foregroundStyle(.tertiary)
+            }
+            HStack(alignment: .top, spacing: 0) {
+                ForEach(Array(stats.enumerated()), id: \.offset) { index, stat in
+                    if index > 0 { Divider().frame(maxHeight: 34).padding(.horizontal, 14) }
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(stat.value)
+                            .scaledFont(.title3, weight: .semibold, monospacedDigit: true)
+                        Text(stat.label)
+                            .scaledFont(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            if let warning = event.presentation?.text {
+                Label(warning, systemImage: "hand.raised")
+                    .scaledFont(.caption, weight: .medium)
+                    .foregroundStyle(.orange)
+            }
+            if showingRawDetails, let raw = event.rawText {
+                ReviewContentView(source: raw, initiallyExpandJSON: false)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Surface.panel, in: RoundedRectangle(cornerRadius: Radius.medium))
+        .overlay(
+            RoundedRectangle(cornerRadius: Radius.medium)
+                .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1)
+        )
+    }
+
+    private var stats: [(value: String, label: String)] {
+        guard let presentation = event.presentation else {
+            return [(event.detail ?? "—", "summary")]
+        }
+        var values: [(String, String)] = []
+        if let cost = presentation.costUsd { values.append((ActivityFormat.cost(cost), "cost")) }
+        if let turns = presentation.turns { values.append((String(turns), turns == 1 ? "turn" : "turns")) }
+        if let duration = presentation.durationMs { values.append((ActivityFormat.duration(duration), "duration")) }
+        if let out = presentation.tokensOut { values.append((ActivityFormat.count(out), "tokens out")) }
+        if let input = presentation.tokensIn { values.append((ActivityFormat.count(input), "tokens in")) }
+        if let cached = presentation.tokensCached { values.append((ActivityFormat.count(cached), "cached")) }
+        return values.isEmpty ? [(event.detail ?? "—", "summary")] : Array(values.prefix(5))
+    }
+}
+
+struct TaskEventPresentationView: View {
     let presentation: TaskEventPresentationSnapshot
 
     @Environment(\.uiScale) private var uiScale
@@ -439,31 +640,6 @@ private struct TaskEventPresentationView: View {
         ]
         .compactMap { $0 }
         .joined(separator: " · ")
-    }
-}
-
-extension TaskEventSnapshot {
-    var isTechnicalNoise: Bool {
-        if kind == "raw", ["Step Start", "Step Finish"].contains(title) {
-            return true
-        }
-        return title == "Heartbeat" && !(detail?.contains("No agent event") ?? false)
-    }
-}
-
-private enum TaskEventTime {
-    private static let fractional: ISO8601DateFormatter = {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter
-    }()
-    private static let standard = ISO8601DateFormatter()
-
-    static func format(_ value: String) -> String {
-        guard let date = fractional.date(from: value) ?? standard.date(from: value) else {
-            return value
-        }
-        return date.formatted(date: .omitted, time: .standard)
     }
 }
 

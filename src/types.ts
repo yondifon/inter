@@ -1,5 +1,37 @@
 export type Provider = "claude" | "codex" | "opencode" | "antigravity";
-export type TaskState = "queued" | "running" | "needs_input" | "completed" | "failed";
+export type TaskState =
+  | "queued"
+  | "running"
+  | "needs_input"
+  | "answered"
+  | "blocked"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export interface TaskScope {
+  read: string[];
+  write: string[];
+}
+
+export type CompletionCode =
+  | "completed"
+  | "permission_denied"
+  | "needs_authority"
+  | "unverified"
+  | "cancelled"
+  | "timeout"
+  | "auth"
+  | "billing"
+  | "rate_limit"
+  | "worker_error";
+
+export interface TaskCompletion {
+  exitCode?: number;
+  blocked: boolean;
+  code: CompletionCode;
+  reason?: string;
+}
 
 export interface Profile {
   id: string;
@@ -33,6 +65,27 @@ export interface Task {
   error?: string;
   question?: string;
   parentTaskId?: string;
+  childTaskId?: string;
+  scope: TaskScope;
+  allowQuestions: boolean;
+  timeoutMs?: number;
+  completion?: TaskCompletion;
+}
+
+export interface TaskSummary {
+  id: string;
+  profileId: string;
+  model: string;
+  cwd: string;
+  state: TaskState;
+  promptPreview: string;
+  createdAt: string;
+  updatedAt: string;
+  error?: string;
+  question?: string;
+  parentTaskId?: string;
+  childTaskId?: string;
+  completion?: TaskCompletion;
 }
 
 export interface ModelInfo {

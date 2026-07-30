@@ -4,6 +4,21 @@ export interface TaskWaitResult {
   reason: "attention" | "progress" | "timeout";
   tasks: Task[];
   cursor: number;
+  events?: Array<{
+    id: number;
+    taskId: string;
+    type: string;
+    state: Task["state"];
+    at: string;
+    summary: string;
+  }>;
+  progress?: Record<string, {
+    elapsedMs: number;
+    silentMs: number;
+    stalled: boolean;
+    at: string;
+  }>;
+  hasMore?: boolean;
 }
 
 type Listener = (taskId?: string) => void;
@@ -95,5 +110,6 @@ export class TaskWaiter {
 }
 
 function needsAttention(task: Task): boolean {
-  return task.state === "needs_input" || task.state === "completed" || task.state === "failed";
+  return task.state === "needs_input" || task.state === "blocked" ||
+    task.state === "completed" || task.state === "failed" || task.state === "cancelled";
 }

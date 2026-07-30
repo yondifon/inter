@@ -15,7 +15,7 @@ export interface TaskEventView {
 }
 
 export interface TaskEventPresentation {
-  type: "file" | "command" | "message" | "todo" | "tool";
+  type: "file" | "command" | "message" | "todo" | "tool" | "usage" | "signal";
   path?: string;
   change?: string;
   command?: string;
@@ -24,6 +24,13 @@ export interface TaskEventPresentation {
   text?: string;
   completed?: number;
   total?: number;
+  costUsd?: number;
+  tokensIn?: number;
+  tokensOut?: number;
+  tokensCached?: number;
+  turns?: number;
+  durationMs?: number;
+  level?: "info" | "warning" | "error";
 }
 
 export function taskEventView(event: TaskEvent, provider: Profile["provider"]): TaskEventView {
@@ -70,6 +77,9 @@ export function taskEventView(event: TaskEvent, provider: Profile["provider"]): 
     return { ...base, kind: hookName === "Notification" ? "message" : "lifecycle", phase: "info",
       title: humanize(hookName), detail, rawText };
   }
+  const known = knownAgentEvent(base, payload, rawText);
+  if (known) return known;
+
   const item = object(payload.item);
   const part = object(payload.part);
   const message = object(payload.message);
@@ -91,6 +101,10 @@ export function taskEventView(event: TaskEvent, provider: Profile["provider"]): 
 
   if (subjectType.includes("error") || status === "failed") {
     return { ...base, kind: "error", phase: "failed", title: tool ? `${tool} failed` : "Agent error", detail, rawText };
+  }
+  // Tool results echo work the matching tool event already reported.
+  if (subjectType.includes("tool_result")) {
+    return { ...base, kind: "raw", phase: "info", title: "Tool result", detail, rawText };
   }
   if (subjectType.includes("reason")) {
     return { ...base, kind: "reasoning", phase: statusPhase(status), title: "Reasoning", detail, rawText };
@@ -117,14 +131,154 @@ export function taskEventView(event: TaskEvent, provider: Profile["provider"]): 
   return { ...base, kind: "raw", phase: statusPhase(status), title: humanize(subjectType), detail, rawText };
 }
 
+type EventBase = Pick<TaskEventView, "id" | "taskId" | "source" | "createdAt">;
+
+/// Provider payload shapes this app knows how to present without dumping JSON:
+/// run receipts, per-turn usage, thinking progress, session boot, retries, and
+/// rate limits. Anything unmatched falls through to the generic subject flow.
+function knownAgentEvent(
+  base: EventBase,
+  payload: Record<string, any>,
+  rawText?: string,
+): TaskEventView | undefined {
+  const payloadType = string(payload.type);
+  const raw = rawText ? { rawText } : {};
+
+  if (payloadType === "system") {
+    const subtype = string(payload.subtype);
+    if (subtype === "thinking_tokens") {
+      const tokens = Math.max(0, Number(payload.estimated_tokens ?? 0));
+      return { ...base, kind: "reasoning", phase: "started", title: "Thinking",
+        detail: `~${formatCount(tokens)} tokens so far`, ...raw };
+    }
+    if (subtype === "init") {
+      const tools = Array.isArray(payload.tools) ? payload.tools.length : 0;
+      const servers = Array.isArray(payload.mcp_servers) ? payload.mcp_servers.length : 0;
+      return { ...base, kind: "lifecycle", phase: "info", title: "Session started",
+        detail: joinDetail(
+          string(payload.model),
+          tools ? `${tools} tools` : undefined,
+          servers ? `${servers} MCP server${servers === 1 ? "" : "s"}` : undefined,
+          string(payload.permissionMode) ? `permission ${payload.permissionMode}` : undefined,
+        ), ...raw };
+    }
+    if (subtype === "api_retry") {
+      const attempt = Number(payload.attempt ?? 0);
+      const max = Number(payload.max_retries ?? 0);
+      const delay = Number(payload.retry_delay_ms ?? 0);
+      const error = string(payload.error);
+      const text = joinDetail(
+        max ? `Attempt ${attempt} of ${max}` : `Attempt ${attempt}`,
+        delay ? `retry in ${formatDuration(delay)}` : undefined,
+        error && error !== "unknown" ? error : undefined,
+      ) ?? "API retry";
+      return { ...base, kind: "lifecycle", phase: "info", title: "API retry",
+        detail: text, presentation: { type: "signal", level: "warning", text }, ...raw };
+    }
+    // hook_started, hook_response, status, commands_changed: plumbing.
+    return { ...base, kind: "raw", phase: "info", title: humanize(subtype ?? "system"), ...raw };
+  }
+
+  if (payloadType === "result") {
+    const usage = object(payload.usage);
+    const denials = Array.isArray(payload.permission_denials)
+      ? payload.permission_denials.map((denial) => string(object(denial).tool_name)).filter(Boolean) as string[]
+      : [];
+    const presentation: TaskEventPresentation = {
+      type: "usage",
+      ...(typeof payload.total_cost_usd === "number" ? { costUsd: payload.total_cost_usd } : {}),
+      ...(typeof payload.num_turns === "number" ? { turns: payload.num_turns } : {}),
+      ...(typeof payload.duration_ms === "number" ? { durationMs: payload.duration_ms } : {}),
+      ...(typeof usage.output_tokens === "number" ? { tokensOut: usage.output_tokens } : {}),
+      ...(typeof usage.input_tokens === "number"
+        ? { tokensIn: usage.input_tokens + Number(usage.cache_creation_input_tokens ?? 0) }
+        : {}),
+      ...(typeof usage.cache_read_input_tokens === "number"
+        ? { tokensCached: usage.cache_read_input_tokens }
+        : {}),
+      ...(denials.length
+        ? { level: "warning" as const,
+            text: `${denials.length} permission denial${denials.length === 1 ? "" : "s"}: ${[...new Set(denials)].join(", ")}` }
+        : {}),
+    };
+    const failed = payload.is_error === true;
+    return { ...base, kind: "usage", phase: failed ? "failed" : "completed", title: "Run summary",
+      detail: joinDetail(
+        typeof presentation.costUsd === "number" ? formatCost(presentation.costUsd) : undefined,
+        presentation.turns ? `${presentation.turns} turn${presentation.turns === 1 ? "" : "s"}` : undefined,
+        presentation.durationMs ? formatDuration(presentation.durationMs) : undefined,
+        presentation.text,
+      ), presentation, ...raw };
+  }
+
+  if (payloadType === "turn.completed") {
+    const usage = object(payload.usage);
+    const cached = Number(usage.cached_input_tokens ?? 0);
+    const presentation: TaskEventPresentation = {
+      type: "usage",
+      ...(typeof usage.input_tokens === "number"
+        ? { tokensIn: Math.max(0, usage.input_tokens - cached) }
+        : {}),
+      ...(cached ? { tokensCached: cached } : {}),
+      ...(typeof usage.output_tokens === "number" ? { tokensOut: usage.output_tokens } : {}),
+    };
+    return { ...base, kind: "usage", phase: "completed", title: "Turn completed",
+      detail: joinDetail(
+        typeof presentation.tokensOut === "number"
+          ? `${formatCount(presentation.tokensOut)} tokens out`
+          : undefined,
+        cached ? `${formatCount(cached)} cached` : undefined,
+      ), presentation, ...raw };
+  }
+
+  if (payloadType === "rate_limit_event") {
+    const info = object(payload.rate_limit_info);
+    const status = string(info.status);
+    const resetsAt = Number(info.resetsAt ?? 0);
+    const remainingMs = resetsAt ? resetsAt * 1_000 - Date.now() : 0;
+    const text = joinDetail(
+      string(info.rateLimitType)?.replaceAll("_", " "),
+      status,
+      remainingMs > 0 ? `resets in ${formatDuration(remainingMs)}` : undefined,
+      info.isUsingOverage === false && string(info.overageStatus) === "rejected" ? "overage off" : undefined,
+    ) ?? "Rate limit";
+    const level = status === "allowed" ? "info" as const : "warning" as const;
+    return { ...base, kind: "lifecycle", phase: "info", title: "Rate limit",
+      detail: text, presentation: { type: "signal", level, text }, ...raw };
+  }
+
+  return undefined;
+}
+
+function formatCount(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 10_000) return `${Math.round(value / 1_000)}k`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
+  return String(Math.round(value));
+}
+
+function formatCost(value: number): string {
+  return value >= 0.01 || value === 0 ? `$${value.toFixed(2)}` : `$${value.toFixed(4)}`;
+}
+
+function formatDuration(ms: number): string {
+  if (ms < 1_000) return `${Math.round(ms)}ms`;
+  const seconds = ms / 1_000;
+  if (seconds < 60) return `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${Math.round(seconds % 60)}s`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
 function lifecycleTitle(type: string): string {
   return ({ created: "Task queued", started: "Worker started", completed: "Task completed",
-    failed: "Task failed", needs_input: "Worker needs input",
+    failed: "Task failed", needs_input: "Worker needs input", answered: "Question answered",
+    blocked: "Task blocked", cancelled: "Task cancelled",
     events_truncated: "Event capture limit reached" } as Record<string, string>)[type] ?? humanize(type);
 }
 
 function phase(state: TaskState): TaskEventView["phase"] {
-  if (state === "failed") return "failed";
+  if (state === "failed" || state === "blocked" || state === "cancelled") return "failed";
   if (state === "completed") return "completed";
   if (state === "running") return "started";
   return "info";

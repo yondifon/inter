@@ -16,7 +16,7 @@ describe("CLI adapters", () => {
   test("builds isolated Claude print command", () => {
     expect(commandFor(base, "review", "/repo")).toEqual([
       "claude", "-p", "--output-format", "stream-json", "--verbose", "--model", "sonnet",
-      "--permission-mode", "auto", "review",
+      "--permission-mode", "acceptEdits", "review",
     ]);
   });
 

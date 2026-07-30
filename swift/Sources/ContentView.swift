@@ -14,7 +14,8 @@ struct ContentView: View {
     @State private var installResults: [MCPConfigInjector.InstallResult] = []
     @State private var showingInstall = false
     @AppStorage("taskProjectFilter") private var projectFilter = ""
-    @AppStorage("taskGroupByProject") private var groupByProject = false
+    @AppStorage("taskGrouping") private var groupingRaw = TaskGrouping.parent.rawValue
+    @AppStorage("collapsedTaskGroups") private var collapsedRaw = ""
     @Environment(\.uiScale) private var uiScale
 
     var body: some View {
@@ -38,11 +39,15 @@ struct ContentView: View {
                     } else {
                         ForEach(taskGroups) { group in
                             if let title = group.title {
-                                SectionLabel(text: title)
+                                TaskGroupHeader(
+                                    title: title,
+                                    count: group.tasks.count,
+                                    collapsed: collapsedGroups.contains(group.id)
+                                ) { toggleCollapse(group.id) }
                                     .padding(.top, 4)
                                     .help(group.id)
                             }
-                            ForEach(group.tasks) { task in
+                            ForEach(TaskOrganizer.visibleTasks(in: group, collapsed: collapsedGroups)) { task in
                                 TaskRow(
                                     task: task,
                                     worker: store.profiles.first { $0.id == task.profileId }?.label ?? task.profileId
@@ -105,11 +110,25 @@ struct ContentView: View {
         TaskOrganizer.activeProjectName(tasks: store.tasks, project: projectFilter.isEmpty ? nil : projectFilter)
     }
 
+    private var grouping: TaskGrouping { TaskGrouping(rawValue: groupingRaw) ?? .parent }
+
+    /// Ids are folder paths or task ids, neither of which can contain a newline.
+    private var collapsedGroups: Set<String> {
+        Set(collapsedRaw.split(separator: "\n").map(String.init))
+    }
+
+    private func toggleCollapse(_ id: String) {
+        var ids = collapsedGroups
+        if ids.contains(id) { ids.remove(id) } else { ids.insert(id) }
+        collapsedRaw = TaskOrganizer.pruneCollapsed(ids, groups: taskGroups)
+            .sorted().joined(separator: "\n")
+    }
+
     private var taskGroups: [TaskGroup] {
         TaskOrganizer.organize(
             tasks: store.tasks,
             project: projectFilter.isEmpty ? nil : projectFilter,
-            grouped: groupByProject
+            grouping: grouping
         )
     }
 
@@ -125,7 +144,12 @@ struct ContentView: View {
             }
             .pickerStyle(.inline)
             Divider()
-            Toggle("Group by project", isOn: $groupByProject)
+            Picker("Group by", selection: $groupingRaw) {
+                ForEach(TaskGrouping.allCases) { option in
+                    Text(option.label).tag(option.rawValue)
+                }
+            }
+            .pickerStyle(.inline)
         } label: {
             Image(systemName: isFiltering
                   ? "line.3.horizontal.decrease.circle.fill"
@@ -140,7 +164,7 @@ struct ContentView: View {
         .accessibilityLabel("Filter and group tasks by project")
     }
 
-    private var isFiltering: Bool { activeProjectName != nil || groupByProject }
+    private var isFiltering: Bool { activeProjectName != nil || grouping != .parent }
 
     /// Broker health is app-wide, so it sits above the sidebar with the other
     /// global controls instead of in the detail toolbar, where it read as part of
@@ -271,6 +295,36 @@ private struct EnvironmentRow: View {
         } label: {
             Text(key).scaledFont(.callout, design: .monospaced)
         }
+    }
+}
+
+/// Collapsible heading for one run of tasks. The count stays visible when the run
+/// is closed so a collapsed group never reads as an empty one.
+private struct TaskGroupHeader: View {
+    let title: String
+    let count: Int
+    let collapsed: Bool
+    let toggle: () -> Void
+
+    var body: some View {
+        Button(action: toggle) {
+            HStack(spacing: 5) {
+                Image(systemName: "chevron.down")
+                    .scaledFont(.caption2, weight: .semibold)
+                    .foregroundStyle(.tertiary)
+                    .rotationEffect(.degrees(collapsed ? -90 : 0))
+                SectionLabel(text: title)
+                Spacer(minLength: 0)
+                Text("\(count)")
+                    .scaledFont(.caption2, design: .monospaced)
+                    .foregroundStyle(.tertiary)
+            }
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .animation(.snappy(duration: 0.16), value: collapsed)
+        .accessibilityLabel("\(title), \(count) task\(count == 1 ? "" : "s")")
+        .accessibilityValue(collapsed ? "Collapsed" : "Expanded")
     }
 }
 

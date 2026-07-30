@@ -12,7 +12,7 @@ export function commandFor(profile: Profile, prompt: string, cwd: string, model 
     case "claude":
       return [
         "claude", "-p", "--output-format", "stream-json", "--verbose", "--model", model,
-        "--permission-mode", "auto",
+        "--permission-mode", "acceptEdits",
         ...(hookUrl ? ["--settings", claudeHookSettings(hookUrl)] : []),
         prompt,
       ];

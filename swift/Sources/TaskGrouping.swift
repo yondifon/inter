@@ -8,16 +8,38 @@ struct TaskProject: Identifiable, Hashable {
     let count: Int
 }
 
-/// One rendered run of task rows. `title` is nil for the ungrouped list.
+/// How the task list is divided.
+enum TaskGrouping: String, CaseIterable, Identifiable {
+    case parent
+    case project
+    case none
+
+    var id: Self { self }
+
+    var label: String {
+        switch self {
+        case .parent: "Parent task"
+        case .project: "Project"
+        case .none: "Nothing"
+        }
+    }
+}
+
+/// One rendered run of task rows. `title` is nil for a run that needs no heading.
 struct TaskGroup: Identifiable {
     let id: String
     let title: String?
     let tasks: [TaskSnapshot]
 }
 
-/// Filtering and grouping for the task list. Pure, so the ordering rules that
-/// matter — newest project first, newest task first — are testable without a view.
+/// Filtering and grouping for the task list. Pure, so the ordering and
+/// parent-walking rules are testable without a view.
 enum TaskOrganizer {
+    /// Deep enough for any real delegation tree, and a hard stop if task data ever
+    /// contains a parent cycle.
+    private static let maxParentDepth = 32
+    private static let headingLimit = 38
+
     static func projectName(_ path: String) -> String {
         path.split(separator: "/").map(String.init).last ?? path
     }
@@ -36,25 +58,103 @@ enum TaskOrganizer {
 
     /// A saved filter naming a project with no tasks left is ignored rather than
     /// honored, so a stale preference can never strand the sidebar on an empty list.
-    static func organize(tasks: [TaskSnapshot], project: String?, grouped: Bool) -> [TaskGroup] {
+    static func organize(
+        tasks: [TaskSnapshot],
+        project: String?,
+        grouping: TaskGrouping
+    ) -> [TaskGroup] {
         let known = Set(tasks.map(\.cwd))
         let active = project.flatMap { known.contains($0) ? $0 : nil }
         let scoped = active.map { path in tasks.filter { $0.cwd == path } } ?? tasks
 
-        guard grouped else { return [TaskGroup(id: "all", title: nil, tasks: scoped)] }
-
-        var order: [String] = []
-        var buckets: [String: [TaskSnapshot]] = [:]
-        for task in scoped {
-            if buckets[task.cwd] == nil { order.append(task.cwd) }
-            buckets[task.cwd, default: []].append(task)
+        switch grouping {
+        case .none:
+            return [TaskGroup(id: "all", title: nil, tasks: scoped)]
+        case .project:
+            return bucket(scoped) { ($0.cwd, projectName($0.cwd)) }
+        case .parent:
+            return parentGroups(scoped)
         }
-        return order.map { TaskGroup(id: $0, title: projectName($0), tasks: buckets[$0] ?? []) }
     }
 
     /// Name to show for an active filter, or nil when every project is showing.
     static func activeProjectName(tasks: [TaskSnapshot], project: String?) -> String? {
         guard let project, tasks.contains(where: { $0.cwd == project }) else { return nil }
         return projectName(project)
+    }
+
+    /// Groups every task under the root of its parent chain. A task that is nobody's
+    /// child and nobody's parent gets no heading — a lone run titled with its own
+    /// prompt would print the same sentence twice.
+    private static func parentGroups(_ tasks: [TaskSnapshot]) -> [TaskGroup] {
+        let byID = Dictionary(tasks.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let groups = bucket(tasks) { task in
+            let root = self.root(of: task, in: byID)
+            return (root.id, heading(root.prompt))
+        }
+        return groups.map { group in
+            let solo = group.tasks.count == 1 && group.tasks[0].parentTaskId == nil
+            return solo ? TaskGroup(id: group.id, title: nil, tasks: group.tasks) : group
+        }
+    }
+
+    /// Walks to the topmost ancestor present in the list. A parent that was purged,
+    /// or a cycle, resolves to the deepest task actually reachable.
+    private static func root(
+        of task: TaskSnapshot,
+        in byID: [String: TaskSnapshot]
+    ) -> TaskSnapshot {
+        var current = task
+        var seen: Set<String> = [task.id]
+        for _ in 0..<maxParentDepth {
+            guard let parentID = current.parentTaskId,
+                  let parent = byID[parentID],
+                  !seen.contains(parentID) else { return current }
+            seen.insert(parentID)
+            current = parent
+        }
+        return current
+    }
+
+    /// Buckets tasks by a key, keeping both the group order and the order within
+    /// each group as the store sent them — newest first.
+    private static func bucket(
+        _ tasks: [TaskSnapshot],
+        by key: (TaskSnapshot) -> (id: String, title: String)
+    ) -> [TaskGroup] {
+        var order: [String] = []
+        var titles: [String: String] = [:]
+        var buckets: [String: [TaskSnapshot]] = [:]
+        for task in tasks {
+            let (id, title) = key(task)
+            if buckets[id] == nil {
+                order.append(id)
+                titles[id] = title
+            }
+            buckets[id, default: []].append(task)
+        }
+        return order.map { TaskGroup(id: $0, title: titles[$0], tasks: buckets[$0] ?? []) }
+    }
+
+    /// Rows to draw for a group. Only a group with a heading can be collapsed —
+    /// an untitled run has no control to expand it again, so a stale collapsed id
+    /// left over from when it had children must not hide it.
+    static func visibleTasks(in group: TaskGroup, collapsed: Set<String>) -> [TaskSnapshot] {
+        guard group.title != nil, collapsed.contains(group.id) else { return group.tasks }
+        return []
+    }
+
+    /// Drops ids whose group is gone, so parent-task ids cannot pile up in the
+    /// saved preference as tasks age out of the list.
+    static func pruneCollapsed(_ collapsed: Set<String>, groups: [TaskGroup]) -> Set<String> {
+        collapsed.intersection(Set(groups.filter { $0.title != nil }.map(\.id)))
+    }
+
+    /// First line of a prompt, short enough for a 260pt sidebar heading.
+    static func heading(_ prompt: String) -> String {
+        let line = prompt.components(separatedBy: .newlines).first?
+            .trimmingCharacters(in: .whitespaces) ?? prompt
+        guard line.count > headingLimit else { return line }
+        return "\(line.prefix(headingLimit - 1))…"
     }
 }

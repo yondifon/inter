@@ -45,4 +45,34 @@ describe("model routing", () => {
   test("classifies commit-message work as mechanical", () => {
     expect(classifyTask("Write a commit message for this diff.").requiredQuality).toBe(2);
   });
+
+  test("excludes a profile after a recent billing failure and warns why", () => {
+    const route = chooseModel("Implement the fix.", models, profiles, {}, [{
+      profileId: "opencode",
+      code: "billing",
+      message: "Insufficient balance",
+      failedAt: new Date().toISOString(),
+      consecutiveFailures: 1,
+    }]);
+    expect(route.profileId).toBe("claude");
+    expect(route.warnings[0]).toContain("unresolved billing failure");
+    expect(route.candidates.every(({ profileId }) => profileId === "claude")).toBe(true);
+  });
+
+  test("treats missing price as unknown and keeps candidate profiles visible", () => {
+    const unknown: ModelInfo = {
+      id: "sonnet",
+      label: "Sonnet",
+      provider: "claude",
+      profileId: "claude",
+      source: "configured",
+    };
+    const route = chooseModel("Review this codebase.", [unknown, ...models.slice(3)], profiles, {
+      preference: "quality",
+    });
+    expect(route.candidates.some(({ profileId }) => profileId === "claude")).toBe(true);
+    expect(route.candidates.some(({ profileId }) => profileId === "opencode")).toBe(true);
+    expect(route.candidates.find(({ profileId }) => profileId === "claude")?.traits.costSource)
+      .toBe("unknown");
+  });
 });

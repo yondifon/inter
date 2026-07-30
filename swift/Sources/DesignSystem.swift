@@ -120,7 +120,7 @@ struct SectionLabel: View {
 /// Task lifecycle presentation. One source of truth so a state reads the same
 /// way in the sidebar, the detail header, and the timeline.
 enum TaskState: String {
-    case queued, running, needsInput = "needs_input", completed, failed, unknown
+    case queued, running, needsInput = "needs_input", answered, blocked, completed, failed, cancelled, unknown
 
     init(_ raw: String) { self = TaskState(rawValue: raw) ?? .unknown }
 
@@ -129,8 +129,11 @@ enum TaskState: String {
         case .queued: "Queued"
         case .running: "Running"
         case .needsInput: "Needs input"
+        case .answered: "Answered"
+        case .blocked: "Blocked"
         case .completed: "Completed"
         case .failed: "Failed"
+        case .cancelled: "Cancelled"
         case .unknown: "Unknown"
         }
     }
@@ -141,8 +144,10 @@ enum TaskState: String {
         switch self {
         case .completed: Color(nsColor: .systemGreen).opacity(0.7)
         case .failed: Color(nsColor: .systemRed).opacity(0.9)
+        case .blocked: Color(nsColor: .systemOrange)
+        case .cancelled: .secondary
         case .needsInput: Color(nsColor: .systemOrange)
-        case .running: .secondary
+        case .running, .answered: .secondary
         case .queued, .unknown: Color(nsColor: .tertiaryLabelColor)
         }
     }
@@ -153,7 +158,10 @@ enum TaskState: String {
         switch self {
         case .completed: "checkmark"
         case .failed: "exclamationmark.triangle.fill"
+        case .blocked: "hand.raised"
+        case .cancelled: "xmark"
         case .needsInput: "questionmark.circle"
+        case .answered: "arrow.turn.down.right"
         case .running: "circle.dotted"
         case .queued: "circle"
         case .unknown: "minus"
@@ -164,7 +172,9 @@ enum TaskState: String {
     /// says "completed".
     var wantsLabelInList: Bool { self != .completed }
 
-    var isTerminal: Bool { self == .completed || self == .failed || self == .needsInput }
+    var isTerminal: Bool {
+        [.needsInput, .answered, .blocked, .completed, .failed, .cancelled].contains(self)
+    }
 }
 
 /// State marker that follows zoom and never carries meaning alone — callers

@@ -59,16 +59,17 @@ final class ReviewContentTests: XCTestCase {
     }
 
     func testOnlyKnownProtocolEventsAreTechnicalNoise() {
-        XCTAssertTrue(event(kind: "raw", title: "Step Start").isTechnicalNoise)
-        XCTAssertTrue(event(kind: "lifecycle", title: "Heartbeat").isTechnicalNoise)
-        XCTAssertFalse(event(kind: "raw", title: "Unknown provider event").isTechnicalNoise)
-        XCTAssertFalse(
-            event(
-                kind: "lifecycle",
-                title: "Heartbeat",
-                detail: "No agent event for 35s"
-            ).isTechnicalNoise
+        XCTAssertEqual(technicalIDs(event(kind: "raw", title: "Step Start")), [1])
+        XCTAssertEqual(technicalIDs(event(kind: "lifecycle", title: "Heartbeat")), [1])
+        XCTAssertEqual(technicalIDs(event(kind: "raw", title: "Unknown provider event")), [])
+        XCTAssertEqual(
+            technicalIDs(event(kind: "lifecycle", title: "Heartbeat", detail: "No agent event for 35s")),
+            []
         )
+    }
+
+    private func technicalIDs(_ event: TaskEventSnapshot) -> [Int] {
+        ActivityStory.compose([event]).technical.map(\.id)
     }
 
     private func task(state: String, output: String = "") -> TaskSnapshot {

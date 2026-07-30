@@ -25,6 +25,13 @@ describe("MCP consent copy", () => {
     expect(DELEGATE_DESCRIPTION).toContain("explicitly approved");
   });
 
+  test("requires structured prompts instead of flattened prose", () => {
+    expect(MCP_INSTRUCTIONS).toContain("structured markdown");
+    expect(MCP_INSTRUCTIONS).toContain("Guardrails");
+    expect(DELEGATE_DESCRIPTION).toContain("structured markdown");
+    expect(DELEGATE_DESCRIPTION).toContain("never one flattened paragraph");
+  });
+
   test("names the destination in dynamic delegate consent", () => {
     const description = dynamicDelegateDescription(profile);
 

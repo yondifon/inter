@@ -2,7 +2,14 @@ import { chmodSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { Database } from "bun:sqlite";
-import type { BrokerSettings, Profile, Task, TaskState } from "./types";
+import type {
+  BrokerSettings,
+  Profile,
+  Task,
+  TaskCompletion,
+  TaskState,
+  TaskSummary,
+} from "./types";
 
 interface ProfileRow {
   id: string;
@@ -26,6 +33,11 @@ interface TaskRow {
   error: string | null;
   question: string | null;
   parent_task_id: string | null;
+  child_task_id: string | null;
+  scope_json: string;
+  allow_questions: number;
+  timeout_ms: number | null;
+  completion_json: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -43,6 +55,21 @@ export interface StateStoreOptions {
   path?: string;
   legacyConfigPath?: string;
   seedProfiles?: Profile[];
+}
+
+export interface TaskListQuery {
+  limit?: number;
+  state?: TaskState;
+  since?: string;
+  profile?: string;
+}
+
+export interface ProfileFailure {
+  profileId: string;
+  code: "auth" | "billing" | "rate_limit";
+  message: string;
+  failedAt: string;
+  consecutiveFailures: number;
 }
 
 export class StateStore {
@@ -134,34 +161,85 @@ export class StateStore {
     this.database.query(`
       INSERT INTO tasks(
         id, profile_id, model, prompt, cwd, state, output, error, question,
-        parent_task_id, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        parent_task_id, child_task_id, scope_json, allow_questions, timeout_ms,
+        completion_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       task.id, task.profileId, task.model, task.prompt, task.cwd, task.state,
       task.output, task.error ?? null, task.question ?? null, task.parentTaskId ?? null,
+      task.childTaskId ?? null, JSON.stringify(task.scope), task.allowQuestions ? 1 : 0,
+      task.timeoutMs ?? null, task.completion ? JSON.stringify(task.completion) : null,
       task.createdAt, task.updatedAt,
     );
     this.addTaskEvent(task.id, "created", task.state, {});
   }
 
-  saveTask(task: Task, eventType = "state_changed", payload: Record<string, unknown> = {}): void {
+  saveTask(
+    task: Task,
+    eventType = "state_changed",
+    payload: Record<string, unknown> = {},
+    expectedStates: TaskState[] = [],
+  ): boolean {
+    let saved = false;
     this.transaction(() => {
-      this.database.query(`
+      const expected = expectedStates.length
+        ? `AND state IN (${expectedStates.map(() => "?").join(",")})`
+        : "";
+      const changed = this.database.query<unknown, Array<string | number | null>>(`
         UPDATE tasks SET
-          state = ?, output = ?, error = ?, question = ?, updated_at = ?
-        WHERE id = ?
+          state = ?, output = ?, error = ?, question = ?, child_task_id = ?,
+          completion_json = ?, updated_at = ?
+        WHERE id = ? ${expected}
       `).run(
-        task.state, task.output, task.error ?? null, task.question ?? null,
-        task.updatedAt, task.id,
+        task.state, task.output, task.error ?? null, task.question ?? null, task.childTaskId ?? null,
+        task.completion ? JSON.stringify(task.completion) : null,
+        task.updatedAt, task.id, ...expectedStates,
       );
+      if (changed.changes !== 1) return;
       this.addTaskEvent(task.id, eventType, task.state, payload);
+      saved = true;
+    });
+    return saved;
+  }
+
+  cancelTask(
+    id: string,
+    reason: string,
+    completion: TaskCompletion,
+  ): Task | undefined {
+    const now = new Date().toISOString();
+    let cancelled = false;
+    this.transaction(() => {
+      const changed = this.database.query(`
+        UPDATE tasks
+        SET state = 'cancelled', error = ?, completion_json = ?, updated_at = ?
+        WHERE id = ? AND state IN ('queued', 'running')
+      `).run(reason, JSON.stringify(completion), now, id);
+      if (changed.changes !== 1) return;
+      this.addTaskEvent(id, "cancelled", "cancelled", { error: reason, completion });
+      cancelled = true;
+    });
+    return cancelled ? this.getTask(id) : undefined;
+  }
+
+  createContinuation(parentId: string, child: Task): void {
+    this.transaction(() => {
+      this.createTask(child);
+      const changed = this.database.query(`
+        UPDATE tasks
+        SET state = 'answered', child_task_id = ?, updated_at = ?
+        WHERE id = ? AND state = 'needs_input'
+      `).run(child.id, child.createdAt, parentId);
+      if (changed.changes !== 1) throw new Error(`task does not need input: ${parentId}`);
+      this.addTaskEvent(parentId, "answered", "answered", { childTaskId: child.id });
     });
   }
 
   getTask(id: string): Task | undefined {
     const row = this.database.query<TaskRow, [string]>(`
       SELECT id, profile_id, model, prompt, cwd, state, output, error, question,
-             parent_task_id, created_at, updated_at
+             parent_task_id, child_task_id, scope_json, allow_questions, timeout_ms,
+             completion_json, created_at, updated_at
       FROM tasks WHERE id = ?
     `).get(id);
     return row ? taskFromRow(row) : undefined;
@@ -170,11 +248,41 @@ export class StateStore {
   listTasks(limit = 200): Task[] {
     return this.database.query<TaskRow, [number]>(`
       SELECT id, profile_id, model, prompt, cwd, state, output, error, question,
-             parent_task_id, created_at, updated_at
+             parent_task_id, child_task_id, scope_json, allow_questions, timeout_ms,
+             completion_json, created_at, updated_at
       FROM tasks
       ORDER BY updated_at DESC, id DESC
       LIMIT ?
     `).all(limit).map(taskFromRow);
+  }
+
+  listTaskSummaries(query: TaskListQuery = {}): TaskSummary[] {
+    const limit = Math.min(100, Math.max(1, query.limit ?? 20));
+    const clauses: string[] = [];
+    const values: Array<string | number> = [];
+    if (query.state) {
+      clauses.push("state = ?");
+      values.push(query.state);
+    }
+    if (query.since) {
+      clauses.push("updated_at >= ?");
+      values.push(query.since);
+    }
+    if (query.profile) {
+      clauses.push("profile_id = ?");
+      values.push(query.profile);
+    }
+    const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
+    const rows = this.database.query<TaskRow, Array<string | number>>(`
+      SELECT id, profile_id, model, prompt, cwd, state, output, error, question,
+             parent_task_id, child_task_id, scope_json, allow_questions, timeout_ms,
+             completion_json, created_at, updated_at
+      FROM tasks
+      ${where}
+      ORDER BY updated_at DESC, id DESC
+      LIMIT ?
+    `).all(...values, limit);
+    return rows.map(taskSummaryFromRow);
   }
 
   listTaskEvents(taskId: string, afterId = 0, limit = 5_001): TaskEvent[] {
@@ -202,17 +310,117 @@ export class StateStore {
     }));
   }
 
+  listTaskEventsForTasks(
+    taskIds: string[],
+    afterId = 0,
+    limit = 101,
+    meaningfulOnly = false,
+  ): TaskEvent[] {
+    if (taskIds.length === 0) return [];
+    const placeholders = taskIds.map(() => "?").join(",");
+    const meaningful = meaningfulOnly ? "AND event_type != 'agent.system'" : "";
+    const rows = this.database.query<{
+      id: number;
+      task_id: string;
+      event_type: string;
+      state: TaskState;
+      payload: string;
+      created_at: string;
+    }, Array<string | number>>(`
+      SELECT id, task_id, event_type, state, payload, created_at
+      FROM task_events
+      WHERE task_id IN (${placeholders}) AND id > ? ${meaningful}
+      ORDER BY id
+      LIMIT ?
+    `).all(...taskIds, afterId, limit);
+    return rows.map(taskEventFromRow);
+  }
+
   appendTaskEvent(taskId: string, type: string, state: TaskState, payload: Record<string, unknown>): void {
     this.addTaskEvent(taskId, type, state, payload);
   }
 
-  latestTaskEventId(taskIds: string[]): number {
+  latestTaskEventId(taskIds: string[], meaningfulOnly = false): number {
     let latest = 0;
     const query = this.database.query<{ id: number | null }, [string]>(
-      "SELECT MAX(id) AS id FROM task_events WHERE task_id = ?",
+      `SELECT MAX(id) AS id FROM task_events WHERE task_id = ? ${
+        meaningfulOnly ? "AND event_type != 'agent.system'" : ""
+      }`,
     );
     for (const taskId of taskIds) latest = Math.max(latest, query.get(taskId)?.id ?? 0);
     return latest;
+  }
+
+  latestTaskProgress(taskIds: string[]): Record<string, {
+    elapsedMs: number;
+    silentMs: number;
+    stalled: boolean;
+    at: string;
+  }> {
+    const progress: Record<string, {
+      elapsedMs: number;
+      silentMs: number;
+      stalled: boolean;
+      at: string;
+    }> = {};
+    const query = this.database.query<{ payload: string; created_at: string }, [string]>(`
+      SELECT payload, created_at
+      FROM task_events
+      WHERE task_id = ? AND event_type = 'heartbeat'
+      ORDER BY id DESC
+      LIMIT 1
+    `);
+    for (const taskId of taskIds) {
+      const row = query.get(taskId);
+      if (!row) continue;
+      const payload = JSON.parse(row.payload) as Record<string, unknown>;
+      progress[taskId] = {
+        elapsedMs: Number(payload.elapsedMs ?? 0),
+        silentMs: Number(payload.silentMs ?? 0),
+        stalled: payload.stalled === true,
+        at: row.created_at,
+      };
+    }
+    return progress;
+  }
+
+  recordProfileFailure(
+    profileId: string,
+    code: ProfileFailure["code"],
+    message: string,
+  ): void {
+    this.database.query(`
+      INSERT INTO profile_failures(profile_id, code, message, failed_at, consecutive_failures)
+      VALUES (?, ?, ?, ?, 1)
+      ON CONFLICT(profile_id) DO UPDATE SET
+        code = excluded.code,
+        message = excluded.message,
+        failed_at = excluded.failed_at,
+        consecutive_failures = profile_failures.consecutive_failures + 1
+    `).run(profileId, code, message.slice(0, 1_000), new Date().toISOString());
+  }
+
+  clearProfileFailure(profileId: string): void {
+    this.database.query("DELETE FROM profile_failures WHERE profile_id = ?").run(profileId);
+  }
+
+  listProfileFailures(): ProfileFailure[] {
+    return this.database.query<{
+      profile_id: string;
+      code: ProfileFailure["code"];
+      message: string;
+      failed_at: string;
+      consecutive_failures: number;
+    }, []>(`
+      SELECT profile_id, code, message, failed_at, consecutive_failures
+      FROM profile_failures
+    `).all().map((row) => ({
+      profileId: row.profile_id,
+      code: row.code,
+      message: row.message,
+      failedAt: row.failed_at,
+      consecutiveFailures: row.consecutive_failures,
+    }));
   }
 
   private configure(): void {
@@ -258,11 +466,18 @@ export class StateStore {
         model TEXT NOT NULL,
         prompt TEXT NOT NULL,
         cwd TEXT NOT NULL,
-        state TEXT NOT NULL CHECK(state IN ('queued','running','needs_input','completed','failed')),
+        state TEXT NOT NULL CHECK(state IN (
+          'queued','running','needs_input','answered','blocked','completed','failed','cancelled'
+        )),
         output TEXT NOT NULL DEFAULT '',
         error TEXT,
         question TEXT,
         parent_task_id TEXT REFERENCES tasks(id),
+        child_task_id TEXT REFERENCES tasks(id),
+        scope_json TEXT NOT NULL DEFAULT '{"read":["**"],"write":["**"]}' CHECK(json_valid(scope_json)),
+        allow_questions INTEGER NOT NULL DEFAULT 1 CHECK(allow_questions IN (0,1)),
+        timeout_ms INTEGER,
+        completion_json TEXT CHECK(completion_json IS NULL OR json_valid(completion_json)),
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -277,8 +492,86 @@ export class StateStore {
         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
       );
       CREATE INDEX IF NOT EXISTS task_events_task_id ON task_events(task_id, id);
+      CREATE TABLE IF NOT EXISTS profile_failures (
+        profile_id TEXT PRIMARY KEY REFERENCES profiles(id),
+        code TEXT NOT NULL CHECK(code IN ('auth','billing','rate_limit')),
+        message TEXT NOT NULL,
+        failed_at TEXT NOT NULL,
+        consecutive_failures INTEGER NOT NULL
+      );
       INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (1, 'profiles tasks and events');
     `);
+    const columns = new Set(this.database.query<{ name: string }, []>(
+      "PRAGMA table_info(tasks)",
+    ).all().map(({ name }) => name));
+    if (!columns.has("scope_json")) this.migrateTaskContract();
+    this.database.query(`
+      INSERT OR IGNORE INTO schema_migrations(version, name)
+      VALUES (2, 'task scope lifecycle and completion')
+    `).run();
+  }
+
+  private migrateTaskContract(): void {
+    this.database.exec("PRAGMA foreign_keys = OFF");
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.exec(`
+        CREATE TABLE tasks_v2 (
+          id TEXT PRIMARY KEY,
+          profile_id TEXT NOT NULL REFERENCES profiles(id),
+          model TEXT NOT NULL,
+          prompt TEXT NOT NULL,
+          cwd TEXT NOT NULL,
+          state TEXT NOT NULL CHECK(state IN (
+            'queued','running','needs_input','answered','blocked','completed','failed','cancelled'
+          )),
+          output TEXT NOT NULL DEFAULT '',
+          error TEXT,
+          question TEXT,
+          parent_task_id TEXT REFERENCES tasks(id),
+          child_task_id TEXT REFERENCES tasks(id),
+          scope_json TEXT NOT NULL CHECK(json_valid(scope_json)),
+          allow_questions INTEGER NOT NULL CHECK(allow_questions IN (0,1)),
+          timeout_ms INTEGER,
+          completion_json TEXT CHECK(completion_json IS NULL OR json_valid(completion_json)),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        INSERT INTO tasks_v2(
+          id, profile_id, model, prompt, cwd, state, output, error, question,
+          parent_task_id, child_task_id, scope_json, allow_questions, timeout_ms,
+          completion_json, created_at, updated_at
+        )
+        SELECT id, profile_id, model, prompt, cwd, state, output, error, question,
+          parent_task_id, NULL, '{"read":["**"],"write":["**"]}', 1, NULL,
+          NULL, created_at, updated_at
+        FROM tasks;
+        ALTER TABLE task_events RENAME TO task_events_v1;
+        DROP INDEX IF EXISTS task_events_task_id;
+        DROP TABLE tasks;
+        ALTER TABLE tasks_v2 RENAME TO tasks;
+        CREATE TABLE task_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          event_type TEXT NOT NULL,
+          state TEXT NOT NULL,
+          payload TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(payload)),
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+        );
+        INSERT INTO task_events(id, task_id, event_type, state, payload, created_at)
+        SELECT id, task_id, event_type, state, payload, created_at FROM task_events_v1;
+        DROP TABLE task_events_v1;
+        CREATE INDEX tasks_updated_at ON tasks(updated_at DESC, id DESC);
+        CREATE INDEX tasks_profile_updated ON tasks(profile_id, updated_at DESC);
+        CREATE INDEX task_events_task_id ON task_events(task_id, id);
+      `);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    } finally {
+      this.database.exec("PRAGMA foreign_keys = ON");
+    }
   }
 
   private seed(configPath: string, defaults: Profile[]): void {
@@ -383,6 +676,50 @@ function taskFromRow(row: TaskRow): Task {
     ...(row.error ? { error: row.error } : {}),
     ...(row.question ? { question: row.question } : {}),
     ...(row.parent_task_id ? { parentTaskId: row.parent_task_id } : {}),
+    ...(row.child_task_id ? { childTaskId: row.child_task_id } : {}),
+    scope: JSON.parse(row.scope_json) as Task["scope"],
+    allowQuestions: row.allow_questions === 1,
+    ...(row.timeout_ms ? { timeoutMs: row.timeout_ms } : {}),
+    ...(row.completion_json
+      ? { completion: JSON.parse(row.completion_json) as TaskCompletion }
+      : {}),
+  };
+}
+
+function taskSummaryFromRow(row: TaskRow): TaskSummary {
+  const task = taskFromRow(row);
+  return {
+    id: task.id,
+    profileId: task.profileId,
+    model: task.model,
+    cwd: task.cwd,
+    state: task.state,
+    promptPreview: task.prompt.replace(/\s+/g, " ").trim().slice(0, 240),
+    createdAt: task.createdAt,
+    updatedAt: task.updatedAt,
+    ...(task.error ? { error: task.error.slice(0, 500) } : {}),
+    ...(task.question ? { question: task.question } : {}),
+    ...(task.parentTaskId ? { parentTaskId: task.parentTaskId } : {}),
+    ...(task.childTaskId ? { childTaskId: task.childTaskId } : {}),
+    ...(task.completion ? { completion: task.completion } : {}),
+  };
+}
+
+function taskEventFromRow(row: {
+  id: number;
+  task_id: string;
+  event_type: string;
+  state: TaskState;
+  payload: string;
+  created_at: string;
+}): TaskEvent {
+  return {
+    id: row.id,
+    taskId: row.task_id,
+    type: row.event_type,
+    state: row.state,
+    payload: JSON.parse(row.payload) as Record<string, unknown>,
+    createdAt: row.created_at,
   };
 }
 
