@@ -38,6 +38,10 @@ export interface TaskEventPresentation {
   tokensOut?: number;
   tokensCached?: number;
   tokensThinking?: number;
+  /// What the action produced, once its result arrives: lines read, lines
+  /// changed, output emitted. The trace folds this onto the row that made the
+  /// call, so the result event itself never needs one.
+  outcome?: string;
   turns?: number;
   durationMs?: number;
   level?: "info" | "warning" | "error";
@@ -141,10 +145,14 @@ export function taskEventView(event: TaskEvent, provider: Profile["provider"]): 
       detail: detail ?? firstString(nested.message, object(nested.data).message, subject.error),
       ...actionId, rawText };
   }
-  // Tool results echo work the matching tool event already reported.
+  // Tool results echo work the matching tool event already reported, so the row
+  // stays folded away — but the result is the only place the outcome is stated,
+  // and the trace lifts that onto the call.
   if (subjectType.includes("tool_result")) {
+    const outcome = toolResultOutcome(payload.tool_use_result ?? payload.toolUseResult);
     return { ...base, kind: "raw", phase: subject.is_error === true ? "failed" : "info",
       title: "Tool result", detail: detail ?? blockText(subject.content),
+      ...(outcome ? { presentation: { type: "tool" as const, outcome } } : {}),
       ...actionId, minor: true, rawText };
   }
   // "Reasoning", not "Thinking": the trace collapses same-titled "Thinking"
@@ -582,6 +590,49 @@ function subjectPresentation(
     return { type: "todo", completed, total: items.length };
   }
   return undefined;
+}
+
+/// Every provider reports a tool's outcome in its own shape: a read carries a
+/// line count, an edit a patch, a command its streams, a failure a bare string.
+/// Reduce each to the one figure worth putting next to the call.
+function toolResultOutcome(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    const compact = value.replace(/\s+/g, " ").trim();
+    return compact ? truncate(compact, 120) : undefined;
+  }
+  const result = object(value);
+  const file = object(result.file);
+  const total = Number(file.totalLines ?? file.numLines ?? 0);
+  if (total) {
+    const shown = Number(file.numLines ?? 0);
+    return shown && shown < total ? `${shown} of ${total} lines` : `${plural(total, "line")} read`;
+  }
+  const patch = Array.isArray(result.structuredPatch) ? result.structuredPatch : [];
+  if (patch.length) {
+    let added = 0;
+    let removed = 0;
+    for (const hunk of patch) {
+      const lines = object(hunk).lines;
+      if (!Array.isArray(lines)) continue;
+      for (const line of lines) {
+        if (typeof line !== "string") continue;
+        if (line.startsWith("+")) added++;
+        else if (line.startsWith("-")) removed++;
+      }
+    }
+    if (added || removed) return `+${added} −${removed}`;
+  }
+  if ("stdout" in result || "stderr" in result) {
+    if (result.interrupted === true) return "interrupted";
+    const text = firstString(result.stdout, result.stderr);
+    if (!text) return "no output";
+    return `${plural(text.trimEnd().split(/\r?\n/).length, "line")} out`;
+  }
+  return undefined;
+}
+
+function plural(count: number, noun: string): string {
+  return `${formatCount(count)} ${noun}${count === 1 ? "" : "s"}`;
 }
 
 function presentationDetail(presentation?: TaskEventPresentation): string | undefined {

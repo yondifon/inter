@@ -144,16 +144,22 @@ enum ActivityStory {
         var slot: [String: Int] = [:]
         var folded: [TaskEventSnapshot] = []
         for event in events {
-            guard let action = event.actionId, !action.isEmpty, !isTechnical(event) else {
+            guard let action = event.actionId, !action.isEmpty else {
                 folded.append(event)
                 continue
             }
             if let index = slot[action] {
                 folded[index] = settle(folded[index], with: event)
-            } else {
-                slot[action] = folded.count
-                folded.append(event)
+                continue
             }
+            // A result never opens a row of its own — it only reports on a call.
+            // One that arrives with nothing to report on stays where it fell.
+            if isTechnical(event) {
+                folded.append(event)
+                continue
+            }
+            slot[action] = folded.count
+            folded.append(event)
         }
         return folded
     }
@@ -166,14 +172,43 @@ enum ActivityStory {
         _ first: TaskEventSnapshot,
         with later: TaskEventSnapshot
     ) -> TaskEventSnapshot {
+        // A folded-away result contributes its outcome and its failure, nothing
+        // else: the call already named the tool, the path, and the arguments.
+        if later.minor == true {
+            var merged = first
+            if let outcome = later.presentation?.outcome, !restates(merged.detail, outcome) {
+                if merged.presentation != nil { merged.presentation?.outcome = outcome }
+                else { merged.detail = [merged.detail, outcome].compactMap { $0 }.joined(separator: " · ") }
+            }
+            if later.phase == "failed" { merged.phase = "failed" }
+            return merged
+        }
         var merged = later
         merged.id = first.id
         merged.createdAt = first.createdAt
         if merged.detail == nil { merged.detail = first.detail }
         if merged.presentation == nil { merged.presentation = first.presentation }
         if merged.rawText == nil { merged.rawText = first.rawText }
+        // The result can land before the closing hook; its outcome outlives it.
+        if merged.presentation?.outcome == nil, let outcome = first.presentation?.outcome {
+            merged.presentation?.outcome = outcome
+        }
         if first.phase == "failed" { merged.phase = "failed" }
         return merged
+    }
+
+    /// A failed call is reported twice — the hook names the error and the
+    /// result repeats it — so an outcome the row already says earns no chip.
+    /// Both sides may be truncated, so the comparison is on a leading run of
+    /// the outcome, long enough that a short one like `no output` can't match
+    /// by accident.
+    private static func restates(_ detail: String?, _ outcome: String) -> Bool {
+        guard let detail else { return false }
+        let core = outcome
+            .replacingOccurrences(of: "Error: ", with: "")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "… "))
+        guard core.count >= 16 else { return false }
+        return detail.contains(core.prefix(40))
     }
 
     /// Plumbing worth keeping reachable but not worth a row. The broker marks

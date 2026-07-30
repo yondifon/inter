@@ -11,12 +11,13 @@ final class ActivityStoryTests: XCTestCase {
         phase: String = "info",
         presentation: TaskEventPresentationSnapshot? = nil,
         createdAt: String = "2026-07-30T15:00:00.000Z",
+        minor: Bool? = nil,
         actionId: String? = nil
     ) -> TaskEventSnapshot {
         TaskEventSnapshot(
             id: id, taskId: "task", source: source, kind: kind, phase: phase,
             title: title, detail: detail, presentation: presentation,
-            rawText: nil, createdAt: createdAt, actionId: actionId
+            rawText: nil, createdAt: createdAt, minor: minor, actionId: actionId
         )
     }
 
@@ -43,6 +44,63 @@ final class ActivityStoryTests: XCTestCase {
         XCTAssertEqual(rows[1].detail, "b.rs · denied")
         // The row is stamped when the action began, not when its last hook landed.
         XCTAssertEqual(rows[0].createdAt, "2026-07-30T15:00:00.000Z")
+    }
+
+    /// The result is folded away, but it is the only event that says what the
+    /// call produced, so its outcome has to survive onto the call's row.
+    func testResultLiftsItsOutcomeOntoTheCallAndKeepsNoRowOfItsOwn() {
+        let call = TaskEventPresentationSnapshot(type: "file", path: "src/http/operator_locality.rs")
+        let result = TaskEventPresentationSnapshot(type: "tool", outcome: "298 lines read")
+        let story = ActivityStory.compose([
+            event(1, kind: "file", title: "Read file", phase: "started",
+                  presentation: call, actionId: "toolu_1"),
+            event(2, kind: "raw", title: "Tool result", presentation: result,
+                  minor: true, actionId: "toolu_1"),
+            event(3, kind: "file", title: "Read file", phase: "completed",
+                  presentation: call, actionId: "toolu_1"),
+        ])
+        guard case .chapter(_, let rows) = story.blocks.first else {
+            return XCTFail("expected one chapter, got \(story.blocks)")
+        }
+        XCTAssertEqual(rows.map(\.id), [1])
+        XCTAssertEqual(rows[0].phase, "completed")
+        XCTAssertEqual(rows[0].presentation?.outcome, "298 lines read")
+        XCTAssertTrue(story.technical.isEmpty)
+    }
+
+    /// The hook and the result both carry a failed call's error; the row says
+    /// it once.
+    func testOutcomeIsDroppedWhenTheRowAlreadyStatesIt() {
+        let error = "File does not exist. Note: your current working directory is /Users/malico/desgn/kii."
+        let story = ActivityStory.compose([
+            event(1, kind: "file", title: "Read file", detail: "…/kii/AGENTS.md",
+                  presentation: TaskEventPresentationSnapshot(type: "file", path: "…/kii/AGENTS.md"),
+                  actionId: "toolu_1"),
+            event(2, kind: "file", title: "Read file", detail: "…/kii/AGENTS.md · \(error)",
+                  phase: "failed",
+                  presentation: TaskEventPresentationSnapshot(type: "file", path: "…/kii/AGENTS.md"),
+                  actionId: "toolu_1"),
+            event(3, kind: "raw", title: "Tool result", phase: "failed",
+                  presentation: TaskEventPresentationSnapshot(type: "tool", outcome: "Error: \(error)"),
+                  minor: true, actionId: "toolu_1"),
+        ])
+        guard case .chapter(_, let rows) = story.blocks.first else {
+            return XCTFail("expected one chapter, got \(story.blocks)")
+        }
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].phase, "failed")
+        XCTAssertNil(rows[0].presentation?.outcome)
+        XCTAssertEqual(rows[0].detail, "…/kii/AGENTS.md · \(error)")
+    }
+
+    func testResultWithNoCallToAttachToStaysTechnical() {
+        let story = ActivityStory.compose([
+            event(1, kind: "raw", title: "Tool result",
+                  presentation: TaskEventPresentationSnapshot(type: "tool", outcome: "2 lines out"),
+                  minor: true, actionId: "toolu_orphan"),
+        ])
+        XCTAssertEqual(story.technical.map(\.id), [1])
+        XCTAssertTrue(story.blocks.isEmpty)
     }
 
     func testOnlyTheNewestStallEarnsASignal() {

@@ -417,8 +417,8 @@ private struct ActivityWorkRow: View {
                     Text(path).scaledFont(.caption, design: .monospaced).foregroundStyle(.secondary)
                         .lineLimit(1).truncationMode(.middle)
                 }
-                if let change = presentation.change {
-                    Text(change).scaledFont(.caption, weight: .medium, design: .monospaced)
+                ForEach([presentation.change, presentation.outcome].compactMap { $0 }, id: \.self) { chip in
+                    Text(chip).scaledFont(.caption, weight: .medium, design: .monospaced)
                         .lineLimit(1)
                         .padding(.horizontal, 6).padding(.vertical, 2)
                         .background(Surface.sunken, in: RoundedRectangle(cornerRadius: Radius.small))
@@ -591,8 +591,8 @@ struct TaskEventPresentationView: View {
                     Text(path).scaledFont(.caption, design: .monospaced).foregroundStyle(.secondary)
                         .lineLimit(1).truncationMode(.middle)
                 }
-                if let change = presentation.change {
-                    Text(change).scaledFont(.caption, weight: .medium, design: .monospaced)
+                ForEach([presentation.change, presentation.outcome].compactMap { $0 }, id: \.self) { chip in
+                    Text(chip).scaledFont(.caption, weight: .medium, design: .monospaced)
                         .lineLimit(1)
                         .padding(.horizontal, 6).padding(.vertical, 2)
                         .background(Surface.sunken, in: RoundedRectangle(cornerRadius: Radius.small))
@@ -605,8 +605,10 @@ struct TaskEventPresentationView: View {
                     .scaledFont(.caption, design: .monospaced)
                     .lineLimit(2)
                     .textSelection(.enabled)
-                if presentation.status != nil || presentation.exitCode != nil {
-                    Text(commandStatus).scaledFont(.caption2).foregroundStyle(.secondary)
+                if presentation.status != nil || presentation.exitCode != nil || presentation.outcome != nil {
+                    Text([commandStatus, presentation.outcome].compactMap { $0 }
+                        .filter { !$0.isEmpty }.joined(separator: " · "))
+                        .scaledFont(.caption2).foregroundStyle(.secondary)
                 }
             }
             .padding(.horizontal, 7).padding(.vertical, 5)
@@ -618,7 +620,8 @@ struct TaskEventPresentationView: View {
                 .lineLimit(4)
                 .textSelection(.enabled)
         case "tool":
-            Text(presentation.text ?? "")
+            Text([presentation.text, presentation.outcome].compactMap { $0 }
+                .filter { !$0.isEmpty }.joined(separator: " · "))
                 .scaledFont(.caption, design: .monospaced)
                 .foregroundStyle(.secondary)
                 .lineLimit(2)

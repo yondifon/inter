@@ -509,6 +509,37 @@ describe("task event views", () => {
     expect(stalled.detail).toBe("No agent event for 109s");
   });
 
+  test("reduces each tool result shape to the figure worth showing", () => {
+    const outcome = (toolUseResult: unknown, isError = false) => taskEventView({
+      id: 42, taskId: "task", type: "agent.user", state: "running",
+      payload: {
+        type: "user",
+        message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", is_error: isError }] },
+        tool_use_result: toolUseResult,
+      },
+      createdAt: "now",
+    }, "claude");
+
+    const read = outcome({ type: "text", file: { filePath: "/repo/a.rs", numLines: 298, totalLines: 298 } });
+    expect(read.presentation?.outcome).toBe("298 lines read");
+    expect(read.actionId).toBe("toolu_1");
+    expect(read.minor).toBe(true);
+
+    expect(outcome({ file: { numLines: 40, totalLines: 298 } }).presentation?.outcome)
+      .toBe("40 of 298 lines");
+    expect(outcome({
+      filePath: "/repo/a.rs",
+      structuredPatch: [{ lines: ["-old", "+new", "+extra", " same"] }],
+    }).presentation?.outcome).toBe("+2 −1");
+    expect(outcome({ stdout: "one\ntwo\n", stderr: "", interrupted: false }).presentation?.outcome)
+      .toBe("2 lines out");
+    expect(outcome({ stdout: "", stderr: "" }).presentation?.outcome).toBe("no output");
+    expect(outcome({ stdout: "", interrupted: true }).presentation?.outcome).toBe("interrupted");
+    expect(outcome("Error: File does not exist.", true).presentation?.outcome)
+      .toBe("Error: File does not exist.");
+    expect(outcome({}).presentation).toBeUndefined();
+  });
+
   test("carries the thinking-token delta so a run total can be summed", () => {
     const view = taskEventView({
       id: 41, taskId: "task", type: "agent.system", state: "running",

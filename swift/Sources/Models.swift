@@ -81,6 +81,7 @@ struct TaskEventPresentationSnapshot: Codable, Hashable {
     var tokensOut: Int?
     var tokensCached: Int?
     var tokensThinking: Int?
+    var outcome: String?
     var turns: Int?
     var durationMs: Int?
     var level: String?
