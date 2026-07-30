@@ -258,14 +258,16 @@ private struct MarkdownDocumentView: View {
 private struct MarkdownBlockView: View {
     let block: MarkdownBlock
 
+    @Environment(\.uiScale) private var uiScale
+
     @ViewBuilder var body: some View {
         switch block {
         case .heading(let level, let text):
             inline(text)
-                .font(headingFont(level))
+                .scaledFont(headingStyle(level), weight: level == 1 ? .bold : .semibold)
                 .padding(.top, level <= 2 ? 4 : 0)
         case .paragraph(let text):
-            inline(text).font(.body)
+            inline(text).scaledFont(.body)
         case .unorderedList(let items):
             list(items: items, ordered: false)
         case .orderedList(let items):
@@ -273,23 +275,24 @@ private struct MarkdownBlockView: View {
         case .quote(let text):
             HStack(alignment: .top, spacing: 10) {
                 Rectangle().fill(.secondary.opacity(0.45)).frame(width: 3)
-                inline(text).foregroundStyle(.secondary)
+                inline(text).scaledFont(.body).foregroundStyle(.secondary)
             }
         case .code(let language, let text):
             VStack(alignment: .leading, spacing: 6) {
                 if let language {
                     Text(language.uppercased())
-                        .font(.caption2.weight(.semibold))
+                        .scaledFont(.caption2, weight: .semibold)
                         .foregroundStyle(.tertiary)
                 }
                 ScrollView(.horizontal) {
                     Text(text)
-                        .font(.callout.monospaced())
+                        .scaledFont(.callout, design: .monospaced)
                         .fixedSize(horizontal: true, vertical: false)
                 }
             }
+            .scrollIndicators(.never)
             .padding(12)
-            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+            .background(Surface.sunken, in: RoundedRectangle(cornerRadius: Radius.small))
         case .table(let headers, let rows):
             MarkdownTable(headers: headers, rows: rows)
         case .divider:
@@ -304,10 +307,10 @@ private struct MarkdownBlockView: View {
         return Text((try? AttributedString(markdown: source, options: options)) ?? AttributedString(source))
     }
 
-    private func headingFont(_ level: Int) -> Font {
+    private func headingStyle(_ level: Int) -> Font.TextStyle {
         switch level {
-        case 1: .title2.weight(.bold)
-        case 2: .title3.weight(.semibold)
+        case 1: .title2
+        case 2: .title3
         default: .headline
         }
     }
@@ -317,8 +320,9 @@ private struct MarkdownBlockView: View {
             ForEach(Array(items.enumerated()), id: \.offset) { index, item in
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(ordered ? "\(index + 1)." : "•")
+                        .scaledFont(.body, monospacedDigit: true)
                         .foregroundStyle(.secondary)
-                        .frame(width: 20, alignment: .trailing)
+                        .frame(width: 20 * uiScale, alignment: .trailing)
                     inline(item)
                 }
             }
@@ -335,22 +339,22 @@ private struct MarkdownTable: View {
             Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 0) {
                 GridRow {
                     ForEach(Array(headers.enumerated()), id: \.offset) { _, header in
-                        Text(header).font(.caption.weight(.semibold))
+                        Text(header).scaledFont(.caption, weight: .semibold)
                             .foregroundStyle(.secondary).padding(.vertical, 8)
                     }
                 }
-                Divider()
-                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
                     GridRow {
                         ForEach(headers.indices, id: \.self) { column in
-                            Text(column < row.count ? row[column] : "—").padding(.vertical, 7)
+                            Text(column < row.count ? row[column] : "—")
+                                .scaledFont(.callout).padding(.vertical, 7)
                         }
                     }
-                    Divider()
+                    .background(index.isMultiple(of: 2) ? Surface.sunken.opacity(0.5) : .clear)
                 }
             }
-            .font(.callout)
         }
+        .scrollIndicators(.never)
     }
 }
 
@@ -358,21 +362,23 @@ private struct JSONTableView: View {
     let value: JSONValue
     let initiallyExpanded: Bool
 
+    @Environment(\.uiScale) private var uiScale
+
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
                 Text("Field").frame(maxWidth: .infinity, alignment: .leading)
                 Text("Value").frame(maxWidth: .infinity, alignment: .leading)
-                Text("Type").frame(width: 72, alignment: .leading)
+                Text("Type").frame(width: 72 * uiScale, alignment: .leading)
             }
-            .font(.caption.weight(.semibold))
+            .scaledFont(.caption, weight: .semibold)
             .foregroundStyle(.secondary)
             .padding(.horizontal, 8).padding(.vertical, 7)
-            .background(Color(nsColor: .textBackgroundColor))
+            .background(Surface.sunken)
             JSONTreeRow(name: "Root", value: value, depth: 0, initiallyExpanded: initiallyExpanded)
         }
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(nsColor: .separatorColor)))
+        .background(Surface.sunken.opacity(0.6))
+        .clipShape(RoundedRectangle(cornerRadius: Radius.small))
     }
 }
 
@@ -381,6 +387,8 @@ private struct JSONTreeRow: View {
     let value: JSONValue
     let depth: Int
     @State private var expanded: Bool
+
+    @Environment(\.uiScale) private var uiScale
 
     init(name: String, value: JSONValue, depth: Int, initiallyExpanded: Bool = false) {
         self.name = name
@@ -391,28 +399,30 @@ private struct JSONTreeRow: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Divider()
             HStack(spacing: 12) {
                 HStack(spacing: 5) {
                     if !value.children.isEmpty {
                         Button { expanded.toggle() } label: {
                             Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                                .font(.caption2.weight(.semibold)).frame(width: 14, height: 20)
+                                .scaledFont(.caption2, weight: .semibold)
+                                .frame(width: 20 * uiScale, height: 20 * uiScale)
+                                .contentShape(.rect)
                         }
                         .buttonStyle(.plain)
+                        .accessibilityLabel(expanded ? "Collapse \(name)" : "Expand \(name)")
                     } else {
-                        Color.clear.frame(width: 14, height: 20)
+                        Color.clear.frame(width: 20 * uiScale, height: 20 * uiScale)
                     }
-                    Text(name).font(.callout.weight(.medium)).lineLimit(1)
+                    Text(name).scaledFont(.callout, weight: .medium).lineLimit(1)
                 }
-                .padding(.leading, CGFloat(depth * 16))
+                .padding(.leading, CGFloat(depth) * 16 * uiScale)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                Text(value.summary).font(.callout.monospaced())
+                Text(value.summary).scaledFont(.callout, design: .monospaced)
                     .foregroundStyle(value.children.isEmpty ? .primary : .secondary)
                     .lineLimit(2).textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                Text(value.typeLabel).font(.caption).foregroundStyle(.tertiary)
-                    .frame(width: 72, alignment: .leading)
+                Text(value.typeLabel).scaledFont(.caption).foregroundStyle(.tertiary)
+                    .frame(width: 72 * uiScale, alignment: .leading)
             }
             .padding(.horizontal, 8).padding(.vertical, 6)
 

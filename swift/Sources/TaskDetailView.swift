@@ -29,6 +29,7 @@ struct TaskDetail: View {
     @State private var loading = true
     @State private var loadFailed = false
     @State private var showingTechnicalEvents = false
+    @Environment(\.uiScale) private var uiScale
 
     init(task: TaskSnapshot, store: ProfileStore) {
         self.task = task
@@ -51,20 +52,19 @@ struct TaskDetail: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
             }
-            .frame(maxWidth: 980)
+            .frame(maxWidth: 980 * uiScale)
             .padding(.horizontal, 24)
             .padding(.top, 24)
             .padding(.bottom, 16)
             .frame(maxWidth: .infinity)
 
-            Divider()
-
             ScrollView {
                 sectionContent
-                    .frame(maxWidth: 980)
+                    .frame(maxWidth: 980 * uiScale)
                     .padding(24)
                     .frame(maxWidth: .infinity)
             }
+            .scrollIndicators(.never)
             .id("\(task.id)-\(section.rawValue)")
         }
         .background(Color(nsColor: .windowBackgroundColor))
@@ -72,8 +72,8 @@ struct TaskDetail: View {
             resetEventState()
             while !Task.isCancelled {
                 await loadEvents()
-                let state = store.tasks.first { $0.id == task.id }?.state ?? task.state
-                if ["completed", "failed", "needs_input"].contains(state), !loading { break }
+                let live = store.tasks.first { $0.id == task.id }?.state ?? task.state
+                if TaskState(live).isTerminal, !loading { break }
                 if loadFailed { try? await Task.sleep(for: .seconds(1)) }
                 else if eventCursor == 0 { try? await Task.sleep(for: .milliseconds(500)) }
             }
@@ -83,18 +83,12 @@ struct TaskDetail: View {
     @ViewBuilder private var sectionContent: some View {
         switch section {
         case .request:
-            TaskPanel(title: "Request", icon: "arrow.up.message") {
-                ReviewContentView(source: task.prompt)
-            }
+            TaskPanel { ReviewContentView(source: task.prompt) }
         case .response:
             if let error = task.error {
-                TaskPanel(title: "Error", icon: "exclamationmark.triangle") {
-                    ReviewContentView(source: error)
-                }
+                TaskPanel(accent: .red) { ReviewContentView(source: error) }
             } else if !task.output.isEmpty {
-                TaskPanel(title: "Response", icon: "text.bubble") {
-                    ReviewContentView(source: task.output)
-                }
+                TaskPanel { ReviewContentView(source: task.output) }
             } else {
                 ContentUnavailableView(
                     "No response yet",
@@ -105,11 +99,9 @@ struct TaskDetail: View {
             }
         case .activity:
             VStack(alignment: .leading, spacing: 12) {
-                TaskPanel(title: "Activity", icon: "point.3.filled.connected.trianglepath.dotted") {
-                    eventContent
-                }
+                TaskPanel { eventContent }
                 Text("Local trace may contain prompts, tool arguments, file paths, and command output.")
-                    .font(.caption).foregroundStyle(.tertiary)
+                    .scaledFont(.caption).foregroundStyle(.tertiary)
             }
         }
     }
@@ -118,13 +110,15 @@ struct TaskDetail: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 8) {
-                        Circle().fill(stateColor).frame(width: 8, height: 8)
-                        Text(task.state.replacingOccurrences(of: "_", with: " ").capitalized)
-                            .font(.caption.weight(.semibold))
+                    HStack(spacing: 6) {
+                        StateMarker(state: state)
+                        Text(state.label.uppercased())
+                            .scaledFont(.caption2, weight: .semibold, design: .monospaced)
+                            .tracking(0.6)
+                            .foregroundStyle(.secondary)
                     }
                     Text(task.prompt.components(separatedBy: .newlines).first ?? "Task")
-                        .font(.title2.weight(.semibold))
+                        .scaledFont(.title2, weight: .semibold)
                         .lineLimit(2)
                 }
                 Spacer()
@@ -134,14 +128,14 @@ struct TaskDetail: View {
                     Label("Open folder", systemImage: "folder")
                 }
             }
-            HStack(spacing: 8) {
-                MetadataChip(icon: "person.crop.circle", text: workerLabel)
-                MetadataChip(icon: "cpu", text: task.model)
-                MetadataChip(icon: "number", text: String(task.id.prefix(8)))
+            HStack(spacing: 14) {
+                MetadataLabel(icon: "person.crop.circle", text: workerLabel)
+                MetadataLabel(icon: "cpu", text: task.model)
+                MetadataLabel(icon: "number", text: String(task.id.prefix(8)))
                 Spacer()
-                Text(task.cwd).font(.caption.monospaced()).foregroundStyle(.secondary)
+                Text(task.cwd).scaledFont(.caption, design: .monospaced).foregroundStyle(.secondary)
                     .lineLimit(1).truncationMode(.middle)
-                TaskCopyButton(text: task.cwd)
+                CopyIconButton(text: task.cwd, label: "Copy folder path")
             }
         }
     }
@@ -158,7 +152,7 @@ struct TaskDetail: View {
             }.frame(minHeight: 56)
         } else if events.isEmpty {
             Text("No structured events for this run. New delegated runs stream activity here.")
-                .foregroundStyle(.secondary).frame(minHeight: 56)
+                .scaledFont(.body).foregroundStyle(.secondary).frame(minHeight: 56)
         } else {
             LazyVStack(spacing: 0) {
                 ForEach(Array(visibleEvents.enumerated()), id: \.element.id) { index, event in
@@ -171,9 +165,9 @@ struct TaskDetail: View {
                         showingTechnicalEvents.toggle()
                     }
                     .buttonStyle(.plain)
-                    .font(.caption)
+                    .scaledFont(.caption)
                     .foregroundStyle(.secondary)
-                    .padding(.leading, 36)
+                    .padding(.leading, 34 * uiScale)
                     .padding(.top, 6)
                 }
             }
@@ -192,14 +186,7 @@ struct TaskDetail: View {
         store.profiles.first { $0.id == task.profileId }?.label ?? task.profileId
     }
 
-    private var stateColor: Color {
-        switch task.state {
-        case "completed": .green
-        case "failed": .red
-        case "needs_input": .orange
-        default: .blue
-        }
-    }
+    private var state: TaskState { TaskState(task.state) }
 
     private func loadEvents() async {
         do {
@@ -263,32 +250,33 @@ private struct NeedsInputBanner: View {
             Image(systemName: "questionmark.bubble.fill")
                 .foregroundStyle(.orange)
             VStack(alignment: .leading, spacing: 3) {
-                Text("Worker needs input").font(.callout.weight(.semibold))
-                Text(question).font(.callout).textSelection(.enabled)
+                Text("Worker needs input").scaledFont(.callout, weight: .semibold)
+                Text(question).scaledFont(.callout).textSelection(.enabled)
                 Text("Reply from the agent that started this task.")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .scaledFont(.caption).foregroundStyle(.secondary)
             }
             Spacer(minLength: 12)
-            TaskCopyButton(text: question)
+            CopyIconButton(text: question, label: "Copy question")
         }
         .padding(12)
-        .background(.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+        .background(.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: Radius.small))
     }
 }
 
+/// Neutral surface for section content. The segmented picker above already names
+/// the section, so the panel carries no title of its own.
 private struct TaskPanel<Content: View>: View {
-    let title: String
-    let icon: String
+    var accent: Color?
     @ViewBuilder let content: Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Label(title, systemImage: icon).font(.headline)
-            content
-        }
-        .padding(16)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color(nsColor: .separatorColor)))
+        content
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(16)
+            .background(
+                accent?.opacity(0.08) ?? Surface.panel,
+                in: RoundedRectangle(cornerRadius: Radius.medium)
+            )
     }
 }
 
@@ -297,42 +285,42 @@ private struct TaskEventRow: View {
     let showLine: Bool
     @State private var showingRawDetails = false
 
+    @Environment(\.uiScale) private var uiScale
+
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             VStack(spacing: 0) {
-                Image(systemName: icon).font(.caption.weight(.semibold))
-                    .foregroundStyle(color)
-                    .frame(width: 24, height: 24)
-                    .background(color.opacity(0.12), in: Circle())
+                Image(systemName: icon).scaledFont(.caption, weight: .semibold)
+                    .foregroundStyle(tint)
+                    .frame(width: 22 * uiScale, height: 22 * uiScale)
+                    .background(rail, in: Circle())
+                    .accessibilityHidden(true)
                 if showLine {
-                    Rectangle().fill(Color(nsColor: .separatorColor)).frame(width: 1).frame(minHeight: 22)
+                    Rectangle().fill(Color(nsColor: .separatorColor))
+                        .frame(width: 1).frame(minHeight: 20 * uiScale)
                 }
             }
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 7) {
-                    Text(event.title).font(.callout.weight(.medium))
-                    Text(event.source).font(.caption2.monospaced()).foregroundStyle(.tertiary)
+                    Text(event.title).scaledFont(.callout, weight: .medium, design: .monospaced)
+                    Text(event.source).scaledFont(.caption2, design: .monospaced).foregroundStyle(.tertiary)
                     if event.rawText != nil {
-                        Button {
-                            showingRawDetails.toggle()
-                        } label: {
-                            Image(systemName: showingRawDetails ? "chevron.down" : "chevron.right")
-                                .font(.caption2.weight(.semibold))
-                                .frame(width: 18, height: 18)
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.tertiary)
-                        .help(showingRawDetails ? "Hide raw details" : "Show raw details")
-                        .accessibilityLabel(showingRawDetails ? "Hide raw details" : "Show raw details")
+                        IconButton(
+                            symbol: showingRawDetails ? "chevron.down" : "chevron.right",
+                            label: showingRawDetails ? "Hide raw details" : "Show raw details",
+                            tint: AnyShapeStyle(.tertiary)
+                        ) { showingRawDetails.toggle() }
+                        .scaledFont(.caption2, weight: .semibold)
                     }
                     Spacer()
-                    Text(timeLabel).font(.caption2.monospacedDigit()).foregroundStyle(.tertiary)
+                    Text(timeLabel).scaledFont(.caption2, design: .monospaced).foregroundStyle(.tertiary)
                         .help(event.createdAt)
                 }
                 if let presentation = event.presentation {
                     TaskEventPresentationView(presentation: presentation)
                 } else if let detail = event.detail {
-                    Text(detail).font(event.kind == "command" || event.kind == "file" ? .caption.monospaced() : .caption)
+                    Text(detail)
+                        .scaledFont(.caption, design: isCode ? .monospaced : .default)
                         .foregroundStyle(.secondary).textSelection(.enabled)
                         .lineLimit(event.kind == "file" ? 1 : 6)
                 }
@@ -349,6 +337,10 @@ private struct TaskEventRow: View {
         TaskEventTime.format(event.createdAt)
     }
 
+    private var isCode: Bool {
+        event.kind == "command" || event.kind == "file"
+    }
+
     private var icon: String {
         switch event.kind {
         case "message": "text.bubble"
@@ -363,54 +355,63 @@ private struct TaskEventRow: View {
         }
     }
 
-    private var color: Color {
-        switch event.phase {
-        case "completed": .green
-        case "failed": .red
-        case "started": .blue
-        default: .secondary
-        }
+    /// Color earns its place only when a run failed. Everything else reads neutral
+    /// so a long trace stays scannable.
+    private var tint: Color {
+        event.phase == "failed" ? .red : .secondary
+    }
+
+    private var rail: Color {
+        event.phase == "failed"
+            ? Color.red.opacity(0.12)
+            : Color(nsColor: .separatorColor).opacity(0.35)
     }
 }
 
 private struct TaskEventPresentationView: View {
     let presentation: TaskEventPresentationSnapshot
 
+    @Environment(\.uiScale) private var uiScale
+
     @ViewBuilder var body: some View {
         switch presentation.type {
         case "file":
             HStack(spacing: 8) {
                 if let path = presentation.path {
-                    Text(path).font(.caption.monospaced()).foregroundStyle(.secondary)
+                    Text(path).scaledFont(.caption, design: .monospaced).foregroundStyle(.secondary)
                         .lineLimit(1).truncationMode(.middle)
                 }
                 if let change = presentation.change {
-                    Text(change).font(.caption.monospaced().weight(.medium))
+                    Text(change).scaledFont(.caption, weight: .medium, design: .monospaced)
                         .lineLimit(1)
                         .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(Color(nsColor: .textBackgroundColor),
-                                    in: RoundedRectangle(cornerRadius: 4))
+                        .background(Surface.sunken, in: RoundedRectangle(cornerRadius: Radius.small))
                 }
             }
             .textSelection(.enabled)
         case "command":
             VStack(alignment: .leading, spacing: 3) {
                 Text(presentation.command ?? "Command")
-                    .font(.caption.monospaced())
+                    .scaledFont(.caption, design: .monospaced)
                     .lineLimit(2)
                     .textSelection(.enabled)
                 if presentation.status != nil || presentation.exitCode != nil {
-                    Text(commandStatus).font(.caption2).foregroundStyle(.secondary)
+                    Text(commandStatus).scaledFont(.caption2).foregroundStyle(.secondary)
                 }
             }
             .padding(.horizontal, 7).padding(.vertical, 5)
-            .background(Color(nsColor: .textBackgroundColor),
-                        in: RoundedRectangle(cornerRadius: 5))
+            .background(Surface.sunken, in: RoundedRectangle(cornerRadius: Radius.small))
         case "message":
             Text(presentation.text ?? "")
-                .font(.caption)
+                .scaledFont(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(4)
+                .textSelection(.enabled)
+        case "tool":
+            Text(presentation.text ?? "")
+                .scaledFont(.caption, design: .monospaced)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
                 .textSelection(.enabled)
         case "todo":
             HStack(spacing: 8) {
@@ -418,9 +419,13 @@ private struct TaskEventPresentationView: View {
                     value: Double(presentation.completed ?? 0),
                     total: Double(max(presentation.total ?? 0, 1))
                 )
-                .frame(width: 72)
+                .frame(width: 72 * uiScale)
                 Text("\(presentation.completed ?? 0) of \(presentation.total ?? 0) complete")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .scaledFont(.caption, monospacedDigit: true).foregroundStyle(.secondary)
+                if let active = presentation.text {
+                    Text(active).scaledFont(.caption).foregroundStyle(.secondary)
+                        .lineLimit(1).truncationMode(.tail)
+                }
             }
         default:
             EmptyView()
@@ -462,26 +467,13 @@ private enum TaskEventTime {
     }
 }
 
-private struct MetadataChip: View {
+private struct MetadataLabel: View {
     let icon: String
     let text: String
     var body: some View {
         Label(text, systemImage: icon)
-            .font(.caption)
-            .padding(.horizontal, 8).padding(.vertical, 5)
-            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
-    }
-}
-
-private struct TaskCopyButton: View {
-    let text: String
-    var body: some View {
-        Button {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(text, forType: .string)
-        } label: {
-            Image(systemName: "doc.on.doc")
-        }
-        .buttonStyle(.plain).help("Copy path")
+            .scaledFont(.caption, design: .monospaced)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
     }
 }

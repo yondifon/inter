@@ -15,7 +15,7 @@ export interface TaskEventView {
 }
 
 export interface TaskEventPresentation {
-  type: "file" | "command" | "message" | "todo";
+  type: "file" | "command" | "message" | "todo" | "tool";
   path?: string;
   change?: string;
   command?: string;
@@ -104,7 +104,8 @@ export function taskEventView(event: TaskEvent, provider: Profile["provider"]): 
       title: tool ? toolTitle(tool) : "File change", detail, presentation, rawText };
   }
   if (subjectType.includes("tool")) {
-    return { ...base, kind: "tool", phase: statusPhase(status), title: tool ?? "Tool call", detail, rawText };
+    return { ...base, kind: "tool", phase: statusPhase(status),
+      title: tool ? toolTitle(tool) : "Tool call", detail, presentation, rawText };
   }
   if (subjectType.includes("usage")) {
     return { ...base, kind: "usage", phase: "info", title: "Usage", detail, rawText };
@@ -153,8 +154,24 @@ function isFileTool(tool?: string): boolean {
     .includes(tool?.toLowerCase() ?? "");
 }
 
+const TOOL_LABELS: Record<string, string> = {
+  todowrite: "Todo list",
+  todoread: "Todo list",
+  websearch: "Web search",
+  webfetch: "Fetch page",
+  glob: "Find files",
+  grep: "Search code",
+  ls: "List files",
+  list: "List files",
+  task: "Subagent",
+  agent: "Subagent",
+  update_plan: "Plan update",
+};
+
 function toolTitle(tool: string): string {
   const normalized = tool.toLowerCase();
+  const known = TOOL_LABELS[normalized];
+  if (known) return known;
   if (normalized === "apply_patch") return "Apply patch";
   if (normalized === "multiedit") return "Multi-edit file";
   if (normalized === "write_file") return "Write file";
@@ -180,12 +197,16 @@ function toolPresentation(
       ...(typeof state.exit_code === "number" ? { exitCode: state.exit_code } : {}),
     };
   }
-  if (normalized === "todowrite") {
+  if (normalized === "todowrite" || normalized === "todoread") {
     const todos = Array.isArray(input.todos) ? input.todos : [];
     const completed = todos.filter((todo) => object(todo).status === "completed").length;
-    return { type: "todo", completed, total: todos.length };
+    const active = firstString(
+      ...todos.filter((todo) => object(todo).status === "in_progress")
+        .map((todo) => object(todo).content ?? object(todo).activeForm),
+    );
+    return { type: "todo", completed, total: todos.length, ...(active ? { text: active } : {}) };
   }
-  if (!isFileTool(tool)) return undefined;
+  if (!isFileTool(tool)) return genericToolPresentation(input, state);
   const file = shortPath(firstString(
     title, input.filePath, input.file_path, input.path,
   ));
@@ -201,6 +222,35 @@ function toolPresentation(
       change: `${lines} line${lines === 1 ? "" : "s"} written` };
   }
   return file ? { type: "file", path: file } : undefined;
+}
+
+/// Arguments worth showing for a tool this app has no dedicated layout for.
+const TOOL_ARG_KEYS = [
+  "query", "pattern", "url", "description", "prompt",
+  "subagent_type", "glob", "include", "name", "path",
+];
+
+function genericToolPresentation(
+  input: Record<string, any>,
+  state: Record<string, any>,
+): TaskEventPresentation | undefined {
+  const parts: string[] = [];
+  for (const key of TOOL_ARG_KEYS) {
+    const value = firstString(input[key], input[camelCase(key)]);
+    if (!value) continue;
+    parts.push(`${humanize(key)}: ${truncate(value.replace(/\s+/g, " "), 80)}`);
+    if (parts.length === 2) break;
+  }
+  if (!parts.length) {
+    const title = firstString(state.title);
+    if (!title) return undefined;
+    return { type: "tool", text: truncate(title.replace(/\s+/g, " "), 120) };
+  }
+  return { type: "tool", text: parts.join(" · ") };
+}
+
+function camelCase(value: string): string {
+  return value.replace(/[._-](\w)/g, (_, letter: string) => letter.toUpperCase());
 }
 
 function subjectPresentation(
@@ -248,7 +298,11 @@ function presentationDetail(presentation?: TaskEventPresentation): string | unde
   case "file": return joinDetail(presentation.path, presentation.change);
   case "command": return presentation.command;
   case "message": return presentation.text;
-  case "todo": return `${presentation.completed ?? 0} of ${presentation.total ?? 0} complete`;
+  case "todo": return joinDetail(
+    `${presentation.completed ?? 0} of ${presentation.total ?? 0} complete`,
+    presentation.text,
+  );
+  case "tool": return presentation.text;
   }
 }
 

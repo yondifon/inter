@@ -46,10 +46,9 @@ struct ProfileFormView: View {
                         HStack {
                             TextField("ENV_NAME", text: $row.key).font(.system(.body, design: .monospaced))
                             TextField("Value or path", text: $row.value).font(.system(.body, design: .monospaced))
-                            Button(role: .destructive) {
+                            IconButton(symbol: "minus.circle", label: "Remove \(row.key.isEmpty ? "variable" : row.key)") {
                                 envRows.removeAll { $0.id == row.id }
-                            } label: { Image(systemName: "minus.circle") }
-                                .buttonStyle(.plain)
+                            }
                         }
                     }
                     Button("Add environment variable", systemImage: "plus") {
@@ -63,6 +62,7 @@ struct ProfileFormView: View {
                 if let saveError { Text(saveError).foregroundStyle(.red) }
             }
             .formStyle(.grouped)
+        .scrollIndicators(.never)
         }
         .frame(width: 560, height: 540)
     }

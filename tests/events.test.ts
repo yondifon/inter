@@ -151,4 +151,80 @@ describe("task event views", () => {
     expect(view.detail).toBe("No agent event for 35s");
     expect(view.rawText).toContain("\"stalled\": true");
   });
+
+  test("keeps the todo presentation and a readable name for a tool call", () => {
+    const view = taskEventView({
+      id: 11,
+      taskId: "task",
+      type: "agent.tool_use",
+      state: "running",
+      payload: {
+        type: "tool_use",
+        part: {
+          type: "tool",
+          tool: "todowrite",
+          state: {
+            status: "completed",
+            input: {
+              todos: [
+                { content: "Read the files", status: "completed" },
+                { content: "Fix the palette", status: "in_progress" },
+                { content: "Run the tests", status: "pending" },
+              ],
+            },
+          },
+        },
+      },
+      createdAt: "now",
+    }, "opencode");
+    expect(view.kind).toBe("tool");
+    expect(view.title).toBe("Todo list");
+    expect(view.presentation).toEqual({
+      type: "todo",
+      completed: 1,
+      total: 3,
+      text: "Fix the palette",
+    });
+    expect(view.detail).toBe("1 of 3 complete · Fix the palette");
+  });
+
+  test("summarizes a tool with no dedicated layout from its arguments", () => {
+    const view = taskEventView({
+      id: 12,
+      taskId: "task",
+      type: "agent.tool_use",
+      state: "running",
+      payload: {
+        type: "tool_use",
+        part: {
+          type: "tool",
+          tool: "grep",
+          state: { status: "completed", input: { pattern: "TaskState", include: "*.swift" } },
+        },
+      },
+      createdAt: "now",
+    }, "opencode");
+    expect(view.title).toBe("Search code");
+    expect(view.presentation).toEqual({ type: "tool", text: "Pattern: TaskState · Include: *.swift" });
+  });
+
+  test("falls back to the tool state title when no argument is recognizable", () => {
+    const view = taskEventView({
+      id: 13,
+      taskId: "task",
+      type: "agent.tool_use",
+      state: "running",
+      payload: {
+        type: "tool_use",
+        part: {
+          type: "tool",
+          tool: "mystery_tool",
+          state: { status: "completed", title: "Doing   something opaque", input: { weird: 1 } },
+        },
+      },
+      createdAt: "now",
+    }, "opencode");
+    expect(view.title).toBe("Mystery Tool");
+    expect(view.presentation).toEqual({ type: "tool", text: "Doing something opaque" });
+  });
 });

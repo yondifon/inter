@@ -2,11 +2,12 @@ import Cocoa
 import SwiftUI
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation {
     private var statusItem: NSStatusItem!
     private var window: NSWindow!
     private let broker = BrokerManager()
     private let store = ProfileStore()
+    private let zoom = AppZoom()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -35,7 +36,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         editItem.submenu = edit
+
+        let viewItem = NSMenuItem()
+        main.addItem(viewItem)
+        let view = NSMenu(title: "View")
+        view.addItem(zoomItem("Zoom In", #selector(zoomIn), key: "+"))
+        // ⌘+ needs Shift on most layouts; ⌘= is the keystroke fingers actually make.
+        view.addItem(zoomItem("Zoom In", #selector(zoomIn), key: "=", hidden: true))
+        view.addItem(zoomItem("Zoom Out", #selector(zoomOut), key: "-"))
+        view.addItem(zoomItem("Actual Size", #selector(zoomReset), key: "0"))
+        viewItem.submenu = view
         NSApp.mainMenu = main
+    }
+
+    private func zoomItem(_ title: String, _ action: Selector, key: String, hidden: Bool = false) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+        item.target = self
+        item.isHidden = hidden
+        item.allowsKeyEquivalentWhenHidden = hidden
+        return item
+    }
+
+    @objc private func zoomIn() { zoom.zoomIn() }
+    @objc private func zoomOut() { zoom.zoomOut() }
+    @objc private func zoomReset() { zoom.reset() }
+
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        switch item.action {
+        case #selector(zoomIn): return zoom.canZoomIn
+        case #selector(zoomOut): return zoom.canZoomOut
+        case #selector(zoomReset):
+            item.title = zoom.isDefault ? "Actual Size" : "Actual Size (\(zoom.label))"
+            return !zoom.isDefault
+        default: return true
+        }
     }
 
     private func setupStatusItem() {
@@ -56,7 +90,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.titleVisibility = .hidden
         window.isReleasedWhenClosed = false
         window.delegate = self
-        window.contentViewController = NSHostingController(rootView: ContentView(store: store, broker: broker))
+        window.contentViewController = NSHostingController(
+            rootView: RootView(store: store, broker: broker, zoom: zoom)
+        )
         window.setFrameAutosaveName("InterMainWindow")
         if !window.setFrameUsingName("InterMainWindow") { window.center() }
     }

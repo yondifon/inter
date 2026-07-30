@@ -13,31 +13,73 @@ struct ContentView: View {
     @State private var adding = false
     @State private var installResults: [MCPConfigInjector.InstallResult] = []
     @State private var showingInstall = false
+    @AppStorage("taskProjectFilter") private var projectFilter = ""
+    @AppStorage("taskGroupByProject") private var groupByProject = false
+    @Environment(\.uiScale) private var uiScale
 
     var body: some View {
         NavigationSplitView {
             List(selection: $selection) {
-                Section("Workers") {
-                    ForEach(store.profiles) { profile in
-                        WorkerRow(profile: profile).tag(SidebarSelection.profile(profile.id))
-                    }
-                }
-                Section("Recent tasks") {
-                    if store.tasks.isEmpty {
-                        Text("No tasks yet").font(.callout).foregroundStyle(.tertiary)
+                Section {
+                    if store.profiles.isEmpty {
+                        Text("No workers yet. Add one to start delegating.")
+                            .scaledFont(.callout).foregroundStyle(.tertiary)
                     } else {
-                        ForEach(store.tasks) { task in
-                            TaskRow(
-                                task: task,
-                                worker: store.profiles.first { $0.id == task.profileId }?.label ?? task.profileId
-                            )
-                            .tag(SidebarSelection.task(task.id))
+                        ForEach(store.profiles) { profile in
+                            WorkerRow(profile: profile).tag(SidebarSelection.profile(profile.id))
                         }
+                    }
+                } header: {
+                    SectionLabel(text: "Workers")
+                }
+                Section {
+                    if store.tasks.isEmpty {
+                        Text("No tasks yet").scaledFont(.callout).foregroundStyle(.tertiary)
+                    } else {
+                        ForEach(taskGroups) { group in
+                            if let title = group.title {
+                                SectionLabel(text: title)
+                                    .padding(.top, 4)
+                                    .help(group.id)
+                            }
+                            ForEach(group.tasks) { task in
+                                TaskRow(
+                                    task: task,
+                                    worker: store.profiles.first { $0.id == task.profileId }?.label ?? task.profileId
+                                )
+                                .tag(SidebarSelection.task(task.id))
+                            }
+                        }
+                    }
+                } header: {
+                    HStack(spacing: 6) {
+                        SectionLabel(text: activeProjectName ?? "Recent tasks")
+                        Spacer(minLength: 0)
+                        if store.tasks.count > 1 { projectMenu }
                     }
                 }
             }
             .listStyle(.sidebar)
+            .scrollIndicators(.never)
             .navigationSplitViewColumnWidth(min: 240, ideal: 260)
+            // Graphite-style selection. The system accent turns a scanned list into
+            // a blue slab; a neutral fill keeps the type as the loudest thing.
+            .tint(Color(nsColor: .systemGray))
+            .toolbar {
+                ToolbarItem(placement: .navigation) { brokerIndicator }
+                ToolbarItem {
+                    Button("Install MCP", systemImage: "link.badge.plus") {
+                        installResults = MCPConfigInjector.installEverywhere(profiles: store.profiles)
+                        showingInstall = true
+                    }
+                    .labelStyle(.iconOnly)
+                    .help("Add Inter to every CLI's global MCP config")
+                }
+                ToolbarItem {
+                    Button("Add Worker", systemImage: "plus") { adding = true }
+                        .help("Add worker")
+                }
+            }
         } detail: {
             if case let .profile(id) = selection,
                let profile = store.profiles.first(where: { $0.id == id }) {
@@ -50,33 +92,67 @@ struct ContentView: View {
                 ContentUnavailableView("Choose a worker or task", systemImage: "point.3.connected.trianglepath.dotted")
             }
         }
-        .toolbar {
-            ToolbarItem(placement: .navigation) {
-                HStack(spacing: 7) {
-                    Circle().fill(statusColor).frame(width: 7, height: 7)
-                    Text(statusText).font(.callout).foregroundStyle(.secondary)
-                }
-                .fixedSize()
-                .help(statusText)
-            }
-            ToolbarItem {
-                Button("Install MCP", systemImage: "link.badge.plus") {
-                    installResults = MCPConfigInjector.installEverywhere(profiles: store.profiles)
-                    showingInstall = true
-                }
-                .labelStyle(.titleAndIcon)
-                .help("Add Inter to every CLI's global MCP config")
-            }
-            ToolbarItem {
-                Button("Add Worker", systemImage: "plus") { adding = true }
-                    .help("Add worker")
-            }
-        }
         .sheet(isPresented: $adding) { ProfileFormView(store: store) }
         .sheet(item: $editing) { ProfileFormView(store: store, profile: $0) }
         .sheet(isPresented: $showingInstall) { InstallResultsView(results: installResults) }
         .task { store.start() }
         .frame(minWidth: 760, minHeight: 520)
+    }
+
+    private var projects: [TaskProject] { TaskOrganizer.projects(in: store.tasks) }
+
+    private var activeProjectName: String? {
+        TaskOrganizer.activeProjectName(tasks: store.tasks, project: projectFilter.isEmpty ? nil : projectFilter)
+    }
+
+    private var taskGroups: [TaskGroup] {
+        TaskOrganizer.organize(
+            tasks: store.tasks,
+            project: projectFilter.isEmpty ? nil : projectFilter,
+            grouped: groupByProject
+        )
+    }
+
+    /// Filtering and grouping belong to the task list, so the control sits on the
+    /// list's own header rather than in the window toolbar with the global actions.
+    private var projectMenu: some View {
+        Menu {
+            Picker("Project", selection: $projectFilter) {
+                Text("All projects").tag("")
+                ForEach(projects) { project in
+                    Text("\(project.name) — \(project.count)").tag(project.id)
+                }
+            }
+            .pickerStyle(.inline)
+            Divider()
+            Toggle("Group by project", isOn: $groupByProject)
+        } label: {
+            Image(systemName: isFiltering
+                  ? "line.3.horizontal.decrease.circle.fill"
+                  : "line.3.horizontal.decrease")
+                .scaledFont(.caption2, weight: .semibold)
+                .foregroundStyle(isFiltering ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Filter and group tasks by project")
+        .accessibilityLabel("Filter and group tasks by project")
+    }
+
+    private var isFiltering: Bool { activeProjectName != nil || groupByProject }
+
+    /// Broker health is app-wide, so it sits above the sidebar with the other
+    /// global controls instead of in the detail toolbar, where it read as part of
+    /// the current selection.
+    private var brokerIndicator: some View {
+        HStack(spacing: 6) {
+            Circle().fill(statusColor).frame(width: 7 * uiScale, height: 7 * uiScale)
+                .accessibilityHidden(true)
+            Text(statusText).scaledFont(.caption).foregroundStyle(.secondary)
+        }
+        .fixedSize()
+        .help(statusText)
     }
 
     private var statusText: String {
@@ -93,16 +169,18 @@ private struct ProfileDetail: View {
     let edit: () -> Void
 
     @State private var confirmingDelete = false
+    @Environment(\.uiScale) private var uiScale
 
     var body: some View {
         Form {
             Section {
                 HStack(spacing: 14) {
-                    ProviderLogo(provider: profile.provider, size: 28)
+                    ProviderLogo(provider: profile.provider, size: 28 * uiScale)
+                        .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(profile.label).font(.title3.weight(.semibold))
+                        Text(profile.label).scaledFont(.title3, weight: .semibold)
                         Text("\(profile.provider.label) · \(profile.model)")
-                            .font(.callout).foregroundStyle(.secondary)
+                            .scaledFont(.callout, design: .monospaced).foregroundStyle(.secondary)
                     }
                     Spacer(minLength: 16)
                     EnabledToggle(profile: profile, store: store)
@@ -116,11 +194,12 @@ private struct ProfileDetail: View {
                     .menuIndicator(.hidden)
                     .fixedSize()
                     .help("More actions")
+                    .accessibilityLabel("More actions")
                 }
                 .padding(.vertical, 6)
             }
 
-            Section("Environment") {
+            Section {
                 if profile.env.isEmpty {
                     Text("No overrides").foregroundStyle(.secondary)
                 } else {
@@ -128,6 +207,8 @@ private struct ProfileDetail: View {
                         EnvironmentRow(key: key, value: profile.env[key] ?? "")
                     }
                 }
+            } header: {
+                SectionLabel(text: "Environment")
             }
 
             Section {
@@ -139,19 +220,20 @@ private struct ProfileDetail: View {
                 LabeledContent("Endpoint") {
                     HStack(spacing: 8) {
                         Text(InterServer.mcpURL)
-                            .font(.system(.body, design: .monospaced))
+                            .scaledFont(.body, design: .monospaced)
                             .textSelection(.enabled)
-                        CopyButton(text: InterServer.mcpURL)
+                        CopyIconButton(text: InterServer.mcpURL, label: "Copy endpoint")
                     }
                 }
             } header: {
-                Text("MCP")
+                SectionLabel(text: "MCP — applies to all workers")
             } footer: {
                 Text("When enabled, each active worker gets a named tool. Reconnect MCP clients after changing this option or workers.")
             }
 
         }
         .formStyle(.grouped)
+        .scrollIndicators(.never)
         .confirmationDialog("Delete “\(profile.label)”?", isPresented: $confirmingDelete) {
             Button("Delete", role: .destructive) { Task { await store.delete(profile) } }
             Button("Cancel", role: .cancel) {}
@@ -174,62 +256,41 @@ private struct EnvironmentRow: View {
         LabeledContent {
             HStack(spacing: 8) {
                 Text(isSecret && !revealed ? String(repeating: "•", count: 10) : value)
-                    .font(.system(.body, design: .monospaced))
+                    .scaledFont(.body, design: .monospaced)
                     .textSelection(.enabled)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 if isSecret {
-                    Button { revealed.toggle() } label: {
-                        Image(systemName: revealed ? "eye.slash" : "eye")
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
-                    .help(revealed ? "Hide value" : "Reveal value")
+                    IconButton(
+                        symbol: revealed ? "eye.slash" : "eye",
+                        label: revealed ? "Hide value" : "Reveal value"
+                    ) { revealed.toggle() }
                 }
-                CopyButton(text: value)
+                CopyIconButton(text: value, label: "Copy value")
             }
         } label: {
-            Text(key).font(.system(.callout, design: .monospaced))
+            Text(key).scaledFont(.callout, design: .monospaced)
         }
-    }
-}
-
-private struct CopyButton: View {
-    let text: String
-    @State private var copied = false
-
-    var body: some View {
-        Button {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(text, forType: .string)
-            copied = true
-            Task {
-                try? await Task.sleep(for: .seconds(1.2))
-                copied = false
-            }
-        } label: {
-            Image(systemName: copied ? "checkmark" : "doc.on.doc")
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(copied ? Color.green : Color.secondary)
-        .help("Copy")
     }
 }
 
 private struct WorkerRow: View {
     let profile: Profile
+    @Environment(\.uiScale) private var uiScale
 
     var body: some View {
         HStack(spacing: 8) {
-            ProviderLogo(provider: profile.provider, size: 15)
-                .frame(width: 18, alignment: .center)
+            ProviderLogo(provider: profile.provider, size: 15 * uiScale)
+                .accessibilityHidden(true)
+                .frame(width: 18 * uiScale, alignment: .center)
             VStack(alignment: .leading, spacing: 1) {
-                Text(profile.label).lineLimit(1)
-                Text(profile.model).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                Text(profile.label).scaledFont(.body).lineLimit(1)
+                Text(profile.model).scaledFont(.caption, design: .monospaced)
+                    .foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer(minLength: 0)
             if !profile.enabled {
-                Text("Off").font(.caption2).foregroundStyle(.tertiary)
+                Text("Off").scaledFont(.caption2).foregroundStyle(.tertiary)
             }
         }
         .padding(.vertical, 3)
@@ -240,32 +301,38 @@ private struct WorkerRow: View {
 private struct TaskRow: View {
     let task: TaskSnapshot
     let worker: String
+    @Environment(\.uiScale) private var uiScale
 
     var body: some View {
         HStack(spacing: 8) {
-            Circle().fill(stateColor).frame(width: 6, height: 6)
-                .frame(width: 18, alignment: .center)
+            StateMarker(state: state)
+                .frame(width: 18 * uiScale, alignment: .center)
             VStack(alignment: .leading, spacing: 1) {
-                Text(title).lineLimit(1)
-                Text("\(stateLabel) · \(worker) · #\(task.id.prefix(6))")
-                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                Text(title).scaledFont(.body).lineLimit(1)
+                Text(meta)
+                    .scaledFont(.caption, design: .monospaced)
+                    .foregroundStyle(.secondary).lineLimit(1)
             }
         }
         .padding(.vertical, 3)
         .help(task.prompt)
+        .accessibilityLabel("\(title). \(state.label). \(worker).")
     }
 
+    private var state: TaskState { TaskState(task.state) }
+
+    /// The check already says "completed", so only unfinished or failed runs spend
+    /// a word on their state.
+    private var meta: String {
+        let parts = state.wantsLabelInList
+            ? [state.label, worker, shortID]
+            : [worker, shortID]
+        return parts.joined(separator: " · ")
+    }
+
+    private var shortID: String { "#\(task.id.prefix(8))" }
     private var title: String {
         task.prompt.split(whereSeparator: \.isNewline).first.map(String.init) ?? "Untitled task"
-    }
-    private var stateLabel: String { task.state.replacingOccurrences(of: "_", with: " ") }
-    private var stateColor: Color {
-        switch task.state {
-        case "failed": .red
-        case "completed": .green
-        case "needs_input": .orange
-        default: .secondary
-        }
     }
 }
 
@@ -286,6 +353,8 @@ struct EnabledToggle: View {
             }
         ))
         .toggleStyle(.switch)
+        .labelsHidden()
+        .accessibilityLabel("Enabled")
         .help(profile.enabled ? "Accepts delegated tasks" : "Hidden from delegate")
         .alert("Couldn’t change worker state.", isPresented: $saveFailed) {
             Button("OK", role: .cancel) {}
@@ -296,6 +365,7 @@ struct EnabledToggle: View {
 private struct InstallResultsView: View {
     @Environment(\.dismiss) private var dismiss
     let results: [MCPConfigInjector.InstallResult]
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
@@ -303,17 +373,29 @@ private struct InstallResultsView: View {
                 Spacer()
                 Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
             }
-            ForEach(Array(results.enumerated()), id: \.offset) { _, result in
-                HStack {
-                    Image(systemName: result.success ? "checkmark.circle.fill" : "xmark.circle.fill")
-                        .foregroundStyle(result.success ? .green : .red)
-                    VStack(alignment: .leading) {
-                        Text(result.client).fontWeight(.medium)
-                        Text("\(result.message) · \(result.path)").font(.caption).foregroundStyle(.secondary)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(Array(results.enumerated()), id: \.offset) { _, result in
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Image(systemName: result.success ? "checkmark.circle.fill" : "xmark.circle.fill")
+                                .foregroundStyle(result.success ? .green : .red)
+                                .accessibilityHidden(true)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(result.client).fontWeight(.medium)
+                                Text("\(result.success ? "Installed" : "Failed") · \(result.message) · \(result.path)")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
             }
+            .scrollBounceBehavior(.basedOnSize)
+            .scrollIndicators(.never)
         }
-        .padding(24).frame(width: 500)
+        .padding(24)
+        .frame(idealWidth: 500, maxHeight: 460)
+        .fixedSize(horizontal: true, vertical: false)
     }
 }
