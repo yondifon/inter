@@ -274,7 +274,11 @@ colon-separated list to narrow the fence.
   prompt, intentionally spends no inference credits, and does not claim an exact
   provider credit balance.
 - `wait`: use `afterCursor` to receive meaningful events, heartbeat progress,
-  attention, completion, or timeout.
+  attention, completion, or timeout. A single call blocks at most 110s (idle
+  transports get cut beyond that); on timeout, call again with the returned
+  cursor. Pass `until: "attention"` to sleep through progress events and wake
+  only for `needs_input`, terminal states, or timeout — the right mode for
+  long tasks that need no supervision every few seconds.
 - `health`: report broker and MCP contract versions.
 - `inspect`: return one task snapshot immediately.
 - `tasks`: list concise task summaries with `limit`, `state`, `since`, and
@@ -282,6 +286,8 @@ colon-separated list to narrow the fence.
 - `reply`: answer `INTER_NEEDS_INPUT: <question>` and return a linked
   continuation task that resumes the worker's CLI session (`claude --resume`,
   `codex exec resume`, `opencode run --session`), with a fresh-run fallback.
+  A worker that skips the marker but ends on a plain question also lands in
+  `needs_input`, so `reply` covers prose asks too.
 - `resume`: continue a failed, cancelled, or blocked task in its captured
   provider session, returning a linked continuation task.
 - `cancel`: stop a queued or running task and its worker process tree.

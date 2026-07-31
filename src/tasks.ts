@@ -8,7 +8,7 @@ import { taskEventView } from "./events";
 import { continuationPrompt, interpretWorkerOutcome, needsInputQuestion, workerPrompt } from "./task-protocol";
 import { normalizeTaskScope, sandboxedCommand } from "./task-scope";
 import { stateStore, type StateStore, type TaskListQuery } from "./store";
-import { TaskWaiter, type TaskWaitResult } from "./task-waiter";
+import { TaskWaiter, type TaskWaitResult, type WaitUntil } from "./task-waiter";
 import type { Profile, Task, TaskScope, TaskSummary } from "./types";
 
 const MAX_EVENT_LINE = 64 * 1024;
@@ -51,8 +51,9 @@ export async function waitForTasks(
   timeoutMs = 30_000,
   signal?: AbortSignal,
   afterCursor?: number,
+  until?: WaitUntil,
 ): Promise<TaskWaitResult> {
-  const waited = await taskWaiter.wait(taskIds, timeoutMs, signal, afterCursor);
+  const waited = await taskWaiter.wait(taskIds, timeoutMs, signal, afterCursor, until);
   const rows = stateStore().listTaskEventsForTasks(taskIds, afterCursor ?? 0, 101, true);
   const config = await loadConfig();
   const providers = new Map(config.profiles.map(({ id, provider }) => [id, provider]));
@@ -170,7 +171,11 @@ async function validateWorkspace(cwd: string): Promise<string> {
   if (!roots.some((root) => {
     const child = relative(root, workspace);
     return child === "" || (!child.startsWith("..") && !isAbsolute(child));
-  })) throw new Error(`cwd is outside INTER_ROOTS: ${roots.join(", ")}`);
+  })) {
+    throw new Error(
+      `cwd is outside INTER_ROOTS: ${workspace} (roots: ${roots.join(", ")}); set the INTER_ROOTS env var to allow more roots`,
+    );
+  }
   if (!(await stat(workspace).catch(() => undefined))?.isDirectory()) throw new Error("cwd does not exist");
   return workspace;
 }
@@ -197,7 +202,7 @@ async function runTask(
   try {
     scratchDir = mkdtempSync(resolve(tmpdir(), "inter-worker-"));
     const hookUrl = `${Bun.env.INTER_BROKER_URL ?? `http://127.0.0.1:${Bun.env.INTER_PORT ?? 7331}`}/api/hooks/${task.id}`;
-    const prompt = workerPrompt(promptOverride ?? task.prompt, task.allowQuestions);
+    const prompt = workerPrompt(promptOverride ?? task.prompt, task.allowQuestions, task.scope);
     const env = {
       ...Bun.env,
       ...profileEnv(profile),
@@ -322,6 +327,17 @@ async function runTask(
     if (active?.cancelled || stateStore().getTask(task.id)?.state === "cancelled") return;
     const output = finalText(profile, stdout);
     const outcome = interpretWorkerOutcome(exitCode, output, stderr);
+    // A worker that dies during startup prints its real error as a stream
+    // event, not on stderr; without this the task surfaces only "exit 1".
+    if (outcome.state === "failed" && !stderr.trim()) {
+      const hint = lastWorkerErrorDetail(task.id, profile.provider);
+      const unhelpful = outcome.error === `exit ${exitCode}` || /^[{[]/.test(outcome.error ?? "");
+      const better = hint.error ?? (unhelpful ? hint.last : undefined);
+      if (better) {
+        outcome.error = better;
+        outcome.completion.reason = better.replace(/\s+/g, " ").trim().slice(0, 500);
+      }
+    }
     const persisted = update(task, {
       state: outcome.state,
       output: outcome.output,
@@ -347,6 +363,25 @@ async function runTask(
     if (activeWorkers.get(task.id) === active) activeWorkers.delete(task.id);
     if (scratchDir) rmSync(scratchDir, { recursive: true, force: true });
   }
+}
+
+function lastWorkerErrorDetail(
+  taskId: string,
+  provider: Profile["provider"],
+): { error?: string; last?: string } {
+  const events = stateStore().listTaskEvents(taskId);
+  let last: string | undefined;
+  for (let index = events.length - 1; index >= 0; index--) {
+    const event = events[index]!;
+    if (!event.type.startsWith("agent.")) continue;
+    const view = taskEventView(event, provider);
+    const detail = view.detail?.trim();
+    if (!detail) continue;
+    const text = `${view.title}: ${detail}`;
+    if (view.kind === "error" || view.phase === "failed") return { error: text, last: last ?? text };
+    last ??= text;
+  }
+  return { last };
 }
 
 export function recordProfileTaskOutcome(
@@ -400,7 +435,11 @@ function tail(value: string, limit: number): string {
 export async function reply(id: string, answer: string): Promise<Task> {
   const old = stateStore().getTask(id);
   if (!old) throw new Error(`unknown task: ${id}`);
-  if (old.state !== "needs_input") throw new Error(`task does not need input: ${id}`);
+  if (old.state !== "needs_input") {
+    throw new Error(old.state === "blocked"
+      ? `task does not need input: ${id} — state is blocked; use resume with your answer as the instruction`
+      : `task does not need input: ${id} (state: ${old.state})`);
+  }
   const config = await loadConfig();
   const profile = config.profiles.find((item) => item.id === old.profileId);
   if (!profile || !canResumeSession(profile)) {
@@ -432,7 +471,11 @@ export async function resumeTask(id: string, instruction?: string, timeoutMs?: n
   if (!profile || !canResumeSession(profile)) {
     throw new Error(sessionResumeUnsupported(old.profileId, profile));
   }
-  if (!old.sessionId) throw new Error(`task has no captured session to resume: ${id}`);
+  if (!old.sessionId) {
+    throw new Error(
+      `task has no captured session to resume: ${id} — the worker exited before the provider created a session; delegate a fresh task instead`,
+    );
+  }
   const resumeInstruction = instruction?.trim() || "Continue the original task from where the previous run stopped.";
   const { task } = await prepareTask(
     old.profileId,

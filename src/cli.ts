@@ -29,7 +29,11 @@ import { normalizeProfile } from "./profile-input";
 
 const port = Number(Bun.env.INTER_PORT ?? 7331);
 const VERSION = "0.3.1";
-const MCP_CONTRACT_VERSION = 8;
+const MCP_CONTRACT_VERSION = 9;
+// Idle transports get cut somewhere above ~2 minutes (field-observed: waits of
+// 180s+ died with socket-closed errors, ≤120s never did). Answer before that
+// with reason "timeout" and a cursor so clients re-poll instead of erroring.
+const MAX_WAIT_BLOCK_MS = 110_000;
 const scopeSchema = z.object({
   read: z.array(z.string()).max(200),
   write: z.array(z.string()).max(200),
@@ -51,6 +55,7 @@ const mcpHandler = createMcpHandler(() => createMcpServer(), {
 Bun.serve({
   port,
   hostname: "127.0.0.1",
+  idleTimeout: 255,
   async fetch(request) {
     const url = new URL(request.url);
     if (url.pathname === "/mcp") return mcpHandler.fetch(request);
@@ -264,14 +269,15 @@ async function createMcpServer(): Promise<McpServer> {
     return result(task);
   });
   server.registerTool("wait", {
-    description: "Block until meaningful progress or attention. Returns events, progress, and task snapshots with provider-native sessionId when captured.",
+    description: "Block until meaningful progress or attention. Returns events, progress, and task snapshots with provider-native sessionId when captured. until \"attention\" sleeps through progress events and returns only for needs_input or terminal states — use it for long tasks instead of absorbing a wake every few seconds. A single call blocks at most 110s regardless of timeoutMs; on reason \"timeout\", call again with the returned cursor.",
     inputSchema: z.object({
       taskIds: z.array(z.string()).min(1).max(8),
       timeoutMs: z.number().int().min(1).max(300_000).default(30_000),
       afterCursor: z.number().int().min(0).optional(),
+      until: z.enum(["progress", "attention"]).default("progress"),
     }),
-  }, async ({ taskIds, timeoutMs, afterCursor }, extra) => result(
-    await waitForTasks(taskIds, timeoutMs, extra.mcpReq.signal, afterCursor),
+  }, async ({ taskIds, timeoutMs, afterCursor, until }, extra) => result(
+    await waitForTasks(taskIds, Math.min(timeoutMs, MAX_WAIT_BLOCK_MS), extra.mcpReq.signal, afterCursor, until),
   ));
   server.registerTool("health", {
     description: "Report broker and MCP contract versions.",

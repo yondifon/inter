@@ -61,6 +61,15 @@ describe("worker protocol", () => {
     expect(prompt).toContain("INTER_NEEDS_INPUT:");
   });
 
+  test("tells the worker its enforced file scope", () => {
+    const prompt = workerPrompt("Do.", true, { read: ["src/**"], write: ["src/api.ts"] });
+    expect(prompt).toContain("src/**, src/api.ts");
+    expect(prompt).toContain("writable: src/api.ts");
+    expect(prompt).toContain("operation not permitted");
+    expect(workerPrompt("Do.", true, { read: ["**"], write: [] }))
+      .toContain("writable: nothing");
+  });
+
   test("does not call a clean exit completed without a completion marker", () => {
     expect(interpretWorkerOutcome(0, "Awaiting permission to write the file.", "")).toMatchObject({
       state: "blocked",
@@ -83,6 +92,32 @@ describe("worker protocol", () => {
       output: "Done.",
       completion: { blocked: false, code: "completed" },
     });
+  });
+
+  test("accepts a completion marker followed by trailing prose", () => {
+    expect(interpretWorkerOutcome(0, "INTER_RESULT: completed\nSummary: wrote 3 files.", ""))
+      .toMatchObject({
+        state: "completed",
+        output: "Summary: wrote 3 files.",
+        completion: { blocked: false, code: "completed" },
+      });
+  });
+
+  test("ignores an instruction echo of the completion marker", () => {
+    expect(interpretWorkerOutcome(0, "I will end with: INTER_RESULT: completed once done.", ""))
+      .toMatchObject({ state: "blocked", completion: { code: "unverified" } });
+  });
+
+  test("treats a trailing prose question as needs_input", () => {
+    expect(interpretWorkerOutcome(0, "I stopped before writing.\nShould I overwrite config.json?", ""))
+      .toMatchObject({
+        state: "needs_input",
+        question: "Should I overwrite config.json?",
+        completion: { blocked: true, code: "needs_authority", reason: "Should I overwrite config.json?" },
+      });
+    // A question phrased with permission language is still an ask, not a wall.
+    expect(interpretWorkerOutcome(0, "I need your approval first. Proceed with the rewrite?", ""))
+      .toMatchObject({ state: "needs_input", question: "I need your approval first. Proceed with the rewrite?" });
   });
 
   test("accepts protocol markers followed by empty lines", () => {

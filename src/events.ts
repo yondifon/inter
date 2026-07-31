@@ -681,9 +681,11 @@ function toolPresentation(
   }
   const content = firstString(input.content, input.text);
   if (content && ["write", "write_file"].includes(tool?.toLowerCase() ?? "")) {
+    // Computed from the tool input at call time — intent, not outcome. Saying
+    // "written" here made refused writes read as successful in the trace.
     const lines = content.split(/\r?\n/).length;
     return { type: "file", ...(file ? { path: file } : {}),
-      change: `${lines} line${lines === 1 ? "" : "s"} written` };
+      change: `${lines} line${lines === 1 ? "" : "s"}` };
   }
   return file ? { type: "file", path: file } : undefined;
 }

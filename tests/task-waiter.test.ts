@@ -169,6 +169,32 @@ describe("TaskWaiter", () => {
     }
   });
 
+  test("sleeps through progress when until is attention", async () => {
+    const { reader, writer } = stores();
+    try {
+      const work = task("quiet");
+      writer.createTask(work);
+      const afterCursor = writer.latestTaskEventId([work.id]);
+
+      writer.appendTaskEvent(work.id, "heartbeat", work.state, { elapsedMs: 10_000 });
+      const timedOut = await storeWaiter(reader).wait([work.id], 300, undefined, afterCursor, "attention");
+      expect(timedOut.reason).toBe("timeout");
+
+      const waiting = storeWaiter(reader).wait([work.id], 2_000, undefined, afterCursor, "attention");
+      writer.appendTaskEvent(work.id, "heartbeat", work.state, { elapsedMs: 20_000 });
+      work.state = "completed";
+      work.updatedAt = new Date().toISOString();
+      writer.saveTask(work, "completed");
+
+      const result = await waiting;
+      expect(result.reason).toBe("attention");
+      expect(result.tasks[0]?.state).toBe("completed");
+    } finally {
+      reader.close();
+      writer.close();
+    }
+  });
+
   test("returns a captured provider session id as progress", async () => {
     const { reader, writer } = stores();
     try {

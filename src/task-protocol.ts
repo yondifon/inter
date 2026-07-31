@@ -1,7 +1,10 @@
-import type { CompletionCode, TaskCompletion } from "./types";
+import type { CompletionCode, TaskCompletion, TaskScope } from "./types";
 
 const NEEDS_INPUT = /(?:^|\r?\n)[\t ]*(?:INTER_NEEDS_INPUT|NEEDS_INPUT)\s*:\s*([^\r\n]+)[\t ]*(?:\r?\n[\t ]*)*$/i;
-const COMPLETED = /(?:^|\r?\n)[\t ]*INTER_RESULT\s*:\s*completed[\t ]*(?:\r?\n[\t ]*)*$/i;
+// Line-anchored but not end-anchored: workers often append a summary after the
+// marker, and that must not turn a done task into blocked/unverified. The line
+// anchor keeps instruction echoes ("end with: INTER_RESULT: completed") inert.
+const COMPLETED = /(?:^|\r?\n)[\t ]*INTER_RESULT\s*:\s*completed[\t ]*(?=\r?\n|$)/i;
 const BLOCKED = /(?:^|\r?\n)[\t ]*INTER_BLOCKED\s*:\s*([a-z_]+)(?:\s*[:|]\s*(.+))?[\t ]*(?:\r?\n[\t ]*)*$/i;
 const PERMISSION_BLOCK = /\b(?:awaiting|need(?:ing)?|requires?) (?:your )?(?:permission|approval)\b|\bcannot proceed\b.*\bpermission\b/i;
 
@@ -13,20 +16,36 @@ export interface WorkerOutcome {
   completion: TaskCompletion;
 }
 
-export function workerPrompt(prompt: string, allowQuestions: boolean): string {
+export function workerPrompt(prompt: string, allowQuestions: boolean, scope?: TaskScope): string {
   return [
     prompt,
     "",
     "<inter_protocol>",
     "This reporting protocol is part of the task contract.",
+    ...(scope ? [scopeLine(scope)] : []),
     allowQuestions
       ? "If a product choice, secret, destructive action, or new authority is required, stop and end with: INTER_NEEDS_INPUT: <one clear question>"
       : "Do not ask questions. If required information or authority is missing, report a blocked result.",
     "If the requested work is fully done, end with: INTER_RESULT: completed",
     "If work cannot be completed, end with: INTER_BLOCKED: <permission_denied|needs_authority|worker_error> | <short reason>",
-    "Emit exactly one of those status lines as the final non-empty line. Do not claim completion before the work is done.",
+    "Emit exactly one of those status lines as the final non-empty line of your final message. Do not claim completion before the work is done.",
     "</inter_protocol>",
   ].join("\n");
+}
+
+// Sandbox denials surface inside worker CLIs as bare "operation not permitted"
+// errors that name no rule; telling the worker its fence up front is the only
+// place that context can come from.
+function scopeLine(scope: TaskScope): string {
+  const readable = describeRules([...new Set([...scope.read, ...scope.write])]);
+  return `File access is OS-enforced relative to your working directory — readable: ${readable}; writable: ${describeRules(scope.write)}. Access outside that scope fails with "operation not permitted"; report it as out of scope instead of retrying.`;
+}
+
+function describeRules(rules: string[]): string {
+  if (rules.length === 0) return "nothing";
+  if (rules.includes("**")) return "the whole working directory";
+  const shown = rules.slice(0, 8).join(", ");
+  return rules.length > 8 ? `${shown} and ${rules.length - 8} more` : shown;
 }
 
 export function continuationPrompt(original: string, question: string, answer: string): string {
@@ -47,6 +66,11 @@ export function continuationPrompt(original: string, question: string, answer: s
 
 export function needsInputQuestion(output: string): string | undefined {
   return output.match(NEEDS_INPUT)?.[1]?.trim() || undefined;
+}
+
+function proseQuestion(output: string): string | undefined {
+  const lastLine = output.trimEnd().split(/\r?\n/).at(-1)?.trim();
+  return lastLine?.endsWith("?") ? compact(lastLine) : undefined;
 }
 
 export function interpretWorkerOutcome(exitCode: number, output: string, stderr: string): WorkerOutcome {
@@ -79,6 +103,25 @@ export function interpretWorkerOutcome(exitCode: number, output: string, stderr:
       completion: { exitCode, blocked: true, code, reason },
     };
   }
+  if (COMPLETED.test(output)) {
+    return {
+      state: "completed",
+      output: output.replace(COMPLETED, "").trim(),
+      completion: { exitCode, blocked: false, code: "completed" },
+    };
+  }
+  // Most workers ask in prose instead of emitting the needs_input marker; a
+  // trailing question is the ask, and classifying it blocked would leave reply
+  // unusable for the common case.
+  const asked = proseQuestion(output);
+  if (asked) {
+    return {
+      state: "needs_input",
+      output,
+      question: asked,
+      completion: { exitCode, blocked: true, code: "needs_authority", reason: asked },
+    };
+  }
   if (PERMISSION_BLOCK.test(output)) {
     return {
       state: "blocked",
@@ -89,13 +132,6 @@ export function interpretWorkerOutcome(exitCode: number, output: string, stderr:
         code: "permission_denied",
         reason: compact(output),
       },
-    };
-  }
-  if (COMPLETED.test(output)) {
-    return {
-      state: "completed",
-      output: output.replace(COMPLETED, "").trim(),
-      completion: { exitCode, blocked: false, code: "completed" },
     };
   }
   return {

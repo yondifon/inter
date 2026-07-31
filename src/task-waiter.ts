@@ -21,6 +21,8 @@ export interface TaskWaitResult {
   hasMore?: boolean;
 }
 
+export type WaitUntil = "progress" | "attention";
+
 type Listener = (taskId?: string) => void;
 const POLL_INTERVAL_MS = 100;
 
@@ -36,7 +38,13 @@ export class TaskWaiter {
     for (const listener of [...this.listeners]) listener(taskId);
   }
 
-  async wait(taskIds: string[], timeoutMs: number, signal?: AbortSignal, afterCursor?: number): Promise<TaskWaitResult> {
+  async wait(
+    taskIds: string[],
+    timeoutMs: number,
+    signal?: AbortSignal,
+    afterCursor?: number,
+    until: WaitUntil = "progress",
+  ): Promise<TaskWaitResult> {
     const ids = [...new Set(taskIds)];
     if (ids.length === 0) throw new Error("at least one task ID is required");
     if (signal?.aborted) throw new Error("wait cancelled");
@@ -46,7 +54,7 @@ export class TaskWaiter {
     if (current.some(needsAttention)) {
       return { reason: "attention", tasks: current, cursor: this.getCursor(ids) };
     }
-    if (afterCursor !== undefined && this.getCursor(ids) > afterCursor) {
+    if (until === "progress" && afterCursor !== undefined && this.getCursor(ids) > afterCursor) {
       return { reason: "progress", tasks: current, cursor: this.getCursor(ids) };
     }
 
@@ -79,7 +87,7 @@ export class TaskWaiter {
           const tasks = this.tasks(ids);
           const cursor = this.getCursor(ids);
           if (tasks.some(needsAttention)) finish({ reason: "attention", tasks, cursor });
-          else if (cursor > baseline) finish({ reason: "progress", tasks, cursor });
+          else if (until === "progress" && cursor > baseline) finish({ reason: "progress", tasks, cursor });
         } catch (error) {
           if (settled) return;
           settled = true;
