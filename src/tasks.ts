@@ -1,7 +1,6 @@
-import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { isAbsolute, relative, resolve } from "node:path";
 import { canResumeSession, commandFor, finalText, resumeCommandFor, sessionIdFrom } from "./adapters";
 import { loadConfig, profileEnv } from "./config";
@@ -141,7 +140,7 @@ async function prepareTask(
 
   const now = new Date().toISOString();
   const task: Task = {
-    id: randomUUID(),
+    id: crypto.randomUUID(),
     profileId,
     model,
     prompt,
@@ -161,7 +160,10 @@ async function prepareTask(
 async function validateWorkspace(cwd: string): Promise<string> {
   const workspace = resolve(cwd);
   if (!isAbsolute(cwd)) throw new Error("cwd must be an absolute path");
-  const roots = (process.env.INTER_ROOTS ?? process.cwd())
+  // Default to the whole home directory, matching the app's launch env: the
+  // broker is often spawned inside one project, and delegation must reach any
+  // of the user's repos. Set INTER_ROOTS to narrow the fence.
+  const roots = (Bun.env.INTER_ROOTS ?? homedir())
     .split(":")
     .filter(Boolean)
     .map((root) => resolve(root));
@@ -402,7 +404,7 @@ export async function reply(id: string, answer: string): Promise<Task> {
   const config = await loadConfig();
   const profile = config.profiles.find((item) => item.id === old.profileId);
   if (!profile || !canResumeSession(profile)) {
-    throw new Error(`task profile cannot resume sessions: ${old.profileId}`);
+    throw new Error(sessionResumeUnsupported(old.profileId, profile));
   }
   if (!old.sessionId) throw new Error(`task has no captured session to reply to: ${id}`);
   const prompt = continuationPrompt(
@@ -422,12 +424,15 @@ export async function resumeTask(id: string, instruction?: string, timeoutMs?: n
   if (!["failed", "cancelled", "blocked"].includes(old.state)) {
     throw new Error(`task cannot be resumed from state ${old.state}: ${id}`);
   }
-  if (!old.sessionId) throw new Error(`task has no captured session to resume: ${id}`);
+  // Check the structural limitation before the missing session id: a profile
+  // that can never capture a session would otherwise surface the misleading
+  // "no captured session" message.
   const config = await loadConfig();
   const profile = config.profiles.find((item) => item.id === old.profileId);
   if (!profile || !canResumeSession(profile)) {
-    throw new Error(`task profile cannot resume sessions: ${old.profileId}`);
+    throw new Error(sessionResumeUnsupported(old.profileId, profile));
   }
+  if (!old.sessionId) throw new Error(`task has no captured session to resume: ${id}`);
   const resumeInstruction = instruction?.trim() || "Continue the original task from where the previous run stopped.";
   const { task } = await prepareTask(
     old.profileId,
@@ -457,6 +462,12 @@ export async function resumeTask(id: string, instruction?: string, timeoutMs?: n
   return task;
 }
 
+function sessionResumeUnsupported(profileId: string, profile?: Profile): string {
+  return profile?.command
+    ? `profile ${profileId} runs a custom command; provider sessions are never captured, so reply/resume is unavailable`
+    : `task profile cannot resume sessions: ${profileId}`;
+}
+
 export async function cancelTask(id: string, reason = "cancelled by caller", timedOut = false): Promise<Task> {
   const task = stateStore().getTask(id);
   if (!task) throw new Error(`unknown task: ${id}`);
@@ -475,7 +486,7 @@ export async function cancelTask(id: string, reason = "cancelled by caller", tim
   const active = activeWorkers.get(id);
   if (active) {
     active.cancelled = true;
-    active.task.state = "cancelled";
+    active.task.state = cancelled.state;
     killProcessGroup(active.child, "SIGTERM");
     active.forceKill = setTimeout(() => killProcessGroup(active.child, "SIGKILL"), 2_000);
   }

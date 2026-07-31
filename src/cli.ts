@@ -3,7 +3,6 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod/v4";
-import { randomUUID } from "node:crypto";
 import { loadConfig, saveConfig } from "./config";
 import {
   appendTaskEvent,
@@ -29,8 +28,8 @@ import { DELEGATE_DESCRIPTION, MCP_INSTRUCTIONS, dynamicDelegateDescription } fr
 import { defaultModelFor } from "./provider-defaults";
 import { normalizeProfile } from "./profile-input";
 
-const port = Number(process.env.INTER_PORT ?? 7331);
-const VERSION = "0.3.0";
+const port = Number(Bun.env.INTER_PORT ?? 7331);
+const VERSION = "0.3.1";
 const MCP_CONTRACT_VERSION = 7;
 const scopeSchema = z.object({
   read: z.array(z.string()).max(200),
@@ -118,7 +117,7 @@ Bun.serve({
       const config = await loadConfig();
       const profile = normalizeProfile(await request.json());
       if (config.profiles.some((item) => item.id === profile.id)) {
-        profile.id = `${profile.id}-${randomUUID().slice(0, 6)}`;
+        profile.id = `${profile.id}-${crypto.randomUUID().slice(0, 6)}`;
       }
       config.profiles.push(profile);
       await saveConfig(config);

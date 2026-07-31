@@ -254,8 +254,9 @@ The app's **Install MCP** action updates:
 - Antigravity: `~/.gemini/config/mcp_config.json`
 
 The broker binds loopback only. `INTER_ROOTS` limits delegated work to configured
-workspace roots; the app currently allows the user's home directory so it works
-across projects.
+workspace roots and defaults to the user's home directory, so a broker started
+inside one project can still delegate into any other repo. Set it to a
+colon-separated list to narrow the fence.
 
 ## MCP tools
 

@@ -1,10 +1,43 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   continuationPrompt,
   interpretWorkerOutcome,
   workerPrompt,
 } from "../src/task-protocol";
-import { needsInputQuestion, recordProfileTaskOutcome } from "../src/tasks";
+import { delegate, needsInputQuestion, recordProfileTaskOutcome } from "../src/tasks";
+import { closeStateStore } from "../src/store";
+
+describe("delegate workspace roots", () => {
+  const savedRoots = process.env.INTER_ROOTS;
+  const savedDb = process.env.INTER_DB;
+  const scratch: string[] = [];
+
+  afterEach(() => {
+    closeStateStore();
+    if (savedRoots === undefined) delete process.env.INTER_ROOTS;
+    else process.env.INTER_ROOTS = savedRoots;
+    if (savedDb === undefined) delete process.env.INTER_DB;
+    else process.env.INTER_DB = savedDb;
+    for (const dir of scratch.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("defaults INTER_ROOTS to the home directory, not the broker cwd", async () => {
+    const dbDir = mkdtempSync(join(tmpdir(), "inter-roots-"));
+    scratch.push(dbDir);
+    process.env.INTER_DB = join(dbDir, "inter.db");
+    delete process.env.INTER_ROOTS;
+    // tmpdir lives outside home: still fenced out.
+    await expect(delegate("missing-profile", "x", dbDir))
+      .rejects.toThrow("cwd is outside INTER_ROOTS");
+    // Any path under home passes the fence and reaches profile resolution,
+    // even though the broker process cwd is a single project.
+    await expect(delegate("missing-profile", "x", homedir()))
+      .rejects.toThrow("unknown profile: missing-profile");
+  });
+});
 
 describe("needsInputQuestion", () => {
   test("reads a marker at the start of a line", () => {

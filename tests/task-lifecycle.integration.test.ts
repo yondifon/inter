@@ -94,9 +94,22 @@ describe("task lifecycle integration", () => {
     });
     const result = await waitForAttention(task.id);
     expect(result.tasks[0]).toMatchObject({
-      state: "cancelled",
+      state: "failed",
+      error: "task exceeded timeoutMs 50",
       completion: { code: "timeout" },
     });
+  });
+
+  integrationTest("names the structural limitation when a custom-command profile resumes", async () => {
+    const { cwd, profile } = setup(["/bin/sh", "-c", "echo broken; exit 1"]);
+    const task = await delegate(profile.id, "do work", cwd, undefined, undefined, {
+      scope: { read: [], write: [] },
+    });
+    await waitForAttention(task.id);
+    expect(getTask(task.id)?.state).toBe("failed");
+    await expect(resumeTask(task.id)).rejects.toThrow(
+      /custom command; provider sessions are never captured/,
+    );
   });
 
   integrationTest("answers in the same task and provider session", async () => {
@@ -183,11 +196,13 @@ describe("task lifecycle integration", () => {
     ].join("\n"));
     const failed = await delegate(profile.id, "do work", cwd, undefined, undefined, {
       scope: { read: [], write: [] },
+      timeoutMs: 15_000,
     });
     await waitForAttention(failed.id);
     expect(getTask(failed.id)).toMatchObject({ state: "failed", sessionId: "sess-failed" });
 
-    const resumed = await resumeTask(failed.id, "Finish the remaining work.");
+    const resumed = await resumeTask(failed.id, "Finish the remaining work.", 5_000);
+    expect(resumed.timeoutMs).toBe(5_000);
     await waitForAttention(resumed.id);
     expect(getTask(resumed.id)).toMatchObject({ state: "completed", parentTaskId: failed.id });
     expect(getTask(failed.id)?.childTaskId).toBe(resumed.id);

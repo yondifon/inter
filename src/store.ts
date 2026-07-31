@@ -262,15 +262,18 @@ export class StateStore {
     completion: TaskCompletion,
   ): Task | undefined {
     const now = new Date().toISOString();
+    // A timeout is the broker stopping work the caller still wanted, so it
+    // lands in `failed`; `cancelled` stays reserved for explicit caller stops.
+    const state = completion.code === "timeout" ? "failed" : "cancelled";
     let cancelled = false;
     this.transaction(() => {
       const changed = this.database.query(`
         UPDATE tasks
-        SET state = 'cancelled', error = ?, completion_json = ?, updated_at = ?
+        SET state = ?, error = ?, completion_json = ?, updated_at = ?
         WHERE id = ? AND state IN ('queued', 'running')
-      `).run(reason, JSON.stringify(completion), now, id);
+      `).run(state, reason, JSON.stringify(completion), now, id);
       if (changed.changes !== 1) return;
-      this.addTaskEvent(id, "cancelled", "cancelled", { error: reason, completion });
+      this.addTaskEvent(id, state, state, { error: reason, completion });
       cancelled = true;
     });
     return cancelled ? this.getTask(id) : undefined;
@@ -801,7 +804,7 @@ export function closeStateStore(): void {
 }
 
 export function databasePath(): string {
-  if (process.env.INTER_DB) return resolve(process.env.INTER_DB);
+  if (Bun.env.INTER_DB) return resolve(Bun.env.INTER_DB);
   return join(homedir(), ".inter", "inter.db");
 }
 

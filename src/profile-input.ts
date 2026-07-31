@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { defaultModelFor } from "./provider-defaults";
 import type { Profile, Provider } from "./types";
 
@@ -12,7 +11,7 @@ export function normalizeProfile(input: unknown): Profile {
   if (!label) throw new Error("label is required");
   const id = String(raw.id || label.toLowerCase().replace(/[^a-z0-9]+/g, "-")).replace(/^-|-$/g, "");
   return {
-    id: id || randomUUID(),
+    id: id || crypto.randomUUID(),
     label,
     provider: raw.provider as Provider,
     model,

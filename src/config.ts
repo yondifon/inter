@@ -11,7 +11,7 @@ export async function saveConfig(config: Config): Promise<void> {
 }
 
 export function profileEnv(profile: Profile): Record<string, string> {
-  const home = process.env.HOME ?? homedir();
+  const home = Bun.env.HOME ?? homedir();
   return Object.fromEntries(Object.entries(profile.env).map(([key, value]) => [
     key,
     value.replace(/^\$HOME(?=\/|$)/, home).replace(/^~(?=\/|$)/, home),

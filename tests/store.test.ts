@@ -336,6 +336,21 @@ describe("SQLite state store", () => {
     reopened.close();
   });
 
+  test("lands timeouts in failed so callers can tell them from caller stops", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const running = task("running");
+    store.createTask(running);
+    const timedOut = store.cancelTask(running.id, "task exceeded timeoutMs 50", {
+      blocked: true,
+      code: "timeout",
+      reason: "task exceeded timeoutMs 50",
+    });
+    expect(timedOut?.state).toBe("failed");
+    expect(store.listTaskEvents(running.id).at(-1)?.type).toBe("failed");
+    store.close();
+  });
+
   test("does not let worker completion overwrite cancellation", () => {
     const { db } = paths();
     const store = new StateStore({ path: db, seedProfiles: [profile] });
