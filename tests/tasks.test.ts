@@ -120,6 +120,23 @@ describe("worker protocol", () => {
       .toMatchObject({ state: "needs_input", question: "I need your approval first. Proceed with the rewrite?" });
   });
 
+  test("finds the ask when the question is decorated or not the last line", () => {
+    // Verbatim shape from a live haiku worker that previously landed unverified.
+    const fielded = [
+      "Tell me which language you'd like it in.",
+      "",
+      "**What is your preferred language for the greeting?**",
+      "",
+      "(I'll write the two-sentence greeting to `askme3/greeting.txt` once you let me know.)",
+    ].join("\n");
+    expect(interpretWorkerOutcome(0, fielded, "")).toMatchObject({
+      state: "needs_input",
+      question: "What is your preferred language for the greeting?",
+    });
+    expect(interpretWorkerOutcome(0, "Should I proceed with the rewrite?\n1. Yes\n2. No", ""))
+      .toMatchObject({ state: "needs_input", question: "Should I proceed with the rewrite?" });
+  });
+
   test("accepts protocol markers followed by empty lines", () => {
     expect(needsInputQuestion("INTER_NEEDS_INPUT: Which config?\n\n")).toBe("Which config?");
     expect(interpretWorkerOutcome(0, "INTER_BLOCKED: needs_authority | Missing config\n\n", ""))

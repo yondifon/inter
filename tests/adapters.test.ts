@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { canResumeSession, commandFor, finalText, resumeCommandFor, sessionIdFrom } from "../src/adapters";
+import { canResumeSession, commandFor, finalText, resumeCommandFor, sessionIdFrom, writeTargetsFrom } from "../src/adapters";
 import type { Profile } from "../src/types";
 
 const base: Profile = {
@@ -126,5 +126,26 @@ describe("CLI adapters", () => {
       result: { conversation_id: "conversation-2" },
     })).toBe("conversation-2");
     expect(sessionIdFrom("antigravity", { session_id: "x" })).toBeUndefined();
+  });
+});
+
+describe("writeTargetsFrom", () => {
+  test("finds write targets across provider payload shapes", () => {
+    expect(writeTargetsFrom({
+      part: { type: "tool", tool: "write", state: { input: { filePath: "/repo/out.txt" } } },
+    })).toEqual(["/repo/out.txt"]);
+    expect(writeTargetsFrom({
+      message: { content: [{ type: "tool_use", name: "Write", input: { file_path: "notes.md" } }] },
+    })).toEqual(["notes.md"]);
+    expect(writeTargetsFrom({
+      tool_name: "Edit", tool_input: { file_path: "src/app.ts" },
+    })).toEqual(["src/app.ts"]);
+  });
+
+  test("ignores reads and toolless events", () => {
+    expect(writeTargetsFrom({
+      part: { type: "tool", tool: "read", state: { input: { filePath: "/repo/in.txt" } } },
+    })).toEqual([]);
+    expect(writeTargetsFrom({ type: "message", text: "hello" })).toEqual([]);
   });
 });

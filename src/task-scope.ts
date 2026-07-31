@@ -84,6 +84,34 @@ export function sandboxProfile(
   ].join("");
 }
 
+// Mirrors the seatbelt write rules so the broker can call a refusal before the
+// worker's own CLI swallows the EPERM. Temp locations the sandbox always grants
+// (worker scratch, system temp) are never flagged.
+export function scopeRefusedWrite(
+  target: string,
+  cwd: string,
+  scope: TaskScope,
+  scratchDir?: string,
+): string | undefined {
+  const resolved = resolve(cwd, target);
+  const alwaysWritable = [
+    "/dev", "/tmp", "/private/tmp", "/var/folders", "/private/var/folders",
+    ...(scratchDir ? [scratchDir] : []),
+  ];
+  if (alwaysWritable.some((base) => resolved === base || within(base, resolved))) return undefined;
+  const allowed = scope.write.some((rule) => {
+    if (rule === "**") return resolved === cwd || within(cwd, resolved);
+    const base = resolve(cwd, rule.replace(/\/\*\*$/, ""));
+    return rule.endsWith("/**") ? resolved === base || within(base, resolved) : resolved === base;
+  });
+  return allowed ? undefined : resolved;
+}
+
+function within(base: string, target: string): boolean {
+  const child = relative(base, target);
+  return child !== "" && !child.startsWith("..") && !isAbsolute(child);
+}
+
 function normalizeRules(rules: string[], cwd: string, kind: string): string[] {
   if (!Array.isArray(rules)) throw new Error(`scope.${kind} must be an array`);
   return unique(rules.map((raw) => {

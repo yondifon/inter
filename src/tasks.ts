@@ -2,11 +2,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, relative, resolve } from "node:path";
-import { canResumeSession, commandFor, finalText, resumeCommandFor, sessionIdFrom } from "./adapters";
+import { canResumeSession, commandFor, finalText, resumeCommandFor, sessionIdFrom, writeTargetsFrom } from "./adapters";
 import { loadConfig, profileEnv } from "./config";
 import { taskEventView } from "./events";
 import { continuationPrompt, interpretWorkerOutcome, needsInputQuestion, workerPrompt } from "./task-protocol";
-import { normalizeTaskScope, sandboxedCommand } from "./task-scope";
+import { normalizeTaskScope, sandboxedCommand, scopeRefusedWrite } from "./task-scope";
 import { stateStore, type StateStore, type TaskListQuery } from "./store";
 import { TaskWaiter, type TaskWaitResult, type WaitUntil } from "./task-waiter";
 import type { Profile, Task, TaskScope, TaskSummary } from "./types";
@@ -215,6 +215,7 @@ async function runTask(
     let eventCount = 0;
     let eventCaptureStopped = false;
     let oversizedLine = false;
+    const flaggedWrites = new Set<string>();
     let resumeWith = resumeSessionId;
     let stdout = "";
     let stderr = "";
@@ -287,6 +288,18 @@ async function runTask(
             lastAgentEventAt = Date.now();
             eventCount++;
             attemptEvents++;
+            // The sandbox refuses out-of-scope writes inside the worker, where
+            // the trace never sees a failure row; flag the refusal here so the
+            // stream carries an explicit marker instead of implying success.
+            for (const target of writeTargetsFrom(payload)) {
+              const refused = scopeRefusedWrite(target, task.cwd, task.scope, scratchDir);
+              if (!refused || flaggedWrites.has(refused)) continue;
+              flaggedWrites.add(refused);
+              appendTaskEvent(task.id, "scope_refusal", task.state, {
+                path: refused,
+                error: `${refused} is outside the granted write scope; the sandbox refuses this write`,
+              });
+            }
             const sessionId = sessionIdFrom(profile.provider, payload);
             if (sessionId) {
               const store = stateStore();

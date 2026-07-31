@@ -283,11 +283,11 @@ colon-separated list to narrow the fence.
 - `inspect`: return one task snapshot immediately.
 - `tasks`: list concise task summaries with `limit`, `state`, `since`, and
   `profile` filters. Use `inspect` for full prompt and output.
-- `reply`: answer `INTER_NEEDS_INPUT: <question>` and return a linked
-  continuation task that resumes the worker's CLI session (`claude --resume`,
-  `codex exec resume`, `opencode run --session`), with a fresh-run fallback.
-  A worker that skips the marker but ends on a plain question also lands in
-  `needs_input`, so `reply` covers prose asks too.
+- `reply`: answer a `needs_input` question. The same task re-runs in the
+  worker's captured CLI session (`claude --resume`, `codex exec resume`,
+  `opencode run --session`) — same task ID, no child task. A worker that skips
+  the marker but ends on a plain question also lands in `needs_input`, so
+  `reply` covers prose asks too.
 - `resume`: continue a failed, cancelled, or blocked task in its captured
   provider session, returning a linked continuation task.
 - `cancel`: stop a queued or running task and its worker process tree.

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { normalizeTaskScope, sandboxedCommand, sandboxProfile } from "../src/task-scope";
+import { normalizeTaskScope, sandboxedCommand, sandboxProfile, scopeRefusedWrite } from "../src/task-scope";
 import type { Profile } from "../src/types";
 
 const roots: string[] = [];
@@ -179,5 +179,30 @@ describe("task scope", () => {
     );
     const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
     if (exitCode !== 0) throw new Error(`opencode config probe exited ${exitCode}: ${stderr}`);
+  });
+});
+
+describe("scopeRefusedWrite", () => {
+  const cwd = "/Users/dev/project";
+
+  test("allows writes inside granted rules", () => {
+    expect(scopeRefusedWrite("out/report.md", cwd, { read: ["**"], write: ["**"] })).toBeUndefined();
+    expect(scopeRefusedWrite("docs/a.md", cwd, { read: ["**"], write: ["docs/**"] })).toBeUndefined();
+    expect(scopeRefusedWrite("api.ts", cwd, { read: ["**"], write: ["api.ts"] })).toBeUndefined();
+  });
+
+  test("flags writes outside the granted write scope", () => {
+    expect(scopeRefusedWrite("../escape.txt", cwd, { read: ["**"], write: ["**"] }))
+      .toBe("/Users/dev/escape.txt");
+    expect(scopeRefusedWrite("src/api.ts", cwd, { read: ["**"], write: ["docs/**"] }))
+      .toBe("/Users/dev/project/src/api.ts");
+    expect(scopeRefusedWrite("anything.txt", cwd, { read: ["**"], write: [] }))
+      .toBe("/Users/dev/project/anything.txt");
+  });
+
+  test("never flags scratch and system temp locations", () => {
+    expect(scopeRefusedWrite("/tmp/x.txt", cwd, { read: [], write: [] })).toBeUndefined();
+    expect(scopeRefusedWrite("/private/var/folders/ab/T/x", cwd, { read: [], write: [] })).toBeUndefined();
+    expect(scopeRefusedWrite("/scratch/dir/x", cwd, { read: [], write: [] }, "/scratch/dir")).toBeUndefined();
   });
 });

@@ -28,7 +28,7 @@ import { defaultModelFor } from "./provider-defaults";
 import { normalizeProfile } from "./profile-input";
 
 const port = Number(Bun.env.INTER_PORT ?? 7331);
-const VERSION = "0.3.1";
+const VERSION = "0.3.2";
 const MCP_CONTRACT_VERSION = 9;
 // Idle transports get cut somewhere above ~2 minutes (field-observed: waits of
 // 180s+ died with socket-closed errors, ≤120s never did). Answer before that

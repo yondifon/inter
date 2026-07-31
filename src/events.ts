@@ -69,8 +69,8 @@ export function taskEventView(event: TaskEvent, provider: Profile["provider"]): 
           : firstString(event.payload.provider, event.payload.model));
     return {
       ...base,
-      kind: event.type === "failed" ? "error" : "lifecycle",
-      phase: phase(event.state),
+      kind: event.type === "failed" || event.type === "scope_refusal" ? "error" : "lifecycle",
+      phase: event.type === "scope_refusal" ? "failed" : phase(event.state),
       title: lifecycleTitle(event.type),
       ...(event.payload.error ? { detail: String(event.payload.error) } : detail ? { detail } : {}),
       ...(dropped ? { presentation: { type: "signal" as const, level: "warning" as const, text: dropped } } : {}),
@@ -556,7 +556,8 @@ function lifecycleTitle(type: string): string {
     failed: "Task failed", needs_input: "Worker needs input", answered: "Question answered",
     blocked: "Task blocked", cancelled: "Task cancelled", worker_spawned: "Worker spawned",
     events_truncated: "Event capture limit reached",
-    event_dropped: "Large event skipped" } as Record<string, string>)[type] ?? humanize(type);
+    event_dropped: "Large event skipped",
+    scope_refusal: "Write refused by scope" } as Record<string, string>)[type] ?? humanize(type);
 }
 
 function phase(state: TaskState): TaskEventView["phase"] {

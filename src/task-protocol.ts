@@ -68,9 +68,24 @@ export function needsInputQuestion(output: string): string | undefined {
   return output.match(NEEDS_INPUT)?.[1]?.trim() || undefined;
 }
 
+// Trailing markdown decoration and closing punctuation around the "?", e.g.
+// "**Which language?**" or "Which language?)".
+const QUESTION_DECOR = /[\s*_~`"'“”‘’)\]}]+$/;
+const LEADING_MARKUP = /^[#>*\-\s]+/;
+
+// Real asks rarely sit on the very last line: workers bold the question, list
+// options under it, or close with "(I'll continue once you let me know.)".
+// Scan the trailing lines for the question nearest the end.
 function proseQuestion(output: string): string | undefined {
-  const lastLine = output.trimEnd().split(/\r?\n/).at(-1)?.trim();
-  return lastLine?.endsWith("?") ? compact(lastLine) : undefined;
+  const lines = output.trimEnd().split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  for (const line of lines.slice(-8).reverse()) {
+    const stripped = line.replace(QUESTION_DECOR, "");
+    if (!stripped.endsWith("?")) continue;
+    return compact(stripped.replace(LEADING_MARKUP, ""));
+  }
+  return undefined;
 }
 
 export function interpretWorkerOutcome(exitCode: number, output: string, stderr: string): WorkerOutcome {

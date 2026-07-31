@@ -96,6 +96,38 @@ export function sessionIdFrom(provider: Provider, event: Record<string, unknown>
   return sessionId.length > 0 ? sessionId : undefined;
 }
 
+const WRITE_TOOLS = new Set(["write", "write_file", "edit", "multiedit", "create_file", "notebookedit"]);
+
+/// Paths a stream event says the worker is writing, across provider shapes:
+/// Claude assistant tool_use blocks, OpenCode tool parts, and flat hook-style
+/// payloads. Used to flag writes the sandbox is about to refuse.
+export function writeTargetsFrom(payload: Record<string, unknown>): string[] {
+  const targets: string[] = [];
+  const visit = (node: unknown) => {
+    const subject = object(node);
+    const tool = str(subject.tool_name) ?? str(subject.toolName) ?? str(subject.tool) ?? str(subject.name);
+    if (!tool || !WRITE_TOOLS.has(tool.toLowerCase())) return;
+    const input = {
+      ...object(subject.input),
+      ...object(object(subject.state).input),
+      ...object(subject.tool_input),
+      ...object(subject.toolInput),
+    };
+    const path = str(input.file_path) ?? str(input.filePath) ?? str(input.path);
+    if (path) targets.push(path);
+  };
+  visit(payload);
+  visit(payload.item);
+  visit(payload.part);
+  const content = object(payload.message).content;
+  if (Array.isArray(content)) for (const block of content) visit(block);
+  return targets;
+}
+
+function str(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
 function claudeHookSettings(url: string): string {
   const handler = [{ matcher: "", hooks: [{ type: "http", url, timeout: 10 }] }];
   return JSON.stringify({
