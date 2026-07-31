@@ -38,17 +38,18 @@ async function discover(profile: Profile): Promise<ModelInfo[]> {
     return [...new Set([profile.model, ...CLAUDE_ALIASES])].map((id) =>
       model(profile, id, id, id === profile.model ? "configured" : "alias"));
   }
-  if (profile.provider === "antigravity") {
-    return [model(profile, profile.model, profile.model, "configured")];
-  }
 
   const command = profile.provider === "codex"
     ? ["codex", "debug", "models"]
+    : profile.provider === "antigravity"
+    ? ["agy", "models"]
     : ["opencode", "models", "--verbose"];
   try {
     const output = await run(command, profile);
     const discovered = profile.provider === "codex"
       ? parseCodexModels(output, profile)
+      : profile.provider === "antigravity"
+      ? parseAntigravityModels(output, profile)
       : parseOpenCodeModels(output, profile);
     if (discovered.length > 0) return discovered;
   } catch {}
@@ -90,6 +91,14 @@ export function parseOpenCodeModels(raw: string, profile: Profile): ModelInfo[] 
       return model(profile, id, id, "discovered", metadata);
     })
     .filter((item): item is ModelInfo => Boolean(item));
+}
+
+export function parseAntigravityModels(raw: string, profile: Profile): ModelInfo[] {
+  return raw
+    .split(/\r?\n/)
+    .map((id) => id.trim())
+    .filter((id) => /^[a-z0-9][a-z0-9._-]*$/i.test(id))
+    .map((id) => model(profile, id, id, "discovered"));
 }
 
 function parseMetadata(raw: string): Partial<ModelInfo> {

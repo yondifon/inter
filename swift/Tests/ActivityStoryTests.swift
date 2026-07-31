@@ -201,6 +201,21 @@ final class ActivityStoryTests: XCTestCase {
         XCTAssertEqual(thinking, 546)
     }
 
+    /// Antigravity states the run's reasoning total on the receipt itself, so
+    /// there are no per-turn deltas to add up.
+    func testReceiptKeepsItsOwnThinkingTotal() {
+        let story = ActivityStory.compose([
+            event(1, kind: "file", title: "Read file"),
+            event(2, kind: "usage", title: "Run summary",
+                  presentation: TaskEventPresentationSnapshot(
+                      type: "usage", tokensOut: 33_603, tokensThinking: 24_633)),
+        ])
+        guard case .receipt(_, let thinking) = story.blocks.last else {
+            return XCTFail("expected trailing receipt, got \(String(describing: story.blocks.last))")
+        }
+        XCTAssertEqual(thinking, 24_633)
+    }
+
     func testSignalsBreakChaptersAndKeepOrder() {
         let signal = TaskEventPresentationSnapshot(type: "signal", text: "Attempt 1 of 10", level: "warning")
         let story = ActivityStory.compose([

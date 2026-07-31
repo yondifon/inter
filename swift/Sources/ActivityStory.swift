@@ -75,7 +75,9 @@ enum ActivityStory {
                 if event.id == receiptID {
                     flushChapter()
                     receiptIndex = blocks.count
-                    blocks.append(.receipt(event, thinkingTokens: 0))
+                    // A provider that states the run's reasoning total on the
+                    // receipt itself needs no summing.
+                    blocks.append(.receipt(event, thinkingTokens: event.presentation?.tokensThinking ?? 0))
                 } else {
                     technical.append(event)
                 }
@@ -101,7 +103,8 @@ enum ActivityStory {
         }
         flushPulse()
         flushChapter()
-        if let index = receiptIndex, case .receipt(let event, _) = blocks[index], thinkingTokens > 0 {
+        if let index = receiptIndex, case .receipt(let event, let stamped) = blocks[index],
+           thinkingTokens > stamped {
             blocks[index] = .receipt(event, thinkingTokens: thinkingTokens)
         }
         return Composition(blocks: blocks, technical: technical)

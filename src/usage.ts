@@ -120,10 +120,7 @@ async function collect(profile: Profile): Promise<ProfileUsage> {
     case "codex":
       return codexUsage(profile);
     case "opencode":
-      return unsupported(
-        profile,
-        "opencode exposes no rate-limit or quota data; only rate-limit hits observed from delegated tasks are reported",
-      );
+      return unsupported(profile, "usage tracking is not supported for opencode");
     case "antigravity":
       return unsupported(profile, "no usage source known for antigravity");
   }

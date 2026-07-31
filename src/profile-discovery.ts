@@ -1,4 +1,5 @@
 import type { Profile, Provider } from "./types";
+import { defaultModelFor } from "./provider-defaults";
 
 interface DiscoveryOptions {
   home?: string;
@@ -11,17 +12,17 @@ const providers: Array<{
   model: string;
   configPaths: string[];
 }> = [
-  { provider: "codex", label: "Codex", model: "gpt-5", configPaths: [".codex"] },
+  { provider: "codex", label: "Codex", model: defaultModelFor("codex"), configPaths: [".codex"] },
   {
     provider: "opencode",
     label: "OpenCode",
-    model: "opencode/big-pickle",
+    model: defaultModelFor("opencode"),
     configPaths: [".config/opencode", ".local/share/opencode"],
   },
   {
     provider: "antigravity",
     label: "Antigravity",
-    model: "gemini-2.5-pro",
+    model: defaultModelFor("antigravity"),
     configPaths: [".gemini"],
   },
 ];
@@ -33,7 +34,8 @@ export function discoverProfiles(options: DiscoveryOptions = {}): Profile[] {
   const profiles = discoverClaude(home, path);
 
   for (const item of providers) {
-    if (!hasExecutable(item.provider, path) &&
+    const executable = item.provider === "antigravity" ? "agy" : item.provider;
+    if (!hasExecutable(executable, path) &&
         !item.configPaths.some((configPath) => hasPath(home, configPath))) continue;
     profiles.push(profile(item.provider, item.label, item.model));
   }

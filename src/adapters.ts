@@ -17,14 +17,24 @@ export function commandFor(profile: Profile, prompt: string, cwd: string, model 
         prompt,
       ];
     case "codex":
+      // Inter already enforces the approved task scope. Disable only Codex's
+      // interactive approval prompt so headless MCP calls are not cancelled.
       return [
         "codex", "exec", "--json", "--model", model, "--sandbox", "workspace-write",
+        "-c", 'approval_policy="never"',
         "--cd", cwd, "--skip-git-repo-check", prompt,
       ];
     case "opencode":
       return ["opencode", "run", "--format", "json", "--model", model, "--dir", cwd, "--auto", prompt];
     case "antigravity":
-      return ["antigravity", "--model", model, prompt];
+      // Inter's outer sandbox enforces task scope. Auto-approve Antigravity's
+      // inner prompts so non-interactive tool calls do not stall.
+      // agy expects --print to take the prompt as its value, not a trailing
+      // positional argument.
+      return [
+        "agy", "--print", prompt, "--output-format", "stream-json", "--model", model,
+        "--mode", "accept-edits", "--dangerously-skip-permissions",
+      ];
   }
 }
 
@@ -55,7 +65,8 @@ export function resumeCommandFor(
         // config override and cwd from the spawned process working directory.
         return [
           "codex", "exec", "resume", sessionId, "--json", "--model", model,
-          "-c", 'sandbox_mode="workspace-write"', "--skip-git-repo-check", prompt,
+          "-c", 'sandbox_mode="workspace-write"', "-c", 'approval_policy="never"',
+          "--skip-git-repo-check", prompt,
         ];
       case "opencode":
         return [
@@ -111,7 +122,10 @@ export function finalText(profile: Profile, raw: string): string {
       const item = object(event.item);
       const part = object(event.part);
       const message = object(event.message);
-      const text = event.text ?? event.message ?? event.content ?? event.result
+      // Antigravity closes with `{"event":"result","result":{"response":…}}`,
+      // so its answer sits a level below every other provider's.
+      const result = object(event.result);
+      const text = event.text ?? event.message ?? event.content ?? result.response ?? event.result
         ?? item.text ?? item.message ?? part.text ?? part.message ?? message.content;
       if (typeof text === "string") return text;
     } catch {}

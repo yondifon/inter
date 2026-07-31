@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseCodexModels, parseOpenCodeModels } from "../src/models";
+import { parseAntigravityModels, parseCodexModels, parseOpenCodeModels } from "../src/models";
 import type { Profile } from "../src/types";
 
 const codex: Profile = {
@@ -48,5 +48,13 @@ describe("model catalogs", () => {
       cost: { input: 0.4, output: 2 },
       contextWindow: 262144,
     });
+  });
+
+  test("normalizes Antigravity model lines", () => {
+    const profile = { ...codex, provider: "antigravity" as const };
+    expect(parseAntigravityModels(
+      "gemini-3.6-flash-low\nclaude-sonnet-4-6\nAvailable agents:\n",
+      profile,
+    ).map(({ id }) => id)).toEqual(["gemini-3.6-flash-low", "claude-sonnet-4-6"]);
   });
 });

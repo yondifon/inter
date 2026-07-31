@@ -26,6 +26,8 @@ import { dynamicProfileTools } from "./dynamic-tools";
 import { finalText } from "./adapters";
 import { taskEventView } from "./events";
 import { DELEGATE_DESCRIPTION, MCP_INSTRUCTIONS, dynamicDelegateDescription } from "./mcp-copy";
+import { defaultModelFor } from "./provider-defaults";
+import { normalizeProfile } from "./profile-input";
 
 const port = Number(process.env.INTER_PORT ?? 7331);
 const VERSION = "0.3.0";
@@ -130,7 +132,14 @@ Bun.serve({
       const patch = await request.json() as Partial<Profile>;
       if (typeof patch.enabled === "boolean") profile.enabled = patch.enabled;
       if (typeof patch.label === "string" && patch.label.trim()) profile.label = patch.label.trim();
-      if (typeof patch.model === "string" && patch.model.trim()) profile.model = patch.model.trim();
+      if (patch.provider && ["claude", "codex", "opencode", "antigravity"].includes(patch.provider)) {
+        profile.provider = patch.provider;
+      }
+      if (Object.hasOwn(patch, "model")) {
+        profile.model = typeof patch.model === "string" && patch.model.trim()
+          ? patch.model.trim()
+          : defaultModelFor(profile.provider);
+      }
       if (Array.isArray(patch.capabilities)) profile.capabilities = patch.capabilities.map(String);
       if (patch.env && typeof patch.env === "object") {
         profile.env = Object.fromEntries(Object.entries(patch.env).map(([key, value]) => [
@@ -300,7 +309,7 @@ async function createMcpServer(): Promise<McpServer> {
     },
   }, async (query) => result(await listModels(query)));
   server.registerTool("status", {
-    description: "Report normalized profile/model availability. Refresh uses safe catalog checks only and never sends a generation prompt. Opencode exposes no provider usage stats; the usage tool reports only rate-limit hits observed from delegated tasks.",
+    description: "Report normalized profile/model availability. Refresh uses safe catalog checks only and never sends a generation prompt. Opencode usage stats are not supported.",
     inputSchema: {
       profile: z.string().optional(),
       model: z.string().min(1).max(200).optional(),
@@ -309,7 +318,7 @@ async function createMcpServer(): Promise<McpServer> {
     },
   }, async (query) => result(await listProfileStatuses(query)));
   server.registerTool("usage", {
-    description: "Report provider rate-limit usage per profile (session and weekly windows) without spending tokens. Claude reads the local /usage command; codex reads the latest session log; opencode only reports rate-limit hits observed from delegated tasks.",
+    description: "Report provider rate-limit usage per profile (session and weekly windows) without spending tokens. Claude reads the local /usage command; codex reads the latest session log; opencode is not supported.",
     inputSchema: {
       profile: z.string().optional(),
       provider: z.enum(["claude", "codex", "opencode", "antigravity"]).optional(),
@@ -377,26 +386,5 @@ function publicProfile(profile: Profile): Profile {
       key,
       /(?:KEY|TOKEN|SECRET|PASS)/i.test(key) ? "••••••••" : value,
     ])),
-  };
-}
-
-function normalizeProfile(input: unknown): Profile {
-  const raw = input as Partial<Profile>;
-  const providers: Provider[] = ["claude", "codex", "opencode", "antigravity"];
-  if (!raw || typeof raw !== "object") throw new Error("profile must be an object");
-  if (!providers.includes(raw.provider as Provider)) throw new Error("invalid provider");
-  const label = String(raw.label ?? "").trim();
-  const model = String(raw.model ?? "").trim();
-  if (!label || !model) throw new Error("label and model are required");
-  const id = String(raw.id || label.toLowerCase().replace(/[^a-z0-9]+/g, "-")).replace(/^-|-$/g, "");
-  return {
-    id: id || randomUUID(),
-    label,
-    provider: raw.provider as Provider,
-    model,
-    enabled: raw.enabled !== false,
-    env: Object.fromEntries(Object.entries(raw.env ?? {}).map(([key, value]) => [key.trim(), String(value)]).filter(([key]) => key)),
-    capabilities: (raw.capabilities ?? []).map(String),
-    ...(raw.command ? { command: raw.command.map(String) } : {}),
   };
 }

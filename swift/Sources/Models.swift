@@ -4,6 +4,14 @@ enum Provider: String, Codable, CaseIterable, Identifiable {
     case claude, codex, opencode, antigravity
     var id: String { rawValue }
     var label: String { rawValue == "opencode" ? "OpenCode" : rawValue.capitalized }
+    var defaultModel: String {
+        switch self {
+        case .claude: "sonnet"
+        case .codex: "gpt-5"
+        case .opencode: "opencode/big-pickle"
+        case .antigravity: "gemini-3.6-flash-medium"
+        }
+    }
     var symbol: String {
         switch self {
         case .claude: "sparkles"
@@ -30,16 +38,18 @@ struct Profile: Codable, Identifiable, Hashable {
     var id: String
     var label: String
     var provider: Provider
-    var model: String
+    var model: String?
     var enabled: Bool
     var env: [String: String]
     var capabilities: [String]
     var command: [String]?
 
     static var empty: Profile {
-        Profile(id: "", label: "", provider: .claude, model: "sonnet",
+        Profile(id: "", label: "", provider: .claude, model: nil,
                 enabled: true, env: [:], capabilities: ["build", "review"])
     }
+
+    var resolvedModel: String { model ?? provider.defaultModel }
 }
 
 struct TaskSnapshot: Codable, Identifiable, Hashable {

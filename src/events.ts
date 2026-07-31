@@ -198,6 +198,9 @@ function knownAgentEvent(
   const payloadType = string(payload.type);
   const raw = rawText ? { rawText } : {};
 
+  const antigravity = antigravityEvent(base, payload, raw);
+  if (antigravity) return antigravity;
+
   if (payloadType === "system") {
     const subtype = string(payload.subtype);
     if (subtype === "thinking_tokens") {
@@ -361,6 +364,167 @@ function knownAgentEvent(
   }
 
   return undefined;
+}
+
+/// Antigravity wraps every stream-json line in an `event` envelope whose body
+/// sits under a key named after it — `init`, `step_update`, `result` — so none
+/// of the provider-neutral shapes above match and each row would otherwise land
+/// as raw JSON. Steps carry their own vocabulary too: tool names and PascalCase
+/// arguments, mapped here onto the tool shapes this file already presents.
+function antigravityEvent(
+  base: EventBase,
+  payload: Record<string, any>,
+  raw: { rawText?: string },
+): TaskEventView | undefined {
+  const event = string(payload.event);
+
+  if (event === "init") {
+    const init = object(payload.init);
+    const tools = Array.isArray(init.tools) ? init.tools.length : 0;
+    return { ...base, kind: "lifecycle", phase: "info", title: "Session started",
+      detail: joinDetail(
+        string(init.model),
+        tools ? `${tools} tools` : undefined,
+        string(init.permission_mode) ? `permission ${init.permission_mode}` : undefined,
+      ), ...raw };
+  }
+
+  if (event === "result") {
+    const result = object(payload.result);
+    const usage = object(result.usage);
+    const error = string(result.error);
+    const failed = error !== undefined || string(result.status) === "ERROR";
+    const presentation: TaskEventPresentation = {
+      type: "usage",
+      ...(typeof result.num_turns === "number" ? { turns: result.num_turns } : {}),
+      ...(typeof result.duration_seconds === "number"
+        ? { durationMs: Math.round(result.duration_seconds * 1_000) }
+        : {}),
+      ...tokenCounts(usage),
+      ...(error ? { level: "error" as const, text: error } : {}),
+    };
+    return { ...base, kind: "usage", phase: failed ? "failed" : "completed", title: "Run summary",
+      detail: joinDetail(
+        presentation.turns ? `${presentation.turns} turn${presentation.turns === 1 ? "" : "s"}` : undefined,
+        presentation.durationMs ? formatDuration(presentation.durationMs) : undefined,
+        error,
+      ), presentation, ...raw };
+  }
+
+  if (event !== "step_update") return undefined;
+
+  const step = object(payload.step_update);
+  const state = string(step.state);
+  const stepPhase: TaskEventView["phase"] = state === "ACTIVE" ? "started"
+    : state === "DONE" ? "completed" : "info";
+  const stepType = string(step.step_type) ?? "unknown";
+
+  if (stepType === "tool") {
+    const info = object(step.tool_info);
+    const name = string(info.name) ?? string(step.tool_name);
+    const tool = ANTIGRAVITY_TOOLS[name?.toLowerCase() ?? ""] ?? name;
+    const outcome = string(info.output);
+    const presentation = toolPresentation(tool, antigravityToolInput(object(info.parameters)));
+    const settled = outcome
+      ? { ...(presentation ?? { type: "tool" as const }), outcome }
+      : presentation;
+    // ACTIVE and DONE repeat one call under the same step index; the trace
+    // folds them into a single row and lifts the output onto it.
+    const actionId = typeof step.step_index === "number"
+      ? { actionId: `${string(step.conversation_id) ?? "step"}:${step.step_index}` }
+      : {};
+    return { ...base,
+      kind: settled?.type === "file" ? "file" : settled?.type === "command" ? "command" : "tool",
+      phase: stepPhase, title: tool ? toolTitle(tool) : "Tool call",
+      detail: presentationDetail(presentation), presentation: settled, ...actionId, ...raw };
+  }
+
+  if (stepType === "agent_response") {
+    // The reply only ever arrives as deltas; the closing event carries usage
+    // and no text. Each chunk keeps its own row so they read in order.
+    const text = string(step.text_delta);
+    if (text) {
+      return { ...base, kind: "message", phase: "started", title: "Agent message",
+        detail: text, presentation: { type: "message", text }, ...raw };
+    }
+    const usage = object(step.usage);
+    const presentation: TaskEventPresentation = { type: "usage", ...tokenCounts(usage) };
+    return { ...base, kind: "usage", phase: stepPhase, title: "Turn completed",
+      detail: joinDetail(
+        typeof presentation.tokensOut === "number"
+          ? `${formatCount(presentation.tokensOut)} tokens out`
+          : undefined,
+        presentation.tokensCached ? `${formatCount(presentation.tokensCached)} cached` : undefined,
+      ), presentation, ...raw };
+  }
+
+  if (stepType === "checkpoint") {
+    return { ...base, kind: "usage", phase: stepPhase, title: "Checkpoint",
+      presentation: { type: "usage", ...tokenCounts(object(step.usage)) }, minor: true, ...raw };
+  }
+
+  if (stepType === "user_input") {
+    return { ...base, kind: "lifecycle", phase: "info", title: "Prompt received", minor: true, ...raw };
+  }
+
+  return { ...base, kind: "raw", phase: stepPhase, title: "Step update", minor: true, ...raw };
+}
+
+/// `cache_read_tokens` is reported outside `input_tokens`, unlike Codex, so the
+/// input figure is already the uncached one.
+function tokenCounts(usage: Record<string, any>): Partial<TaskEventPresentation> {
+  return {
+    ...(typeof usage.input_tokens === "number" ? { tokensIn: usage.input_tokens } : {}),
+    ...(typeof usage.output_tokens === "number" ? { tokensOut: usage.output_tokens } : {}),
+    ...(usage.cache_read_tokens ? { tokensCached: Number(usage.cache_read_tokens) } : {}),
+    ...(usage.thinking_tokens ? { tokensThinking: Number(usage.thinking_tokens) } : {}),
+  };
+}
+
+const ANTIGRAVITY_TOOLS: Record<string, string> = {
+  view_file: "read",
+  write_to_file: "write",
+  replace_file_content: "edit",
+  multi_replace_file_content: "multiedit",
+  sed_file: "edit",
+  notebook_edit: "edit",
+  grep_search: "grep",
+  code_search: "grep",
+  find_by_name: "glob",
+  list_dir: "ls",
+  search_web: "websearch",
+  read_url_content: "webfetch",
+  invoke_subagent: "task",
+};
+
+/// Antigravity names tool arguments in PascalCase; rename the ones a row is
+/// built from so the shared tool presentation can read them.
+const ANTIGRAVITY_ARGS: Record<string, string> = {
+  AbsolutePath: "filePath",
+  TargetFile: "filePath",
+  FilePath: "filePath",
+  Path: "path",
+  SearchDirectory: "path",
+  CommandLine: "command",
+  Command: "command",
+  Cwd: "cwd",
+  Query: "query",
+  SearchTerm: "query",
+  Pattern: "pattern",
+  Url: "url",
+  Instruction: "description",
+  Explanation: "description",
+  Prompt: "prompt",
+  Name: "name",
+  Includes: "include",
+};
+
+function antigravityToolInput(parameters: Record<string, any>): Record<string, any> {
+  const input: Record<string, any> = { ...parameters };
+  for (const [source, target] of Object.entries(ANTIGRAVITY_ARGS)) {
+    if (parameters[source] !== undefined && input[target] === undefined) input[target] = parameters[source];
+  }
+  return input;
 }
 
 function formatCount(value: number): string {

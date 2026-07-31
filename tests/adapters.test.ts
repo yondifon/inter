@@ -25,15 +25,32 @@ describe("CLI adapters", () => {
       .toEqual(["agy", "--cwd", "/repo", "test"]);
   });
 
+  test("builds a headless Antigravity print command", () => {
+    expect(commandFor({ ...base, provider: "antigravity" }, "review", "/repo", "gemini-3.6-flash-low"))
+      .toEqual([
+        "agy", "--print", "--output-format", "stream-json", "--model", "gemini-3.6-flash-low",
+        "--mode", "accept-edits", "--dangerously-skip-permissions", "review",
+      ]);
+  });
+
   test("allows Codex delegation outside Git repositories", () => {
-    expect(commandFor({ ...base, provider: "codex" }, "review", "/workspace"))
-      .toContain("--skip-git-repo-check");
+    const command = commandFor({ ...base, provider: "codex" }, "review", "/workspace");
+    expect(command).toContain("--skip-git-repo-check");
+    expect(command).toContain('approval_policy="never"');
   });
 
   test("extracts Claude final response", () => {
     expect(finalText(base, [
       JSON.stringify({ type: "system", subtype: "init" }),
       JSON.stringify({ type: "result", result: "done" }),
+    ].join("\n"))).toBe("done");
+  });
+
+  test("reads an Antigravity reply out of its result envelope", () => {
+    const profile = { ...base, provider: "antigravity" as const };
+    expect(finalText(profile, [
+      JSON.stringify({ event: "init", init: { model: "gemini-3.6-flash-medium" } }),
+      JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "done" } }),
     ].join("\n"))).toBe("done");
   });
 
@@ -61,6 +78,7 @@ describe("CLI adapters", () => {
     expect(command.slice(0, 4)).toEqual(["codex", "exec", "resume", "thread-9"]);
     expect(command).toContain("--json");
     expect(command[command.indexOf("-c") + 1]).toBe('sandbox_mode="workspace-write"');
+    expect(command).toContain('approval_policy="never"');
   });
 
   test("resumes OpenCode with the prior session flag", () => {

@@ -38,7 +38,13 @@ struct ProfileFormView: View {
                     Picker("CLI", selection: $profile.provider) {
                         ForEach(Provider.allCases) { Text($0.label).tag($0) }
                     }
-                    TextField("Model", text: $profile.model)
+                    TextField("Default: \(profile.provider.defaultModel)", text: Binding(
+                        get: { profile.model ?? "" },
+                        set: {
+                            let value = $0.trimmingCharacters(in: .whitespaces)
+                            profile.model = value.isEmpty ? nil : value
+                        }
+                    ))
                     Toggle("Enabled", isOn: $profile.enabled).toggleStyle(.switch)
                 }
                 Section {
@@ -70,7 +76,6 @@ struct ProfileFormView: View {
     private var valid: Bool {
         let keys = envRows.map { $0.key.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         return !profile.label.trimmingCharacters(in: .whitespaces).isEmpty &&
-        !profile.model.trimmingCharacters(in: .whitespaces).isEmpty &&
         envRows.allSatisfy { !$0.key.isEmpty || $0.value.isEmpty } &&
         Set(keys).count == keys.count
     }

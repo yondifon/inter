@@ -64,6 +64,35 @@ describe("task scope", () => {
     expect(policy).not.toContain(`(allow file-write* (subpath "${actual}"))`);
   });
 
+  test("grants provider runtime paths without opening all of home or tmp", () => {
+    const cwd = workspace();
+    const scratch = join(tmpdir(), "inter-missing-scratch");
+    const claudePolicy = sandboxProfile(cwd, { read: [], write: [] }, profile, ["/bin/sh"], scratch);
+    if (typeof process.getuid === "function") {
+      expect(claudePolicy).toContain(`/private/tmp/claude-${process.getuid()}`);
+    }
+    expect(claudePolicy).not.toContain('(allow file-write* (subpath "/private/tmp"))');
+
+    const opencodePolicy = sandboxProfile(
+      cwd,
+      { read: [], write: [] },
+      { ...profile, provider: "opencode" },
+      ["/bin/sh"],
+      scratch,
+    );
+    expect(opencodePolicy).toContain(`${process.env.HOME}/.opencode`);
+    expect(opencodePolicy).not.toContain(`(allow file-write* (subpath "${process.env.HOME}"))`);
+  });
+
+  test("grants configured runtime paths before the worker creates them", () => {
+    const cwd = workspace();
+    const configDir = join(tmpdir(), "inter-missing-claude-config");
+    const worker = { ...profile, env: { CLAUDE_CONFIG_DIR: configDir } };
+    const policy = sandboxProfile(cwd, { read: [], write: [] }, worker, ["/bin/sh"]);
+    expect(policy).toContain(`(allow file-write* (literal "${configDir}"))`);
+    expect(policy).toContain(`(allow file-read* (subpath "${configDir}"))`);
+  });
+
   const integrationTest = process.env.INTER_SANDBOX_INTEGRATION === "1" ? test : test.skip;
   integrationTest("macOS sandbox blocks reads and writes outside declared paths", async () => {
     const cwd = workspace();
@@ -90,15 +119,57 @@ describe("task scope", () => {
     const cwd = workspace();
     const scratch = mkdtempSync(join(tmpdir(), "inter-scratch-"));
     roots.push(scratch);
-    for (const provider of ["claude", "codex", "opencode"] as const) {
-      if (!Bun.which(provider)) continue;
+    const workers = [
+      { provider: "claude" as const, command: "claude" },
+      { provider: "codex" as const, command: "codex" },
+      { provider: "opencode" as const, command: "opencode" },
+      { provider: "antigravity" as const, command: "agy" },
+    ];
+    for (const { provider, command } of workers) {
+      if (!Bun.which(command)) continue;
       const worker = { ...profile, provider };
       const child = Bun.spawn(
-        sandboxedCommand([provider, "--version"], cwd, { read: [], write: [] }, worker, scratch),
+        sandboxedCommand([command, "--version"], cwd, { read: [], write: [] }, worker, scratch),
         { cwd, stdout: "pipe", stderr: "pipe", env: { ...process.env, TMPDIR: scratch } },
       );
       const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
       if (exitCode !== 0) throw new Error(`${provider} sandbox startup exited ${exitCode}: ${stderr}`);
     }
+  });
+
+  integrationTest("provider bootstrap paths are writable inside the sandbox", async () => {
+    const cwd = workspace();
+    const scratch = mkdtempSync(join(tmpdir(), "inter-scratch-"));
+    roots.push(scratch);
+    const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+    if (uid !== undefined) {
+      const probe = `/tmp/claude-${uid}/inter-sandbox-probe`;
+      const child = Bun.spawn(
+        sandboxedCommand(
+          ["/bin/sh", "-c", `touch ${probe} && test -r ${probe} && rm ${probe}`],
+          cwd,
+          { read: [], write: [] },
+          profile,
+          scratch,
+        ),
+        { cwd, stdout: "pipe", stderr: "pipe" },
+      );
+      const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+      if (exitCode !== 0) throw new Error(`claude temp probe exited ${exitCode}: ${stderr}`);
+    }
+
+    const opencodeProbe = join(process.env.HOME!, ".opencode", "inter-sandbox-probe");
+    const child = Bun.spawn(
+      sandboxedCommand(
+        ["/bin/sh", "-c", `touch ${opencodeProbe} && test -r ${opencodeProbe} && rm ${opencodeProbe}`],
+        cwd,
+        { read: [], write: [] },
+        { ...profile, provider: "opencode" },
+        scratch,
+      ),
+      { cwd, stdout: "pipe", stderr: "pipe" },
+    );
+    const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+    if (exitCode !== 0) throw new Error(`opencode config probe exited ${exitCode}: ${stderr}`);
   });
 });

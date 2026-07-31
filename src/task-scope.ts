@@ -126,17 +126,28 @@ function runtimeReadPaths(profile: Profile, command: string[], scratchDir: strin
     resolve(userHome, ".local/bin"),
     resolve(userHome, ".local/share/claude"),
     resolve(userHome, ".bun"),
+    resolve(userHome, "Library/Keychains"),
+    "/Library/Keychains",
   ];
+  if (profile.provider === "claude" && typeof process.getuid === "function") {
+    const name = `claude-${process.getuid()}`;
+    paths.push(resolve("/tmp", name), resolve("/private/tmp", name));
+  }
   for (const path of profileDataPaths(profile)) paths.push(path);
-  return unique(paths.filter(existsSync).flatMap((path) => [path, realpathIfPresent(path)]));
+  return unique(paths.flatMap((path) => [path, realpathIfPresent(path)]));
 }
 
 function runtimeWritePaths(profile: Profile, scratchDir: string): string[] {
-  return unique([
+  const paths = [
     "/dev",
     scratchDir,
     ...profileDataPaths(profile),
-  ].filter((path) => path && existsSync(path)).flatMap((path) => [path, realpathIfPresent(path)]));
+  ];
+  if (profile.provider === "claude" && typeof process.getuid === "function") {
+    const name = `claude-${process.getuid()}`;
+    paths.push(resolve("/tmp", name), resolve("/private/tmp", name));
+  }
+  return unique(paths.flatMap((path) => [path, realpathIfPresent(path)]));
 }
 
 function ancestorsForRules(cwd: string, rules: string[]): string[] {
@@ -165,13 +176,14 @@ function profileDataPaths(profile: Profile): string[] {
   const defaults = profile.provider === "claude" ? [resolve(userHome, ".claude")]
     : profile.provider === "codex" ? [resolve(userHome, ".codex")]
     : profile.provider === "opencode" ? [
+      resolve(userHome, ".opencode"),
       resolve(userHome, ".config/opencode"),
       resolve(userHome, ".local/share/opencode"),
       resolve(userHome, ".local/state/opencode"),
       resolve(userHome, ".cache/opencode"),
     ]
     : [resolve(userHome, ".gemini")];
-  return unique([...configured, ...defaults].filter(existsSync));
+  return unique([...configured, ...defaults]);
 }
 
 function expandHome(value: string, userHome: string): string {

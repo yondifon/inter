@@ -212,7 +212,7 @@ private struct ProfileDetail: View {
                         .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(profile.label).scaledFont(.title3, weight: .semibold)
-                        Text("\(profile.provider.label) · \(profile.model)")
+                        Text("\(profile.provider.label) · \(profile.resolvedModel)")
                             .scaledFont(.callout, design: .monospaced).foregroundStyle(.secondary)
                     }
                     Spacer(minLength: 16)
@@ -348,7 +348,7 @@ private struct WorkerRow: View {
                 .frame(width: 18 * uiScale, alignment: .center)
             VStack(alignment: .leading, spacing: 1) {
                 Text(profile.label).scaledFont(.body).lineLimit(1)
-                Text(profile.model).scaledFont(.caption, design: .monospaced)
+                Text(profile.resolvedModel).scaledFont(.caption, design: .monospaced)
                     .foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer(minLength: 0)

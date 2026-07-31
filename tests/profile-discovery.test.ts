@@ -27,7 +27,7 @@ describe("profile discovery", () => {
 
   test("finds installed CLIs and separate Claude accounts", () => {
     const { home, bin } = fixture();
-    for (const command of ["claude", "codex", "opencode"]) {
+    for (const command of ["claude", "codex", "opencode", "agy"]) {
       const executable = join(bin, command);
       writeFileSync(executable, "");
       chmodSync(executable, 0o700);
@@ -44,6 +44,11 @@ describe("profile discovery", () => {
       }),
       expect.objectContaining({ id: "codex", provider: "codex" }),
       expect.objectContaining({ id: "opencode", provider: "opencode" }),
+      expect.objectContaining({
+        id: "antigravity",
+        provider: "antigravity",
+        model: "gemini-3.6-flash-medium",
+      }),
     ]);
   });
 

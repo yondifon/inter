@@ -615,4 +615,170 @@ describe("task event views", () => {
       text: "128 KB payload over the 64 KB line limit — one event skipped, the trace continues",
     });
   });
+
+  test("summarizes an Antigravity run receipt instead of dumping the envelope", () => {
+    const view = taskEventView({
+      id: 41, taskId: "task", type: "agent.event", state: "completed",
+      payload: {
+        event: "result",
+        result: {
+          conversation_id: "e2eb985f",
+          status: "SUCCESS",
+          response: "### Summary",
+          duration_seconds: 40.697358,
+          num_turns: 1,
+          usage: {
+            input_tokens: 73_169, output_tokens: 33_603, thinking_tokens: 24_633,
+            cache_read_tokens: 146_969, total_tokens: 106_772,
+          },
+        },
+      },
+      createdAt: "now",
+    }, "antigravity");
+    expect(view.kind).toBe("usage");
+    expect(view.phase).toBe("completed");
+    expect(view.title).toBe("Run summary");
+    expect(view.detail).toBe("1 turn · 41s");
+    expect(view.presentation).toEqual({
+      type: "usage",
+      turns: 1,
+      durationMs: 40_697,
+      tokensIn: 73_169,
+      tokensOut: 33_603,
+      tokensCached: 146_969,
+      tokensThinking: 24_633,
+    });
+  });
+
+  test("marks a failed Antigravity run with its reason", () => {
+    const view = taskEventView({
+      id: 42, taskId: "task", type: "agent.event", state: "failed",
+      payload: {
+        event: "result",
+        result: {
+          conversation_id: "", status: "ERROR", response: "",
+          error: "authentication failed or timed out",
+          duration_seconds: 0, num_turns: 0,
+          usage: { input_tokens: 0, output_tokens: 0, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 0 },
+        },
+      },
+      createdAt: "now",
+    }, "antigravity");
+    expect(view.phase).toBe("failed");
+    expect(view.detail).toBe("authentication failed or timed out");
+    expect(view.presentation?.level).toBe("error");
+  });
+
+  test("names an Antigravity tool step and pairs its start with its result", () => {
+    const started = taskEventView({
+      id: 43, taskId: "task", type: "agent.event", state: "running",
+      payload: {
+        event: "step_update",
+        step_update: {
+          conversation_id: "e2eb985f", step_index: 3, state: "ACTIVE", step_type: "tool",
+          tool_name: "view_file",
+          tool_info: { name: "view_file", parameters: { AbsolutePath: "/repo/website/index.html" } },
+        },
+      },
+      createdAt: "now",
+    }, "antigravity");
+    const done = taskEventView({
+      id: 44, taskId: "task", type: "agent.event", state: "running",
+      payload: {
+        event: "step_update",
+        step_update: {
+          conversation_id: "e2eb985f", step_index: 3, state: "DONE", step_type: "tool",
+          tool_name: "view_file", duration_seconds: 0.131406,
+          tool_info: {
+            name: "view_file",
+            parameters: { AbsolutePath: "/repo/website/index.html" },
+            output: "115 lines, 5551 bytes",
+          },
+        },
+      },
+      createdAt: "now",
+    }, "antigravity");
+    expect(started.kind).toBe("file");
+    expect(started.title).toBe("Read file");
+    expect(started.detail).toBe("/repo/website/index.html");
+    expect(started.phase).toBe("started");
+    expect(done.phase).toBe("completed");
+    expect(done.presentation).toEqual({
+      type: "file", path: "/repo/website/index.html", outcome: "115 lines, 5551 bytes",
+    });
+    expect(done.actionId).toBe(started.actionId);
+    expect(started.actionId).toBe("e2eb985f:3");
+  });
+
+  test("keeps Antigravity command and streamed reply steps readable", () => {
+    const command = taskEventView({
+      id: 45, taskId: "task", type: "agent.event", state: "running",
+      payload: {
+        event: "step_update",
+        step_update: {
+          conversation_id: "c1", step_index: 5, state: "ACTIVE", step_type: "tool",
+          tool_name: "run_command",
+          tool_info: { name: "run_command", parameters: { CommandLine: "bun test", Cwd: "/repo" } },
+        },
+      },
+      createdAt: "now",
+    }, "antigravity");
+    const reply = taskEventView({
+      id: 46, taskId: "task", type: "agent.event", state: "running",
+      payload: {
+        event: "step_update",
+        step_update: {
+          conversation_id: "c1", step_index: 11, state: "ACTIVE", step_type: "agent_response",
+          text_delta: "### Summary of Improvements",
+        },
+      },
+      createdAt: "now",
+    }, "antigravity");
+    expect(command.kind).toBe("command");
+    expect(command.presentation).toEqual({ type: "command", command: "bun test", path: "/repo" });
+    expect(reply.kind).toBe("message");
+    expect(reply.title).toBe("Agent message");
+    expect(reply.detail).toBe("### Summary of Improvements");
+  });
+
+  test("folds Antigravity session, prompt, and per-turn steps into named rows", () => {
+    const init = taskEventView({
+      id: 47, taskId: "task", type: "agent.event", state: "running",
+      payload: {
+        event: "init",
+        conversation_id: "c1",
+        init: { model: "gemini-3.6-flash-medium", cwd: "/repo", tools: ["view_file", "run_command"],
+          permission_mode: "always-proceed" },
+      },
+      createdAt: "now",
+    }, "antigravity");
+    const turn = taskEventView({
+      id: 48, taskId: "task", type: "agent.event", state: "running",
+      payload: {
+        event: "step_update",
+        step_update: {
+          conversation_id: "c1", step_index: 2, state: "DONE", step_type: "agent_response",
+          duration_seconds: 2.638916,
+          usage: { input_tokens: 8_962, output_tokens: 424, thinking_tokens: 346,
+            cache_read_tokens: 12_216, total_tokens: 9_386 },
+        },
+      },
+      createdAt: "now",
+    }, "antigravity");
+    const prompt = taskEventView({
+      id: 49, taskId: "task", type: "agent.event", state: "running",
+      payload: {
+        event: "step_update",
+        step_update: { conversation_id: "c1", step_index: 0, state: "DONE", step_type: "user_input" },
+      },
+      createdAt: "now",
+    }, "antigravity");
+    expect(init.title).toBe("Session started");
+    expect(init.detail).toBe("gemini-3.6-flash-medium · 2 tools · permission always-proceed");
+    expect(turn.title).toBe("Turn completed");
+    expect(turn.detail).toBe("424 tokens out · 12k cached");
+    expect(turn.presentation?.tokensThinking).toBe(346);
+    expect(prompt.title).toBe("Prompt received");
+    expect(prompt.minor).toBe(true);
+  });
 });
