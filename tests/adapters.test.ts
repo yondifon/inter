@@ -28,15 +28,17 @@ describe("CLI adapters", () => {
   test("builds a headless Antigravity print command", () => {
     expect(commandFor({ ...base, provider: "antigravity" }, "review", "/repo", "gemini-3.6-flash-low"))
       .toEqual([
-        "agy", "--print", "--output-format", "stream-json", "--model", "gemini-3.6-flash-low",
-        "--mode", "accept-edits", "--dangerously-skip-permissions", "review",
+        "agy", "--print", "review", "--output-format", "stream-json", "--model", "gemini-3.6-flash-low",
+        "--mode", "accept-edits", "--dangerously-skip-permissions",
       ]);
   });
 
   test("allows Codex delegation outside Git repositories", () => {
     const command = commandFor({ ...base, provider: "codex" }, "review", "/workspace");
     expect(command).toContain("--skip-git-repo-check");
-    expect(command).toContain('approval_policy="never"');
+    expect(command).toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(command).not.toContain("--sandbox");
+    expect(command).not.toContain('approval_policy="never"');
   });
 
   test("extracts Claude final response", () => {
@@ -77,8 +79,8 @@ describe("CLI adapters", () => {
     const command = resumeCommandFor({ ...base, provider: "codex" }, "continue", "/repo", "thread-9");
     expect(command.slice(0, 4)).toEqual(["codex", "exec", "resume", "thread-9"]);
     expect(command).toContain("--json");
-    expect(command[command.indexOf("-c") + 1]).toBe('sandbox_mode="workspace-write"');
-    expect(command).toContain('approval_policy="never"');
+    expect(command).toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(command).not.toContain('sandbox_mode="workspace-write"');
   });
 
   test("resumes OpenCode with the prior session flag", () => {

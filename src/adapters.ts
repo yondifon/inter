@@ -17,11 +17,11 @@ export function commandFor(profile: Profile, prompt: string, cwd: string, model 
         prompt,
       ];
     case "codex":
-      // Inter already enforces the approved task scope. Disable only Codex's
-      // interactive approval prompt so headless MCP calls are not cancelled.
+      // Codex's macOS sandbox cannot nest inside Inter's sandbox-exec profile.
+      // Inter remains the sole enforcement boundary for the approved task scope.
       return [
-        "codex", "exec", "--json", "--model", model, "--sandbox", "workspace-write",
-        "-c", 'approval_policy="never"',
+        "codex", "exec", "--json", "--model", model,
+        "--dangerously-bypass-approvals-and-sandbox",
         "--cd", cwd, "--skip-git-repo-check", prompt,
       ];
     case "opencode":
@@ -61,11 +61,10 @@ export function resumeCommandFor(
           prompt,
         ];
       case "codex":
-        // `codex exec resume` has no --sandbox or --cd flags; sandbox comes from a
-        // config override and cwd from the spawned process working directory.
+        // Resume inherits cwd from the process and scope from Inter's outer sandbox.
         return [
           "codex", "exec", "resume", sessionId, "--json", "--model", model,
-          "-c", 'sandbox_mode="workspace-write"', "-c", 'approval_policy="never"',
+          "--dangerously-bypass-approvals-and-sandbox",
           "--skip-git-repo-check", prompt,
         ];
       case "opencode":
