@@ -1,0 +1,9 @@
+[install]
+# The global 7-day minimumReleaseAge (~/.bunfig.toml) blocks the official MCP SDK
+# v2 packages: they carry the 2026-07-28 protocol revision and published
+# 2026-07-27. Exempt only this scope — every other dependency keeps the guard.
+# Same approach as pluk.
+minimumReleaseAgeExcludes = [
+  "@modelcontextprotocol/core",
+  "@modelcontextprotocol/server",
+]

@@ -1,7 +1,6 @@
 #!/usr/bin/env bun
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
+import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { z } from "zod/v4";
 import { loadConfig, saveConfig } from "./config";
 import {
@@ -30,7 +29,7 @@ import { normalizeProfile } from "./profile-input";
 
 const port = Number(Bun.env.INTER_PORT ?? 7331);
 const VERSION = "0.3.1";
-const MCP_CONTRACT_VERSION = 7;
+const MCP_CONTRACT_VERSION = 8;
 const scopeSchema = z.object({
   read: z.array(z.string()).max(200),
   write: z.array(z.string()).max(200),
@@ -39,12 +38,22 @@ const taskStateSchema = z.enum([
   "queued", "running", "needs_input", "answered", "blocked", "completed", "failed", "cancelled",
 ]);
 
+// Preferred revision is 2026-07-28: stateless, no session pinning, one fresh
+// server per request so dynamic profile tools always reflect current settings.
+// `legacy: "stateless"` serves 2025-era clients off the same factory — today's
+// CLIs (Claude Code, codex, gemini) top out at 2025-11-25, so modern-only
+// would mean no client can connect.
+const mcpHandler = createMcpHandler(() => createMcpServer(), {
+  legacy: "stateless",
+  onerror: (error) => console.error("mcp request failed", error),
+});
+
 Bun.serve({
   port,
   hostname: "127.0.0.1",
   async fetch(request) {
     const url = new URL(request.url);
-    if (url.pathname === "/mcp") return handleMcp(request);
+    if (url.pathname === "/mcp") return mcpHandler.fetch(request);
     if (url.pathname === "/health") {
       return Response.json({ status: "ok", version: VERSION, mcpContractVersion: MCP_CONTRACT_VERSION });
     }
@@ -199,7 +208,7 @@ Bun.serve({
 });
 
 if (process.argv.includes("--stdio")) {
-  await (await createMcpServer()).connect(new StdioServerTransport());
+  serveStdio(() => createMcpServer());
 }
 
 async function createMcpServer(): Promise<McpServer> {
@@ -211,7 +220,7 @@ async function createMcpServer(): Promise<McpServer> {
   );
   server.registerTool("delegate", {
     description: DELEGATE_DESCRIPTION,
-    inputSchema: {
+    inputSchema: z.object({
       profile: z.string().optional(),
       model: z.string().min(1).max(200).optional(),
       preference: z.enum(["balanced", "quality", "cost", "speed"]).optional(),
@@ -221,7 +230,7 @@ async function createMcpServer(): Promise<McpServer> {
       scope: scopeSchema,
       allowQuestions: z.boolean().default(true),
       timeoutMs: z.number().int().min(1).max(86_400_000).optional(),
-    },
+    }),
   }, async ({ profile, model, preference, prompt, cwd, parent, scope, allowQuestions, timeoutMs }) => {
     if (profile) {
       const task = await delegate(profile, prompt, cwd, model, parent, { scope, allowQuestions, timeoutMs });
@@ -237,18 +246,18 @@ async function createMcpServer(): Promise<McpServer> {
   });
   server.registerTool("route", {
     description: "Preview Inter's model choice and top candidates without starting work.",
-    inputSchema: {
+    inputSchema: z.object({
       prompt: z.string().min(1).max(64_000),
       modelHint: z.string().min(1).max(200).optional(),
       preference: z.enum(["balanced", "quality", "cost", "speed"]).optional(),
       cwd: z.string().min(1).optional(),
-    },
+    }),
   }, async ({ prompt, modelHint, preference, cwd }) => result(
     await routeModel(prompt, { modelHint, preference, cwd }),
   ));
   server.registerTool("inspect", {
     description: "Read one delegated task, including its provider-native resume sessionId when captured. Prefer wait when work is still running.",
-    inputSchema: { taskId: z.string() },
+    inputSchema: z.object({ taskId: z.string() }),
   }, async ({ taskId }) => {
     const task = getTask(taskId);
     if (!task) throw new Error(`unknown task: ${taskId}`);
@@ -256,81 +265,81 @@ async function createMcpServer(): Promise<McpServer> {
   });
   server.registerTool("wait", {
     description: "Block until meaningful progress or attention. Returns events, progress, and task snapshots with provider-native sessionId when captured.",
-    inputSchema: {
+    inputSchema: z.object({
       taskIds: z.array(z.string()).min(1).max(8),
       timeoutMs: z.number().int().min(1).max(300_000).default(30_000),
       afterCursor: z.number().int().min(0).optional(),
-    },
+    }),
   }, async ({ taskIds, timeoutMs, afterCursor }, extra) => result(
-    await waitForTasks(taskIds, timeoutMs, extra.signal, afterCursor),
+    await waitForTasks(taskIds, timeoutMs, extra.mcpReq.signal, afterCursor),
   ));
   server.registerTool("health", {
     description: "Report broker and MCP contract versions.",
-    inputSchema: {},
+    inputSchema: z.object({}),
   }, async () => result({ status: "ok", version: VERSION, mcpContractVersion: MCP_CONTRACT_VERSION }));
   server.registerTool("tasks", {
     description: "List concise task summaries, including provider-native sessionId when captured. Use inspect for full prompt and output.",
-    inputSchema: {
+    inputSchema: z.object({
       limit: z.number().int().min(1).max(100).default(20),
       state: taskStateSchema.optional(),
       since: z.string().datetime().optional(),
       profile: z.string().optional(),
-    },
+    }),
   }, async (query) => result(listTaskSummaries(query)));
   server.registerTool("reply", {
     description: "Answer a needs_input question in the same task and provider session. Wait on the same returned task ID.",
-    inputSchema: { taskId: z.string(), answer: z.string().min(1) },
+    inputSchema: z.object({ taskId: z.string(), answer: z.string().min(1) }),
   }, async ({ taskId, answer }) => result(startedTask(await reply(taskId, answer))));
   server.registerTool("resume", {
     description: "Resume a failed, cancelled, or blocked task in its captured provider session. Returns a linked continuation task; wait on the returned task ID.",
-    inputSchema: {
+    inputSchema: z.object({
       taskId: z.string(),
       instruction: z.string().min(1).max(64_000).optional(),
       timeoutMs: z.number().int().min(1).max(86_400_000).optional(),
-    },
+    }),
   }, async ({ taskId, instruction, timeoutMs }) =>
     result(startedTask(await resumeTask(taskId, instruction, timeoutMs))));
   server.registerTool("cancel", {
     description: "Stop a queued or running task and its worker process tree.",
-    inputSchema: {
+    inputSchema: z.object({
       taskId: z.string(),
       reason: z.string().min(1).max(500).optional(),
-    },
+    }),
   }, async ({ taskId, reason }) => result(await cancelTask(taskId, reason)));
   server.registerTool("profiles", {
     description: "List CLI accounts and their default models.",
-    inputSchema: {},
+    inputSchema: z.object({}),
   }, async () => result(publicProfiles((await loadConfig()).profiles)));
   server.registerTool("models", {
     description: "List models available to enabled CLI account profiles. Filter by profile or provider; refresh bypasses the five-minute cache.",
-    inputSchema: {
+    inputSchema: z.object({
       profile: z.string().optional(),
       provider: z.enum(["claude", "codex", "opencode", "antigravity"]).optional(),
       refresh: z.boolean().optional(),
-    },
+    }),
   }, async (query) => result(await listModels(query)));
   server.registerTool("status", {
     description: "Report normalized profile/model availability. Refresh uses safe catalog checks only and never sends a generation prompt. Opencode usage stats are not supported.",
-    inputSchema: {
+    inputSchema: z.object({
       profile: z.string().optional(),
       model: z.string().min(1).max(200).optional(),
       provider: z.enum(["claude", "codex", "opencode", "antigravity"]).optional(),
       refresh: z.boolean().optional(),
-    },
+    }),
   }, async (query) => result(await listProfileStatuses(query)));
   server.registerTool("usage", {
     description: "Report provider rate-limit usage per profile (session and weekly windows) without spending tokens. Claude reads the local /usage command; codex reads the latest session log; opencode is not supported.",
-    inputSchema: {
+    inputSchema: z.object({
       profile: z.string().optional(),
       provider: z.enum(["claude", "codex", "opencode", "antigravity"]).optional(),
       refresh: z.boolean().optional(),
-    },
+    }),
   }, async (query) => result(await listProfileUsage(query)));
   if (stateStore().getSettings().dynamicProfileTools) {
     for (const { name, profile } of dynamicProfileTools((await loadConfig()).profiles)) {
       server.registerTool(name, {
         description: dynamicDelegateDescription(profile),
-        inputSchema: {
+        inputSchema: z.object({
           model: z.string().min(1).max(200).optional(),
           prompt: z.string().min(1).max(64_000),
           cwd: z.string().min(1),
@@ -338,7 +347,7 @@ async function createMcpServer(): Promise<McpServer> {
           scope: scopeSchema,
           allowQuestions: z.boolean().default(true),
           timeoutMs: z.number().int().min(1).max(86_400_000).optional(),
-        },
+        }),
       }, async ({ model, prompt, cwd, parent, scope, allowQuestions, timeoutMs }) => {
         const task = await delegate(profile.id, prompt, cwd, model, parent, {
           scope,
@@ -350,19 +359,6 @@ async function createMcpServer(): Promise<McpServer> {
     }
   }
   return server;
-}
-
-async function handleMcp(request: Request): Promise<Response> {
-  if (request.method !== "POST") {
-    return new Response(null, { status: 405, headers: { Allow: "POST" } });
-  }
-  const transport = new WebStandardStreamableHTTPServerTransport({
-    sessionIdGenerator: undefined,
-    enableJsonResponse: true,
-  });
-  const server = await createMcpServer();
-  await server.connect(transport);
-  return transport.handleRequest(request);
 }
 
 function result(value: unknown) {
