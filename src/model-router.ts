@@ -8,6 +8,7 @@ import {
   type RoutingPolicy,
 } from "./routing-policy";
 import { stateStore } from "./store";
+import { listProfileUsage, worstWindowUsedPercent, type ProfileUsage } from "./usage";
 import type { ModelInfo, Profile } from "./types";
 
 export type RoutePreference = "balanced" | "quality" | "cost" | "speed";
@@ -47,10 +48,11 @@ export interface RouteOptions {
 }
 
 export async function routeModel(prompt: string, options: RouteOptions = {}): Promise<ModelRoute> {
-  const [models, config, policy] = await Promise.all([
+  const [models, config, policy, usage] = await Promise.all([
     listModels(),
     loadConfig(),
     options.cwd === undefined ? Promise.resolve(undefined) : loadRoutingPolicy(options.cwd),
+    listProfileUsage().catch(() => [] as ProfileUsage[]),
   ]);
   const store = stateStore();
   const statuses = normalizeProfileStatuses(
@@ -59,7 +61,7 @@ export async function routeModel(prompt: string, options: RouteOptions = {}): Pr
     store.listProfileFailures(),
     store.listProfileSuccesses(),
   );
-  return chooseModel(prompt, models, config.profiles, options, statuses, policy);
+  return chooseModel(prompt, models, config.profiles, options, statuses, policy, usage);
 }
 
 export function chooseModel(
@@ -69,6 +71,7 @@ export function chooseModel(
   options: RouteOptions = {},
   statuses: ProfileStatus[] = [],
   policy?: RoutingPolicy,
+  usage: ProfileUsage[] = [],
 ): ModelRoute {
   const demand = classifyTask(prompt);
   const policyRoute = policy ? routeForTask(policy, demand.taskClass) : undefined;
@@ -126,12 +129,25 @@ export function chooseModel(
       : `no routable models are available${detail}`);
   }
 
+  // A profile deep into a rate-limit window would die mid-task; push work
+  // toward profiles with headroom instead of hard-excluding possibly stale data.
+  const usedByProfile = new Map<string, number>();
+  for (const row of usage) {
+    const worst = worstWindowUsedPercent(row);
+    if (worst !== undefined) usedByProfile.set(row.profile, worst);
+  }
+  for (const [profileId, used] of usedByProfile) {
+    if (used >= 75 && usable.some((model) => model.profileId === profileId)) {
+      warnings.push(`profile ${profileId} is ${used}% into a rate-limit window; deprioritized`);
+    }
+  }
+
   const candidates = usable.map((model) => {
     const traits = modelTraits(model);
     return {
       profileId: model.profileId,
       model: model.id,
-      score: score(traits, requiredQuality, preference),
+      score: score(traits, requiredQuality, preference) - usagePenalty(usedByProfile.get(model.profileId)),
       traits,
     };
   }).sort((a, b) =>
@@ -209,6 +225,11 @@ export function modelTraits(model: ModelInfo): ModelTraits {
     return { quality, cost, speed, costSource: "heuristic" };
   }
   return { quality, cost: 2, speed, costSource: "unknown" };
+}
+
+function usagePenalty(usedPercent: number | undefined): number {
+  if (usedPercent === undefined) return 0;
+  return usedPercent >= 95 ? 60 : usedPercent >= 90 ? 40 : usedPercent >= 75 ? 15 : 0;
 }
 
 function score(traits: ModelTraits, requiredQuality: number, preference: RoutePreference): number {

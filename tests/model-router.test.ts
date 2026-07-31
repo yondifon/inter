@@ -79,6 +79,29 @@ allow = [{ provider = "claude", model = "opus" }]
     expect(route.model).toBe("haiku");
   });
 
+  test("deprioritizes profiles deep into a rate-limit window", () => {
+    const claudeNearLimit = {
+      profile: "claude",
+      provider: "claude" as const,
+      supported: true,
+      source: "claude-cli" as const,
+      windows: [{ label: "Current session", kind: "session" as const, usedPercent: 96 }],
+    };
+    const baseline = chooseModel("Rename this variable in two files.", models, profiles);
+    expect(baseline.model).toBe("haiku");
+    const route = chooseModel(
+      "Rename this variable in two files.",
+      models,
+      profiles,
+      {},
+      [],
+      undefined,
+      [claudeNearLimit],
+    );
+    expect(route.profileId).toBe("opencode");
+    expect(route.warnings).toContain("profile claude is 96% into a rate-limit window; deprioritized");
+  });
+
   test("uses stronger context comprehension for codebase reading", () => {
     const route = chooseModel("Read these files and understand how auth works.", models, profiles);
     expect(route.taskClass).toBe("context");

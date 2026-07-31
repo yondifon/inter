@@ -12,6 +12,18 @@ enum Provider: String, Codable, CaseIterable, Identifiable {
         case .antigravity: "arrow.up.right"
         }
     }
+
+    /// Interactive continuation of a captured session, for a human to paste into a
+    /// terminal. Not the headless form the broker spawns — that one carries the
+    /// stream flags and a prompt. Antigravity records no session, so it has none.
+    func resumeCommand(session: String) -> String? {
+        switch self {
+        case .claude: "claude --resume \(session)"
+        case .codex: "codex resume \(session)"
+        case .opencode: "opencode --session \(session)"
+        case .antigravity: nil
+        }
+    }
 }
 
 struct Profile: Codable, Identifiable, Hashable {

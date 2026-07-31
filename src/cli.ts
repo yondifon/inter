@@ -19,6 +19,7 @@ import {
 import { listModels } from "./models";
 import { routeModel } from "./model-router";
 import { listProfileStatuses } from "./profile-status";
+import { listProfileUsage } from "./usage";
 import { stateStore } from "./store";
 import type { Profile, Provider, Task } from "./types";
 import { dynamicProfileTools } from "./dynamic-tools";
@@ -28,7 +29,7 @@ import { DELEGATE_DESCRIPTION, MCP_INSTRUCTIONS, dynamicDelegateDescription } fr
 
 const port = Number(process.env.INTER_PORT ?? 7331);
 const VERSION = "0.3.0";
-const MCP_CONTRACT_VERSION = 6;
+const MCP_CONTRACT_VERSION = 7;
 const scopeSchema = z.object({
   read: z.array(z.string()).max(200),
   write: z.array(z.string()).max(200),
@@ -299,7 +300,7 @@ async function createMcpServer(): Promise<McpServer> {
     },
   }, async (query) => result(await listModels(query)));
   server.registerTool("status", {
-    description: "Report normalized profile/model availability. Refresh uses safe catalog checks only and never sends a generation prompt.",
+    description: "Report normalized profile/model availability. Refresh uses safe catalog checks only and never sends a generation prompt. Opencode exposes no provider usage stats; the usage tool reports only rate-limit hits observed from delegated tasks.",
     inputSchema: {
       profile: z.string().optional(),
       model: z.string().min(1).max(200).optional(),
@@ -307,6 +308,14 @@ async function createMcpServer(): Promise<McpServer> {
       refresh: z.boolean().optional(),
     },
   }, async (query) => result(await listProfileStatuses(query)));
+  server.registerTool("usage", {
+    description: "Report provider rate-limit usage per profile (session and weekly windows) without spending tokens. Claude reads the local /usage command; codex reads the latest session log; opencode only reports rate-limit hits observed from delegated tasks.",
+    inputSchema: {
+      profile: z.string().optional(),
+      provider: z.enum(["claude", "codex", "opencode", "antigravity"]).optional(),
+      refresh: z.boolean().optional(),
+    },
+  }, async (query) => result(await listProfileUsage(query)));
   if (stateStore().getSettings().dynamicProfileTools) {
     for (const { name, profile } of dynamicProfileTools((await loadConfig()).profiles)) {
       server.registerTool(name, {

@@ -66,6 +66,7 @@ struct ContentView: View {
             }
             .listStyle(.sidebar)
             .scrollIndicators(.never)
+            .safeAreaInset(edge: .bottom) { brokerIndicator }
             // The system sidebar material is translucent and cooler than the content
             // column. A flat neutral fill, run under the titlebar so no seam shows at
             // the toolbar, keeps the whole column one plane.
@@ -76,7 +77,6 @@ struct ContentView: View {
             // a blue slab; a neutral fill keeps the type as the loudest thing.
             .tint(Color(nsColor: .systemGray))
             .toolbar {
-                ToolbarItem(placement: .navigation) { brokerIndicator }
                 ToolbarItem {
                     Button("Install MCP", systemImage: "link.badge.plus") {
                         installResults = MCPConfigInjector.installEverywhere(profiles: store.profiles)
@@ -171,17 +171,21 @@ struct ContentView: View {
 
     private var isFiltering: Bool { activeProjectName != nil || grouping != .parent }
 
-    /// Broker health is app-wide, so it sits above the sidebar with the other
-    /// global controls instead of in the detail toolbar, where it read as part of
-    /// the current selection.
+    /// Broker health is app-wide, so it sits at the foot of the sidebar instead of
+    /// the toolbar, where it landed on the detail side of the divider and read as
+    /// part of the current selection. No word next to it: the light is either on or
+    /// it is not, and hover or VoiceOver says which.
     private var brokerIndicator: some View {
-        HStack(spacing: 6) {
-            Circle().fill(statusColor).frame(width: 7 * uiScale, height: 7 * uiScale)
-                .accessibilityHidden(true)
-            Text(statusText).scaledFont(.caption).foregroundStyle(.secondary)
+        HStack(spacing: 0) {
+            PulsingDot(color: statusColor, diameter: 7 * uiScale, beats: broker.status != .stopped)
+                .frame(width: 24 * uiScale, height: 24 * uiScale)
+                .contentShape(.rect)
+                .help(statusText)
+                .accessibilityLabel(statusText)
+            Spacer(minLength: 0)
         }
-        .fixedSize()
-        .help(statusText)
+        .padding(.horizontal, 6)
+        .padding(.bottom, 2)
     }
 
     private var statusText: String {

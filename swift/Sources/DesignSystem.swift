@@ -221,33 +221,58 @@ struct StateMarker: View {
     var speaks = false
 
     @Environment(\.uiScale) private var uiScale
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var pulsing = false
 
     var body: some View {
         marker
-            .frame(width: 8 * uiScale, height: 8 * uiScale)
             .accessibilityHidden(!speaks)
             .accessibilityLabel("State: \(state.label)")
     }
 
+    private var size: CGFloat { 8 * uiScale }
+
     @ViewBuilder private var marker: some View {
         switch state.dot {
         case .filled:
-            Circle().fill(state.tint)
+            Circle().fill(state.tint).frame(width: size, height: size)
         case .ring:
-            Circle().strokeBorder(state.tint, lineWidth: 1.5 * uiScale)
+            Circle().strokeBorder(state.tint, lineWidth: 1.5 * uiScale).frame(width: size, height: size)
         case .pulse:
-            Circle()
-                .fill(state.tint)
-                .opacity(pulsing ? 0.3 : 1)
-                .scaleEffect(pulsing ? 0.72 : 1)
-                .onAppear {
-                    guard !reduceMotion else { return }
-                    withAnimation(.easeInOut(duration: 0.85).repeatForever(autoreverses: true)) {
-                        pulsing = true
-                    }
-                }
+            PulsingDot(color: state.tint, diameter: size)
+        }
+    }
+}
+
+/// A dot with a slow heartbeat. Motion is what pulls the eye to something still
+/// moving, so the same beat runs everywhere in the app that is live — a running
+/// task, a broker that is up.
+struct PulsingDot: View {
+    let color: Color
+    let diameter: CGFloat
+    /// A light that stopped should look stopped.
+    var beats = true
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var beating = false
+
+    var body: some View {
+        Circle()
+            .fill(color)
+            .opacity(beating ? 0.3 : 1)
+            .scaleEffect(beating ? 0.72 : 1)
+            .frame(width: diameter, height: diameter)
+            .onAppear { sync() }
+            .onChange(of: beats) { _, _ in sync() }
+    }
+
+    private func sync() {
+        guard beats, !reduceMotion else {
+            // A repeating animation only ends when the value is set through a
+            // finite one.
+            withAnimation(.easeOut(duration: 0.2)) { beating = false }
+            return
+        }
+        withAnimation(.easeInOut(duration: 0.85).repeatForever(autoreverses: true)) {
+            beating = true
         }
     }
 }
@@ -284,12 +309,13 @@ struct IconButton: View {
 struct CopyIconButton: View {
     let text: String
     var label: String = "Copy"
+    var symbol: String = "doc.on.doc"
 
     @State private var copied = false
 
     var body: some View {
         IconButton(
-            symbol: copied ? "checkmark" : "doc.on.doc",
+            symbol: copied ? "checkmark" : symbol,
             label: copied ? "Copied" : label,
             tint: copied ? AnyShapeStyle(Color.green) : AnyShapeStyle(.secondary)
         ) {

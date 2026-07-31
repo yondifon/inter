@@ -121,8 +121,25 @@ struct TaskDetail: View {
             if state.wantsLabelBesideName {
                 TaskStateChip(state: state)
             }
-            TaskMetaChip(icon: "cpu", text: task.model, label: "Model")
+            TaskMetaChip(text: workerLabel, label: "Worker") {
+                if let provider = worker?.provider {
+                    ProviderLogo(provider: provider, size: 10 * uiScale)
+                } else {
+                    Image(systemName: "person.crop.circle")
+                        .font(.system(size: 9 * uiScale, weight: .medium))
+                }
+            }
+            TaskMetaChip(text: task.model, label: "Model") {
+                Image(systemName: "cpu").font(.system(size: 9 * uiScale, weight: .medium))
+            }
             Spacer(minLength: 8)
+            if let resumeCommand {
+                CopyIconButton(
+                    text: resumeCommand,
+                    label: "Copy resume command — \(resumeCommand)",
+                    symbol: "arrow.clockwise"
+                )
+            }
             IconButton(symbol: "folder", label: "Open folder") {
                 NSWorkspace.shared.open(URL(fileURLWithPath: task.cwd))
             }
@@ -133,10 +150,10 @@ struct TaskDetail: View {
         }
     }
 
+    /// Only the identifiers worth copying. Worker and model live in the header, so
+    /// repeating them here would make the reader check two places for one fact.
     private var runFactsPopover: some View {
         VStack(alignment: .leading, spacing: 8) {
-            TaskFactRow(icon: "person.crop.circle", label: "Worker", value: workerLabel)
-            TaskFactRow(icon: "cpu", label: "Model", value: task.model)
             TaskFactRow(icon: "number", label: "Task", value: task.id, copy: task.id)
             if let sessionId {
                 TaskFactRow(icon: "terminal", label: "Session", value: sessionId, copy: sessionId)
@@ -145,6 +162,17 @@ struct TaskDetail: View {
         }
         .padding(14)
         .frame(width: 380 * uiScale, alignment: .leading)
+        // A popover defaults to a vibrant material, which samples whatever is behind
+        // the window — over a dark desktop the panel turned into a grey gradient.
+        .background(Surface.panel)
+        .presentationBackground(Surface.panel)
+    }
+
+    /// A profile with its own `command` is opaque to us, so no resume line is
+    /// offered for it — same rule the broker applies before resuming a session.
+    private var resumeCommand: String? {
+        guard let sessionId, let worker, worker.command == nil else { return nil }
+        return worker.provider.resumeCommand(session: sessionId)
     }
 
     private var sessionId: String? {
@@ -195,8 +223,12 @@ struct TaskDetail: View {
         }
     }
 
+    private var worker: Profile? {
+        store.profiles.first { $0.id == task.profileId }
+    }
+
     private var workerLabel: String {
-        store.profiles.first { $0.id == task.profileId }?.label ?? task.profileId
+        worker?.label ?? task.profileId
     }
 
     private var state: TaskState { TaskState(task.state) }
@@ -678,20 +710,20 @@ private struct TaskStateChip: View {
     }
 }
 
-/// Icon carries the field, so the value starts at the same x on every row and the
-/// eye scans values, not labels. The name survives for VoiceOver and the tooltip.
 /// Neutral companion to the state chip: same shape, no semantic color, because a
-/// model name is an identifier and not a signal.
-private struct TaskMetaChip: View {
-    let icon: String
+/// worker or model name is an identifier and not a signal. The icon leads so the
+/// field is readable without a label, and the name survives as tooltip and
+/// VoiceOver text.
+private struct TaskMetaChip<Icon: View>: View {
     let text: String
     let label: String
+    @ViewBuilder let icon: Icon
+
     @Environment(\.uiScale) private var uiScale
 
     var body: some View {
         HStack(spacing: 4) {
-            Image(systemName: icon)
-                .font(.system(size: 9 * uiScale, weight: .medium))
+            icon
             Text(text)
                 .scaledFont(.caption2, design: .monospaced)
                 .lineLimit(1)
