@@ -93,7 +93,10 @@ describe("SQLite state store", () => {
     expect(store.captureTaskSessionId(saved.id, "claude", "sess-123")).toBe(true);
     expect(store.captureTaskSessionId(saved.id, "claude", "sess-other")).toBe(false);
     expect(store.getTask(saved.id)?.sessionId).toBe("sess-123");
-    expect(store.listTaskSummaries()[0]?.sessionId).toBe("sess-123");
+    expect(store.replaceTaskSessionId(saved.id, "claude", "stale", "sess-456")).toBe(false);
+    expect(store.replaceTaskSessionId(saved.id, "claude", "sess-123", "sess-456")).toBe(true);
+    expect(store.getTask(saved.id)?.sessionId).toBe("sess-456");
+    expect(store.listTaskSummaries()[0]?.sessionId).toBe("sess-456");
     const sessionEvents = store.listTaskEvents(saved.id)
       .filter(({ type }) => type === "session_captured");
     expect(sessionEvents).toHaveLength(1);
@@ -255,22 +258,22 @@ describe("SQLite state store", () => {
     store.close();
   });
 
-  test("atomically marks a question answered and links its continuation", () => {
+  test("atomically requeues an answered task in place", () => {
     const { db } = paths();
     const store = new StateStore({ path: db, seedProfiles: [profile] });
     const parent = task("needs_input");
     parent.question = "Which file?";
+    parent.output = "INTER_NEEDS_INPUT: Which file?";
+    parent.completion = { blocked: true, code: "needs_authority" };
     store.createTask(parent);
-    const child = task();
-    child.parentTaskId = parent.id;
-    store.createContinuation(parent.id, child);
-    expect(store.getTask(parent.id)).toMatchObject({
-      state: "answered",
-      childTaskId: child.id,
+    expect(store.answerTask(parent.id)).toMatchObject({
+      id: parent.id,
+      state: "queued",
+      output: "",
     });
-    expect(store.getTask(child.id)?.parentTaskId).toBe(parent.id);
-    expect(() => store.createContinuation(parent.id, { ...task(), parentTaskId: parent.id }))
-      .toThrow("does not need input");
+    expect(store.getTask(parent.id)?.question).toBeUndefined();
+    expect(store.getTask(parent.id)?.completion).toBeUndefined();
+    expect(() => store.answerTask(parent.id)).toThrow("does not need input");
     store.close();
   });
 

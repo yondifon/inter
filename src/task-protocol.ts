@@ -1,8 +1,8 @@
 import type { CompletionCode, TaskCompletion } from "./types";
 
-const NEEDS_INPUT = /(?:^|\r?\n)[\t ]*(?:INTER_NEEDS_INPUT|NEEDS_INPUT)\s*:\s*([^\r\n]+)[\t ]*$/i;
-const COMPLETED = /(?:^|\r?\n)[\t ]*INTER_RESULT\s*:\s*completed[\t ]*$/i;
-const BLOCKED = /(?:^|\r?\n)[\t ]*INTER_BLOCKED\s*:\s*([a-z_]+)(?:\s*[:|]\s*(.+))?[\t ]*$/i;
+const NEEDS_INPUT = /(?:^|\r?\n)[\t ]*(?:INTER_NEEDS_INPUT|NEEDS_INPUT)\s*:\s*([^\r\n]+)[\t ]*(?:\r?\n[\t ]*)*$/i;
+const COMPLETED = /(?:^|\r?\n)[\t ]*INTER_RESULT\s*:\s*completed[\t ]*(?:\r?\n[\t ]*)*$/i;
+const BLOCKED = /(?:^|\r?\n)[\t ]*INTER_BLOCKED\s*:\s*([a-z_]+)(?:\s*[:|]\s*(.+))?[\t ]*(?:\r?\n[\t ]*)*$/i;
 const PERMISSION_BLOCK = /\b(?:awaiting|need(?:ing)?|requires?) (?:your )?(?:permission|approval)\b|\bcannot proceed\b.*\bpermission\b/i;
 
 export interface WorkerOutcome {

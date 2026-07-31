@@ -279,7 +279,7 @@ async function createMcpServer(): Promise<McpServer> {
     },
   }, async (query) => result(listTaskSummaries(query)));
   server.registerTool("reply", {
-    description: "Answer a needs_input question and return a linked continuation task, including sessionId once captured. Wait on the returned task ID.",
+    description: "Answer a needs_input question in the same task and provider session. Wait on the same returned task ID.",
     inputSchema: { taskId: z.string(), answer: z.string().min(1) },
   }, async ({ taskId, answer }) => result(startedTask(await reply(taskId, answer))));
   server.registerTool("resume", {
@@ -287,8 +287,10 @@ async function createMcpServer(): Promise<McpServer> {
     inputSchema: {
       taskId: z.string(),
       instruction: z.string().min(1).max(64_000).optional(),
+      timeoutMs: z.number().int().min(1).max(86_400_000).optional(),
     },
-  }, async ({ taskId, instruction }) => result(startedTask(await resumeTask(taskId, instruction))));
+  }, async ({ taskId, instruction, timeoutMs }) =>
+    result(startedTask(await resumeTask(taskId, instruction, timeoutMs))));
   server.registerTool("cancel", {
     description: "Stop a queued or running task and its worker process tree.",
     inputSchema: {

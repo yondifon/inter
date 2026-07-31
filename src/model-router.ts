@@ -89,17 +89,19 @@ export function chooseModel(
   }
 
   const warnings: string[] = [];
+  let policyExcluded = 0;
   const policyEligible = policyRoute
     ? requested.filter((model) => {
       const allowed = modelAllowed(policyRoute, model.provider, model.id);
-      if (!allowed) {
-        warnings.push(
-          `excluded model ${model.profileId}/${model.id}: not allowed by project policy route ${demand.taskClass}`,
-        );
-      }
+      if (!allowed) policyExcluded++;
       return allowed;
     })
     : requested;
+  if (policyExcluded > 0) {
+    warnings.push(
+      `excluded ${policyExcluded} models: not allowed by project policy route ${demand.taskClass}`,
+    );
+  }
 
   const statusByModel = new Map(statuses.map((status) => [
     statusKey(status.profile, status.model),

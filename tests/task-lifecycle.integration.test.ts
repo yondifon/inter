@@ -99,33 +99,7 @@ describe("task lifecycle integration", () => {
     });
   });
 
-  integrationTest("answers a worker question and closes the parent", async () => {
-    const script = [
-      "case \"$1\" in",
-      "  *\"# Resolved decision\"*) printf 'Finished.\\nINTER_RESULT: completed\\n' ;;",
-      "  *) printf 'INTER_NEEDS_INPUT: Which file should I write?\\n' ;;",
-      "esac",
-    ].join("\n");
-    const { cwd, profile } = setup(["/bin/sh", "-c", script, "inter", "{prompt}"]);
-    const parent = await delegate(profile.id, "Write the selected file.", cwd, undefined, undefined, {
-      scope: { read: [], write: [] },
-    });
-    const first = await waitForAttention(parent.id);
-    expect(first.tasks[0]).toMatchObject({
-      state: "needs_input",
-      question: "Which file should I write?",
-    });
-
-    const child = await reply(parent.id, "docs/result.md");
-    const second = await waitForAttention(child.id);
-    expect(second.tasks[0]).toMatchObject({ state: "completed", output: "Finished." });
-    expect(getTask(parent.id)).toMatchObject({
-      state: "answered",
-      childTaskId: child.id,
-    });
-  });
-
-  integrationTest("resumes the worker session when a continuation follows a question", async () => {
+  integrationTest("answers in the same task and provider session", async () => {
     const { cwd, profile } = setupClaudeBin([
       "#!/bin/sh",
       `printf '%s\\n' "$*" >> "$(dirname "$0")/../argv.log"`,
@@ -149,13 +123,14 @@ describe("task lifecycle integration", () => {
     });
     expect(getTask(parent.id)?.sessionId).toBe("sess-1");
 
-    const child = await reply(parent.id, "docs/result.md");
-    const second = await waitForAttention(child.id);
+    const continued = await reply(parent.id, "docs/result.md");
+    expect(continued.id).toBe(parent.id);
+    const second = await waitForAttention(parent.id);
     expect(second.tasks[0]).toMatchObject({ state: "completed", output: "Finished." });
-    expect(getTask(child.id)?.sessionId).toBe("sess-2");
-    const spawns = stateStore().listTaskEvents(child.id).filter(({ type }) => type === "worker_spawned");
-    expect(spawns).toHaveLength(1);
-    expect(spawns[0]?.payload.resumedSession).toBe("sess-1");
+    expect(getTask(parent.id)?.sessionId).toBe("sess-2");
+    const spawns = stateStore().listTaskEvents(parent.id).filter(({ type }) => type === "worker_spawned");
+    expect(spawns).toHaveLength(2);
+    expect(spawns[1]?.payload.resumedSession).toBe("sess-1");
     // argv entries span lines (the prompt embeds newlines), so count spawn
     // markers rather than log lines.
     const log = readFileSync(join(cwd, "argv.log"), "utf8");
@@ -164,7 +139,7 @@ describe("task lifecycle integration", () => {
     expect(log.indexOf("--resume")).toBe(log.lastIndexOf("--resume"));
   });
 
-  integrationTest("falls back to a fresh continuation when the session cannot resume", async () => {
+  integrationTest("fails rather than losing context when the session cannot resume", async () => {
     const { cwd, profile } = setupClaudeBin([
       "#!/bin/sh",
       'case "$*" in',
@@ -184,13 +159,13 @@ describe("task lifecycle integration", () => {
     await waitForAttention(parent.id);
     expect(getTask(parent.id)?.sessionId).toBe("sess-1");
 
-    const child = await reply(parent.id, "carefully");
-    const result = await waitForAttention(child.id);
-    expect(result.tasks[0]).toMatchObject({ state: "completed", output: "Recovered." });
-    expect(getTask(child.id)?.sessionId).toBe("sess-fresh");
-    const types = stateStore().listTaskEvents(child.id).map(({ type }) => type);
+    const continued = await reply(parent.id, "carefully");
+    expect(continued.id).toBe(parent.id);
+    const result = await waitForAttention(parent.id);
+    expect(result.tasks[0]).toMatchObject({ state: "failed" });
+    const types = stateStore().listTaskEvents(parent.id).map(({ type }) => type);
     expect(types.filter((type) => type === "worker_spawned")).toHaveLength(2);
-    expect(types).toContain("resume_fallback");
+    expect(types).toContain("resume_failed");
   });
 
   integrationTest("resumes a failed task in its captured worker session", async () => {

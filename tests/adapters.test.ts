@@ -29,7 +29,8 @@ describe("CLI adapters", () => {
     expect(commandFor({ ...base, provider: "antigravity" }, "review", "/repo", "gemini-3.6-flash-low"))
       .toEqual([
         "agy", "--print", "review", "--output-format", "stream-json", "--model", "gemini-3.6-flash-low",
-        "--mode", "accept-edits", "--dangerously-skip-permissions",
+        "--new-project", "--add-dir", "/repo", "--mode", "accept-edits",
+        "--dangerously-skip-permissions",
       ]);
   });
 
@@ -89,13 +90,23 @@ describe("CLI adapters", () => {
     expect(command[command.indexOf("--dir") + 1]).toBe("/repo");
   });
 
-  test("refuses resume for custom commands and Antigravity", () => {
+  test("resumes Antigravity with the prior conversation id", () => {
+    const command = resumeCommandFor(
+      { ...base, provider: "antigravity" },
+      "continue",
+      "/repo",
+      "conversation-1",
+      "gemini-3.6-flash-medium",
+    );
+    expect(command[command.indexOf("--conversation") + 1]).toBe("conversation-1");
+    expect(command[command.indexOf("--add-dir") + 1]).toBe("/repo");
+    expect(command[command.indexOf("--print") + 1]).toBe("continue");
+  });
+
+  test("refuses resume for custom commands", () => {
     expect(canResumeSession(base)).toBe(true);
     expect(canResumeSession({ ...base, command: ["agy", "{prompt}"] })).toBe(false);
-    expect(canResumeSession({ ...base, provider: "antigravity" })).toBe(false);
-    expect(() => resumeCommandFor({ ...base, provider: "antigravity" }, "p", "/repo", "s")).toThrow(
-      "profile cannot resume sessions",
-    );
+    expect(canResumeSession({ ...base, provider: "antigravity" })).toBe(true);
   });
 
   test("extracts each provider's session id from its real event shape", () => {
@@ -106,6 +117,14 @@ describe("CLI adapters", () => {
     expect(sessionIdFrom("claude", { session_id: 42 })).toBeUndefined();
     expect(sessionIdFrom("claude", { session_id: "   " })).toBeUndefined();
     expect(sessionIdFrom("codex", { thread_id: " thread-1 " })).toBe("thread-1");
+    expect(sessionIdFrom("antigravity", {
+      event: "init",
+      conversation_id: "conversation-1",
+    })).toBe("conversation-1");
+    expect(sessionIdFrom("antigravity", {
+      event: "result",
+      result: { conversation_id: "conversation-2" },
+    })).toBe("conversation-2");
     expect(sessionIdFrom("antigravity", { session_id: "x" })).toBeUndefined();
   });
 });

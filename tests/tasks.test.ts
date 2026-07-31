@@ -45,6 +45,20 @@ describe("worker protocol", () => {
       output: "Done.",
       completion: { blocked: false, code: "completed" },
     });
+    expect(interpretWorkerOutcome(0, "Done.\nINTER_RESULT: completed\n", "")).toMatchObject({
+      state: "completed",
+      output: "Done.",
+      completion: { blocked: false, code: "completed" },
+    });
+  });
+
+  test("accepts protocol markers followed by empty lines", () => {
+    expect(needsInputQuestion("INTER_NEEDS_INPUT: Which config?\n\n")).toBe("Which config?");
+    expect(interpretWorkerOutcome(0, "INTER_BLOCKED: needs_authority | Missing config\n\n", ""))
+      .toMatchObject({
+        state: "blocked",
+        completion: { code: "needs_authority", reason: "Missing config" },
+      });
   });
 
   test("classifies provider billing failures", () => {

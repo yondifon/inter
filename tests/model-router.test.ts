@@ -179,7 +179,8 @@ allow = [{ provider = "claude", model = "opus" }]
     expect(route.preference).toBe("quality");
     expect(route.requiredQuality).toBe(5);
     expect(route.candidates.map(({ model }) => model)).toEqual(["opus"]);
-    expect(route.warnings.some((warning) => warning.includes("sonnet"))).toBe(true);
+    expect(route.warnings.some((warning) => warning.startsWith("excluded ") &&
+      warning.includes("project policy route build"))).toBe(true);
   });
 
   test("applies policy only to its matching task class", () => {

@@ -168,16 +168,26 @@ async function validateWorkspace(cwd: string): Promise<string> {
   if (!roots.some((root) => {
     const child = relative(root, workspace);
     return child === "" || (!child.startsWith("..") && !isAbsolute(child));
-  })) throw new Error("cwd is outside INTER_ROOTS");
+  })) throw new Error(`cwd is outside INTER_ROOTS: ${roots.join(", ")}`);
   if (!(await stat(workspace).catch(() => undefined))?.isDirectory()) throw new Error("cwd does not exist");
   return workspace;
 }
 
-function launchTask(task: Task, profile: Profile, resumeSessionId?: string): void {
-  void runTask(task, profile, resumeSessionId);
+function launchTask(
+  task: Task,
+  profile: Profile,
+  resumeSessionId?: string,
+  promptOverride?: string,
+): void {
+  void runTask(task, profile, resumeSessionId, promptOverride);
 }
 
-async function runTask(task: Task, profile: Profile, resumeSessionId?: string): Promise<void> {
+async function runTask(
+  task: Task,
+  profile: Profile,
+  resumeSessionId?: string,
+  promptOverride?: string,
+): Promise<void> {
   if (!update(task, { state: "running" }, ["queued"])) return;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   let active: ActiveWorker | undefined;
@@ -185,7 +195,7 @@ async function runTask(task: Task, profile: Profile, resumeSessionId?: string): 
   try {
     scratchDir = mkdtempSync(resolve(tmpdir(), "inter-worker-"));
     const hookUrl = `${Bun.env.INTER_BROKER_URL ?? `http://127.0.0.1:${Bun.env.INTER_PORT ?? 7331}`}/api/hooks/${task.id}`;
-    const prompt = workerPrompt(task.prompt, task.allowQuestions);
+    const prompt = workerPrompt(promptOverride ?? task.prompt, task.allowQuestions);
     const env = {
       ...Bun.env,
       ...profileEnv(profile),
@@ -270,16 +280,22 @@ async function runTask(task: Task, profile: Profile, resumeSessionId?: string): 
             lastAgentEventAt = Date.now();
             eventCount++;
             attemptEvents++;
-            if (!task.sessionId) {
-              const sessionId = sessionIdFrom(profile.provider, payload);
-              if (sessionId) {
-                const store = stateStore();
+            const sessionId = sessionIdFrom(profile.provider, payload);
+            if (sessionId) {
+              const store = stateStore();
+              if (!task.sessionId) {
                 if (store.captureTaskSessionId(task.id, profile.provider, sessionId)) {
                   task.sessionId = sessionId;
                   taskWaiter.notify(task.id);
                 } else {
                   task.sessionId = store.getTask(task.id)?.sessionId;
                 }
+              } else if (
+                sessionId !== task.sessionId &&
+                store.replaceTaskSessionId(task.id, profile.provider, task.sessionId, sessionId)
+              ) {
+                task.sessionId = sessionId;
+                taskWaiter.notify(task.id);
               }
             }
           } catch {}
@@ -287,20 +303,17 @@ async function runTask(task: Task, profile: Profile, resumeSessionId?: string): 
         readStream(child.stderr, undefined, MAX_EVENT_LINE),
         child.exited,
       ]);
-      // A resume that dies before emitting a single agent event never reached the
-      // model (e.g. the session file was pruned); retry once as a fresh run so the
-      // caller's answer is not lost. Failures after events are real task failures.
+      // Never turn a failed resume into a fresh session. A fresh worker would
+      // receive the answer but lose the provider's accumulated context.
       if (
         resumeWith && exitCode !== 0 && attemptEvents === 0 &&
         !active.cancelled && stateStore().getTask(task.id)?.state !== "cancelled"
       ) {
-        appendTaskEvent(task.id, "resume_fallback", task.state, {
+        appendTaskEvent(task.id, "resume_failed", task.state, {
           resumedSession: resumeWith,
           exitCode,
           error: stderr.trim().slice(0, 500),
         });
-        resumeWith = undefined;
-        continue;
       }
       break;
     }
@@ -329,7 +342,7 @@ async function runTask(task: Task, profile: Profile, resumeSessionId?: string): 
     if (heartbeat) clearInterval(heartbeat);
     if (active?.timeout) clearTimeout(active.timeout);
     if (active?.forceKill) clearTimeout(active.forceKill);
-    activeWorkers.delete(task.id);
+    if (activeWorkers.get(task.id) === active) activeWorkers.delete(task.id);
     if (scratchDir) rmSync(scratchDir, { recursive: true, force: true });
   }
 }
@@ -386,28 +399,24 @@ export async function reply(id: string, answer: string): Promise<Task> {
   const old = stateStore().getTask(id);
   if (!old) throw new Error(`unknown task: ${id}`);
   if (old.state !== "needs_input") throw new Error(`task does not need input: ${id}`);
-  const { task, profile } = await prepareTask(
-    old.profileId,
-    continuationPrompt(old.prompt, old.question ?? "What input is required?", answer),
-    old.cwd,
-    old.model,
-    old.id,
-    {
-      scope: old.scope,
-      allowQuestions: old.allowQuestions,
-      ...(old.timeoutMs ? { timeoutMs: old.timeoutMs } : {}),
-    },
+  const config = await loadConfig();
+  const profile = config.profiles.find((item) => item.id === old.profileId);
+  if (!profile || !canResumeSession(profile)) {
+    throw new Error(`task profile cannot resume sessions: ${old.profileId}`);
+  }
+  if (!old.sessionId) throw new Error(`task has no captured session to reply to: ${id}`);
+  const prompt = continuationPrompt(
+    old.prompt,
+    old.question ?? "What input is required?",
+    answer,
   );
-  stateStore().createContinuation(old.id, task);
-  taskWaiter.notify(old.id);
-  // Continue inside the worker's own CLI session when the provider supports it;
-  // the continuation prompt stays self-sufficient so a fallback fresh run works.
-  const resumeSessionId = old.sessionId && canResumeSession(profile) ? old.sessionId : undefined;
-  launchTask(task, profile, resumeSessionId);
+  const task = stateStore().answerTask(id);
+  taskWaiter.notify(id);
+  launchTask(task, profile, old.sessionId, prompt);
   return task;
 }
 
-export async function resumeTask(id: string, instruction?: string): Promise<Task> {
+export async function resumeTask(id: string, instruction?: string, timeoutMs?: number): Promise<Task> {
   const old = stateStore().getTask(id);
   if (!old) throw new Error(`unknown task: ${id}`);
   if (!["failed", "cancelled", "blocked"].includes(old.state)) {
@@ -437,7 +446,9 @@ export async function resumeTask(id: string, instruction?: string): Promise<Task
     {
       scope: old.scope,
       allowQuestions: old.allowQuestions,
-      ...(old.timeoutMs ? { timeoutMs: old.timeoutMs } : {}),
+      ...(timeoutMs !== undefined
+        ? { timeoutMs }
+        : old.timeoutMs ? { timeoutMs: old.timeoutMs } : {}),
     },
   );
   stateStore().createResumption(old.id, task);

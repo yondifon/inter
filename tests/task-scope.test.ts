@@ -71,6 +71,7 @@ describe("task scope", () => {
     if (typeof process.getuid === "function") {
       expect(claudePolicy).toContain(`/private/tmp/claude-${process.getuid()}`);
     }
+    expect(claudePolicy).toContain('tmp/claude-[^/]*-cwd');
     expect(claudePolicy).not.toContain('(allow file-write* (subpath "/private/tmp"))');
 
     const opencodePolicy = sandboxProfile(
@@ -144,9 +145,16 @@ describe("task scope", () => {
     const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
     if (uid !== undefined) {
       const probe = `/tmp/claude-${uid}/inter-sandbox-probe`;
+      const cwdProbe = "/tmp/claude-d9ca-cwd";
+      const deniedProbe = "/tmp/claude-d9ca-other";
       const child = Bun.spawn(
         sandboxedCommand(
-          ["/bin/sh", "-c", `touch ${probe} && test -r ${probe} && rm ${probe}`],
+          ["/bin/sh", "-c", [
+            `touch ${probe}`,
+            `touch ${cwdProbe}`,
+            `! touch ${deniedProbe}`,
+            `rm ${probe} ${cwdProbe}`,
+          ].join(" && ")],
           cwd,
           { read: [], write: [] },
           profile,

@@ -54,6 +54,14 @@ export function sandboxProfile(
   const runtimeWrites = runtimeWritePaths(profile, scratch).map((path) =>
     `(allow file-write* (literal ${quote(path)}))(allow file-write* (subpath ${quote(path)}))`
   );
+  const providerRules = profile.provider === "claude"
+    ? [
+      '(allow file-read* (regex #"^/tmp/claude-[^/]*-cwd(/.*)?$"))',
+      '(allow file-read* (regex #"^/private/tmp/claude-[^/]*-cwd(/.*)?$"))',
+      '(allow file-write* (regex #"^/tmp/claude-[^/]*-cwd(/.*)?$"))',
+      '(allow file-write* (regex #"^/private/tmp/claude-[^/]*-cwd(/.*)?$"))',
+    ]
+    : [];
   const metadataRules = ancestorsForRules(workspace, [...scope.read, ...scope.write]).map((path) =>
     `(allow file-read-metadata (literal ${quote(path)}))(allow file-read-data (literal ${quote(path)}))`
   );
@@ -70,6 +78,7 @@ export function sandboxProfile(
     ...metadataRules,
     ...runtimeReads,
     ...runtimeWrites,
+    ...providerRules,
     ...readRules,
     ...writeRules,
   ].join("");

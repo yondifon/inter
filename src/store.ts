@@ -204,6 +204,30 @@ export class StateStore {
     return captured;
   }
 
+  replaceTaskSessionId(
+    id: string,
+    provider: Profile["provider"],
+    previousSessionId: string,
+    sessionId: string,
+  ): boolean {
+    const value = sessionId.trim();
+    if (!value || value === previousSessionId) return false;
+    let replaced = false;
+    this.transaction(() => {
+      const row = this.database.query<{ state: TaskState }, [string, string]>(`
+        SELECT state FROM tasks WHERE id = ? AND session_id = ?
+      `).get(id, previousSessionId);
+      if (!row) return;
+      const changed = this.database.query(`
+        UPDATE tasks SET session_id = ? WHERE id = ? AND session_id = ?
+      `).run(value, id, previousSessionId);
+      if (changed.changes !== 1) return;
+      this.addTaskEvent(id, "session_updated", row.state, { provider, sessionId: value });
+      replaced = true;
+    });
+    return replaced;
+  }
+
   saveTask(
     task: Task,
     eventType = "state_changed",
@@ -252,17 +276,23 @@ export class StateStore {
     return cancelled ? this.getTask(id) : undefined;
   }
 
-  createContinuation(parentId: string, child: Task): void {
+  answerTask(id: string): Task {
+    const now = new Date().toISOString();
+    let answered = false;
     this.transaction(() => {
-      this.createTask(child);
       const changed = this.database.query(`
         UPDATE tasks
-        SET state = 'answered', child_task_id = ?, updated_at = ?
+        SET state = 'queued', output = '', error = NULL, question = NULL,
+            completion_json = NULL, updated_at = ?
         WHERE id = ? AND state = 'needs_input'
-      `).run(child.id, child.createdAt, parentId);
-      if (changed.changes !== 1) throw new Error(`task does not need input: ${parentId}`);
-      this.addTaskEvent(parentId, "answered", "answered", { childTaskId: child.id });
+      `).run(now, id);
+      if (changed.changes !== 1) throw new Error(`task does not need input: ${id}`);
+      this.addTaskEvent(id, "answered", "queued", {});
+      answered = true;
     });
+    const task = answered ? this.getTask(id) : undefined;
+    if (!task) throw new Error(`unknown task: ${id}`);
+    return task;
   }
 
   createResumption(parentId: string, child: Task): void {

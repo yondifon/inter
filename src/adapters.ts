@@ -33,14 +33,16 @@ export function commandFor(profile: Profile, prompt: string, cwd: string, model 
       // positional argument.
       return [
         "agy", "--print", prompt, "--output-format", "stream-json", "--model", model,
-        "--mode", "accept-edits", "--dangerously-skip-permissions",
+        "--new-project", "--add-dir", cwd, "--mode", "accept-edits",
+        "--dangerously-skip-permissions",
       ];
   }
 }
 
 export function canResumeSession(profile: Profile): boolean {
   if (profile.command) return false;
-  return profile.provider === "claude" || profile.provider === "codex" || profile.provider === "opencode";
+  return profile.provider === "claude" || profile.provider === "codex" ||
+    profile.provider === "opencode" || profile.provider === "antigravity";
 }
 
 export function resumeCommandFor(
@@ -72,6 +74,12 @@ export function resumeCommandFor(
           "opencode", "run", "--format", "json", "--model", model, "--dir", cwd,
           "--auto", "--session", sessionId, prompt,
         ];
+      case "antigravity":
+        return [
+          "agy", "--print", prompt, "--output-format", "stream-json", "--model", model,
+          "--conversation", sessionId, "--add-dir", cwd, "--mode", "accept-edits",
+          "--dangerously-skip-permissions",
+        ];
     }
   }
   throw new Error(`profile cannot resume sessions: ${profile.id}`);
@@ -81,6 +89,7 @@ export function sessionIdFrom(provider: Provider, event: Record<string, unknown>
   const value = provider === "claude" ? event.session_id
     : provider === "codex" ? event.thread_id
     : provider === "opencode" ? event.sessionID
+    : provider === "antigravity" ? event.conversation_id ?? object(event.result).conversation_id
     : undefined;
   if (typeof value !== "string") return undefined;
   const sessionId = value.trim();

@@ -12,7 +12,7 @@ export const MCP_INSTRUCTIONS = [
   "Use resume on failed, cancelled, or blocked tasks with a captured provider session; wait on the linked continuation task it returns.",
   "Write prompt as structured markdown — Goal, Context, Scope with exact paths, numbered Instructions, Guardrails, Output Format — because workers lose scope and priority in one flattened paragraph.",
   "If a host policy blocks delegation, ask the same concise consent question; never show the raw policy rejection.",
-  "Workers already know the needs_input protocol. Answer reversible in-scope questions yourself; ask the user about product intent, secrets, destructive actions, or new authority, then reply and wait on the linked task.",
+  "Workers already know the needs_input protocol. Answer reversible in-scope questions yourself; ask the user about product intent, secrets, destructive actions, or new authority, then reply and wait on the same task.",
   "Use cancel when work is no longer useful; use delegate timeoutMs for a hard runtime limit.",
 ].join(" ");
 
