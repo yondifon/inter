@@ -37,8 +37,9 @@ const buildPolicy: RoutingPolicy = {
 };
 
 describe("model routing", () => {
-  test("loads project policy only when cwd is supplied", async () => {
+  test("reads the project policy from the supplied cwd, never the broker's", async () => {
     const root = mkdtempSync(join(tmpdir(), "inter-router-"));
+    const elsewhere = mkdtempSync(join(tmpdir(), "inter-router-elsewhere-"));
     const previousCwd = process.cwd();
     const previousDb = process.env.INTER_DB;
     writeFileSync(join(root, ".inter.toml"), `
@@ -59,19 +60,23 @@ allow = [{ provider = "claude", model = "opus" }]
         env: {},
         capabilities: [],
       }]);
+      // Park the broker inside the policy directory. Only the cwd passed by the
+      // caller may decide routing, so `elsewhere` must stay unpoliced.
       process.chdir(root);
 
-      expect((await routeModel("Implement the fix.")).model).toBe("gemini");
       await expect(routeModel("Implement the fix.", { cwd: root }))
         .rejects.toThrow("no routable models are available");
+      const unpoliced = await routeModel("Implement the fix.", { cwd: elsewhere });
+      expect(unpoliced.reason).not.toContain("applied project policy");
     } finally {
       closeStateStore();
       process.chdir(previousCwd);
       if (previousDb === undefined) delete process.env.INTER_DB;
       else process.env.INTER_DB = previousDb;
       rmSync(root, { recursive: true, force: true });
+      rmSync(elsewhere, { recursive: true, force: true });
     }
-  });
+  }, 20_000);
 
   test("uses a cheap model for bounded mechanical work", () => {
     const route = chooseModel("Rename this variable in two files.", models, profiles);

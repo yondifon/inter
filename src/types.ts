@@ -52,6 +52,15 @@ export interface BrokerSettings {
   dynamicProfileTools: boolean;
 }
 
+export interface MemoryEntry {
+  cwd: string;
+  key: string;
+  value: string;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Task {
   id: string;
   profileId: string;

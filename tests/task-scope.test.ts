@@ -74,6 +74,9 @@ describe("task scope", () => {
     expect(claudePolicy).toContain('tmp/claude-[^/]*-cwd');
     expect(claudePolicy).not.toContain('(allow file-write* (subpath "/private/tmp"))');
 
+    mkdirSync(join(cwd, ".git"));
+    writeFileSync(join(cwd, ".git", "HEAD"), "ref: refs/heads/main\n");
+    writeFileSync(join(cwd, ".git", "config"), "[core]\n\trepositoryformatversion = 0\n");
     const opencodePolicy = sandboxProfile(
       cwd,
       { read: [], write: [] },
@@ -83,6 +86,37 @@ describe("task scope", () => {
     );
     expect(opencodePolicy).toContain(`${process.env.HOME}/.opencode`);
     expect(opencodePolicy).not.toContain(`(allow file-write* (subpath "${process.env.HOME}"))`);
+    // Project discovery and config loading happen before task scope is used.
+    expect(opencodePolicy).toContain(
+      `(allow file-read* (literal "${realpathSync(cwd)}/opencode.json"))`,
+    );
+    expect(opencodePolicy).toContain(
+      `(allow file-read* (literal "${realpathSync(cwd)}/.opencode/opencode.jsonc"))`,
+    );
+    expect(opencodePolicy).toContain(
+      `(allow file-read* (literal "${realpathSync(cwd)}/.git/config"))`,
+    );
+    expect(opencodePolicy).not.toContain(
+      `(allow file-read* (subpath "${realpathSync(cwd)}/.git"))`,
+    );
+    expect(opencodePolicy).not.toContain(
+      `(allow file-read* (literal "${process.env.HOME}/opencode.json"))`,
+    );
+    expect(claudePolicy).not.toContain("opencode.json");
+  });
+
+  test("allows OpenCode's legacy home config probe only outside Git projects", () => {
+    const cwd = workspace();
+    const policy = sandboxProfile(
+      cwd,
+      { read: [], write: [] },
+      { ...profile, provider: "opencode" },
+      ["/bin/sh"],
+    );
+    expect(policy).toContain(
+      `(allow file-read* (literal "${process.env.HOME}/opencode.json"))`,
+    );
+    expect(policy).not.toContain(`(allow file-read* (subpath "${process.env.HOME}"))`);
   });
 
   test("grants configured runtime paths before the worker creates them", () => {
@@ -129,9 +163,23 @@ describe("task scope", () => {
     for (const { provider, command } of workers) {
       if (!Bun.which(command)) continue;
       const worker = { ...profile, provider };
+      const workerCwd = provider === "opencode" ? realpathSync(join(import.meta.dir, "..")) : cwd;
+      const args = provider === "opencode"
+        ? [command, "debug", "config", "--pure"]
+        : [command, "--version"];
       const child = Bun.spawn(
-        sandboxedCommand([command, "--version"], cwd, { read: [], write: [] }, worker, scratch),
-        { cwd, stdout: "pipe", stderr: "pipe", env: { ...process.env, TMPDIR: scratch } },
+        sandboxedCommand(args, workerCwd, { read: [], write: [] }, worker, scratch),
+        {
+          cwd: workerCwd,
+          stdout: "pipe",
+          stderr: "pipe",
+          env: {
+            ...process.env,
+            PWD: workerCwd,
+            TMPDIR: scratch,
+            ...(provider === "opencode" ? { GIT_CONFIG_GLOBAL: "/dev/null" } : {}),
+          },
+        },
       );
       const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
       if (exitCode !== 0) throw new Error(`${provider} sandbox startup exited ${exitCode}: ${stderr}`);

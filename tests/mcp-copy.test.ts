@@ -32,6 +32,19 @@ describe("MCP consent copy", () => {
     expect(DELEGATE_DESCRIPTION).toContain("never one flattened paragraph");
   });
 
+  test("positions delegation for second opinions and usage capacity", () => {
+    expect(MCP_INSTRUCTIONS).toContain("second opinion");
+    expect(MCP_INSTRUCTIONS).toContain("not limited to coding");
+    expect(DELEGATE_DESCRIPTION).toContain("another model");
+    expect(DELEGATE_DESCRIPTION).toContain("usage limit");
+  });
+
+  test("explains durable shared project memory", () => {
+    expect(MCP_INSTRUCTIONS).toContain("memory tool");
+    expect(MCP_INSTRUCTIONS).toContain("never store secrets");
+    expect(MCP_INSTRUCTIONS).toContain("automatically includes memories");
+  });
+
   test("names the destination in dynamic delegate consent", () => {
     const description = dynamicDelegateDescription(profile);
 

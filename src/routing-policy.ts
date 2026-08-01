@@ -33,7 +33,7 @@ export class RoutingPolicyError extends Error {
   }
 }
 
-export async function loadRoutingPolicy(cwd = process.cwd()): Promise<RoutingPolicy | undefined> {
+export async function loadRoutingPolicy(cwd: string): Promise<RoutingPolicy | undefined> {
   const path = join(resolve(cwd), POLICY_FILE);
   let source: string;
   try {

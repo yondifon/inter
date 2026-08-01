@@ -45,6 +45,24 @@ function task(state: Task["state"] = "queued"): Task {
 }
 
 describe("SQLite state store", () => {
+  test("persists project memories and protects concurrent updates", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [] });
+    const first = store.setMemory("/tmp/project-a", "architecture/db", "Use SQLite");
+    expect(first.version).toBe(1);
+    expect(store.listMemories("/tmp/project-b")).toEqual([]);
+    expect(store.setMemory("/tmp/project-a", "architecture/db", "Use WAL", 1).version).toBe(2);
+    expect(() => store.setMemory("/tmp/project-a", "architecture/db", "stale", 1))
+      .toThrow("memory version conflict: expected 1, found 2");
+    store.close();
+
+    const reopened = new StateStore({ path: db, seedProfiles: [] });
+    expect(reopened.getMemory("/tmp/project-a", "architecture/db")?.value).toBe("Use WAL");
+    expect(reopened.deleteMemory("/tmp/project-a", "architecture/db", 2)).toBe(true);
+    expect(reopened.getMemory("/tmp/project-a", "architecture/db")).toBeUndefined();
+    reopened.close();
+  });
+
   test("starts without default profiles and preserves user deletion", () => {
     const { db } = paths();
     const first = new StateStore({ path: db, seedProfiles: [] });

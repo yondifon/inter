@@ -7,6 +7,7 @@ import { sessionIdFrom } from "./adapters";
 import type {
   BrokerSettings,
   Profile,
+  MemoryEntry,
   Task,
   TaskCompletion,
   TaskState,
@@ -163,6 +164,54 @@ export class StateStore {
       INSERT INTO settings(key, value) VALUES (?, ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
     `).run("dynamic_profile_tools", settings.dynamicProfileTools ? "1" : "0");
+  }
+
+  listMemories(cwd: string): MemoryEntry[] {
+    return this.database.query<{
+      cwd: string; key: string; value: string; version: number; created_at: string; updated_at: string;
+    }, [string]>(`
+      SELECT cwd, key, value, version, created_at, updated_at
+      FROM memories WHERE cwd = ? ORDER BY key
+    `).all(resolve(cwd)).map(memoryFromRow);
+  }
+
+  getMemory(cwd: string, key: string): MemoryEntry | undefined {
+    const row = this.database.query<{
+      cwd: string; key: string; value: string; version: number; created_at: string; updated_at: string;
+    }, [string, string]>(`
+      SELECT cwd, key, value, version, created_at, updated_at
+      FROM memories WHERE cwd = ? AND key = ?
+    `).get(resolve(cwd), key);
+    return row ? memoryFromRow(row) : undefined;
+  }
+
+  setMemory(cwd: string, key: string, value: string, expectedVersion?: number): MemoryEntry {
+    const project = resolve(cwd);
+    const current = this.getMemory(project, key);
+    if (expectedVersion !== undefined && (current?.version ?? 0) !== expectedVersion) {
+      throw new Error(`memory version conflict: expected ${expectedVersion}, found ${current?.version ?? 0}`);
+    }
+    const now = new Date().toISOString();
+    this.database.query(`
+      INSERT INTO memories(cwd, key, value, version, created_at, updated_at)
+      VALUES (?, ?, ?, 1, ?, ?)
+      ON CONFLICT(cwd, key) DO UPDATE SET
+        value = excluded.value,
+        version = memories.version + 1,
+        updated_at = excluded.updated_at
+    `).run(project, key, value, now, now);
+    return this.getMemory(project, key)!;
+  }
+
+  deleteMemory(cwd: string, key: string, expectedVersion?: number): boolean {
+    const project = resolve(cwd);
+    const current = this.getMemory(project, key);
+    if (!current) return false;
+    if (expectedVersion !== undefined && current.version !== expectedVersion) {
+      throw new Error(`memory version conflict: expected ${expectedVersion}, found ${current.version}`);
+    }
+    return this.database.query("DELETE FROM memories WHERE cwd = ? AND key = ?")
+      .run(project, key).changes === 1;
   }
 
   createTask(task: Task): void {
@@ -606,6 +655,15 @@ export class StateStore {
         consecutive_failures INTEGER NOT NULL,
         retry_at TEXT
       );
+      CREATE TABLE IF NOT EXISTS memories (
+        cwd TEXT NOT NULL,
+        key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        version INTEGER NOT NULL DEFAULT 1 CHECK(version > 0),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(cwd, key)
+      );
       INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (1, 'profiles tasks and events');
     `);
     const columns = new Set(this.database.query<{ name: string }, []>(
@@ -641,6 +699,10 @@ export class StateStore {
     this.database.query(`
       INSERT OR IGNORE INTO schema_migrations(version, name)
       VALUES (4, 'task worker session ids')
+    `).run();
+    this.database.query(`
+      INSERT OR IGNORE INTO schema_migrations(version, name)
+      VALUES (6, 'project memories')
     `).run();
     const backfilled = this.database.query<{ version: number }, []>(
       "SELECT version FROM schema_migrations WHERE version = 5",
@@ -790,6 +852,19 @@ export class StateStore {
       throw error;
     }
   }
+}
+
+function memoryFromRow(row: {
+  cwd: string; key: string; value: string; version: number; created_at: string; updated_at: string;
+}): MemoryEntry {
+  return {
+    cwd: row.cwd,
+    key: row.key,
+    value: row.value,
+    version: row.version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
 let sharedStore: StateStore | undefined;

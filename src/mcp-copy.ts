@@ -1,7 +1,9 @@
 import type { Profile } from "./types";
 
 export const MCP_INSTRUCTIONS = [
-  "Use Inter for bounded coding work that can start from a prompt plus cwd.",
+  "Use Inter to ask another AI provider for a second opinion, explore ideas from another model, or keep work moving when the current provider is near its usage limit.",
+  "Inter supports any bounded task that can start from a prompt plus cwd; it is not limited to coding.",
+  "Use the memory tool for durable project decisions, constraints, and conventions shared across callers and workers; never store secrets or transient task status. Delegation automatically includes memories for its cwd.",
   "Delegation may send the prompt and worker-read project data to an external CLI account.",
   "Before the first delegate call, confirm the user explicitly approved the destination profile/provider and data scope.",
   "If the destination is automatic, call route first without reading file contents, then ask: “Allow Inter to share <scope> with <provider> profile <label> for this task?”",
@@ -17,7 +19,9 @@ export const MCP_INSTRUCTIONS = [
 ].join(" ");
 
 export const DELEGATE_DESCRIPTION = [
-  "Hand off bounded coding work.",
+  "Ask an external AI provider to handle a new scoped task.",
+  "Use to get an independent second opinion, explore an idea with another model, or keep working when the current provider is near its usage limit.",
+  "Supports any bounded task that can run from a prompt and cwd, including research, writing, analysis, review, and coding; use wait or inspect for work already started.",
   "This may share the prompt and worker-read project data with an external CLI account.",
   "Before calling, ensure the user explicitly approved the named destination and data scope; otherwise call route, then ask for consent.",
   "Omit profile/model for automatic quality-cost-speed routing only after that approval; explicit user choices override routing.",
@@ -30,9 +34,10 @@ export const DELEGATE_DESCRIPTION = [
 export function dynamicDelegateDescription(profile: Profile): string {
   const capabilities = profile.capabilities.length > 0
     ? profile.capabilities.join(", ")
-    : "general coding";
+    : "general";
   return [
-    `Delegate ${capabilities} work to ${profile.label} (${profile.provider}); default model: ${profile.model}.`,
+    `Start a new scoped ${capabilities} task with ${profile.label} (${profile.provider}); default model: ${profile.model}.`,
+    "Use this named tool to get that provider's second opinion or when the current provider is low on capacity; use delegate for automatic routing or another profile.",
     "This may share the prompt and worker-read project data with that external CLI account.",
     `Before calling, ask: “Allow Inter to share <scope> with ${profile.provider} profile ${profile.label} for this task?” unless the user's current approval already covers it.`,
   ].join(" ");

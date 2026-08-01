@@ -7,7 +7,12 @@ import {
   interpretWorkerOutcome,
   workerPrompt,
 } from "../src/task-protocol";
-import { delegate, needsInputQuestion, recordProfileTaskOutcome } from "../src/tasks";
+import {
+  antigravityBootstrapRetryReason,
+  delegate,
+  needsInputQuestion,
+  recordProfileTaskOutcome,
+} from "../src/tasks";
 import { closeStateStore } from "../src/store";
 
 describe("delegate workspace roots", () => {
@@ -190,5 +195,56 @@ describe("profile outcome recording", () => {
       interpretWorkerOutcome(1, "", "statusCode: 429 Too many requests"),
     );
     expect(calls).toEqual(["rate_limit"]);
+  });
+});
+
+describe("Antigravity bootstrap retry", () => {
+  const networkFailure = JSON.stringify({
+    event: "result",
+    result: {
+      conversation_id: "",
+      status: "ERROR",
+      error: "Eligibility check failed: failed to get profile picture: dial tcp: connect: no route to host",
+      num_turns: 0,
+    },
+  });
+
+  test("retries only bounded zero-turn profile-picture network failures", () => {
+    expect(antigravityBootstrapRetryReason("antigravity", 0, undefined, 1, networkFailure))
+      .toContain("Eligibility check failed");
+    expect(antigravityBootstrapRetryReason("antigravity", 1, undefined, 1, networkFailure))
+      .toContain("Eligibility check failed");
+    expect(antigravityBootstrapRetryReason("antigravity", 2, undefined, 1, networkFailure))
+      .toBeUndefined();
+  });
+
+  test("does not retry after a session, a turn, or a non-network failure", () => {
+    expect(antigravityBootstrapRetryReason("antigravity", 0, "session-1", 1, networkFailure))
+      .toBeUndefined();
+    expect(antigravityBootstrapRetryReason("opencode", 0, undefined, 1, networkFailure))
+      .toBeUndefined();
+    expect(antigravityBootstrapRetryReason(
+      "antigravity",
+      0,
+      undefined,
+      1,
+      networkFailure.replace('"num_turns":0', '"num_turns":1'),
+    )).toBeUndefined();
+    expect(antigravityBootstrapRetryReason(
+      "antigravity",
+      0,
+      undefined,
+      1,
+      networkFailure.replace("no route to host", "not logged in"),
+    )).toBeUndefined();
+    expect(antigravityBootstrapRetryReason("antigravity", 0, undefined, 2, networkFailure))
+      .toBeUndefined();
+    expect(antigravityBootstrapRetryReason(
+      "antigravity",
+      0,
+      undefined,
+      1,
+      networkFailure.replace('"conversation_id":""', '"missing_conversation_id":""'),
+    )).toBeUndefined();
   });
 });

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { cancelTask, delegate, getTask, reply, resumeTask, waitForTasks } from "../src/tasks";
@@ -62,6 +62,28 @@ function setupClaudeBin(script: string): { cwd: string; profile: Profile } {
   return { cwd: root, profile };
 }
 
+function setupAntigravityBin(script: string): { cwd: string; profile: Profile } {
+  const root = mkdtempSync(join(tmpdir(), "inter-lifecycle-"));
+  roots.push(root);
+  process.env.INTER_DB = join(root, "inter.db");
+  process.env.INTER_ROOTS = root;
+  const binDir = join(root, "bin");
+  mkdirSync(binDir);
+  writeFileSync(join(binDir, "agy"), script, { mode: 0o755 });
+  process.env.PATH = `${binDir}:${initialPath}`;
+  const profile: Profile = {
+    id: "fake-antigravity",
+    label: "Fake Antigravity",
+    provider: "antigravity",
+    model: "flash",
+    enabled: true,
+    env: {},
+    capabilities: [],
+  };
+  stateStore().saveProfiles([profile]);
+  return { cwd: root, profile };
+}
+
 async function waitForAttention(taskId: string) {
   let cursor = stateStore().latestTaskEventId([taskId], true);
   for (let attempt = 0; attempt < 10; attempt++) {
@@ -98,6 +120,28 @@ describe("task lifecycle integration", () => {
       error: "task exceeded timeoutMs 50",
       completion: { code: "timeout" },
     });
+  });
+
+  integrationTest("retries a zero-turn Antigravity bootstrap network failure", async () => {
+    const { cwd, profile } = setupAntigravityBin([
+      "#!/bin/sh",
+      "count=0",
+      "test -f retry-count && count=$(/bin/cat retry-count)",
+      "count=$((count + 1))",
+      "printf '%s' \"$count\" > retry-count",
+      "if test \"$count\" -lt 3; then",
+      "  printf '%s\\n' '{\"event\":\"result\",\"result\":{\"conversation_id\":\"\",\"status\":\"ERROR\",\"error\":\"Eligibility check failed: failed to get profile picture: dial tcp: i/o timeout\",\"num_turns\":0}}'",
+      "  exit 1",
+      "fi",
+      "printf '%s\\n' '{\"event\":\"result\",\"result\":{\"conversation_id\":\"session-1\",\"status\":\"SUCCESS\",\"response\":\"Done.\\nINTER_RESULT: completed\",\"num_turns\":1}}'",
+      "",
+    ].join("\n"));
+    const task = await delegate(profile.id, "do work", cwd);
+    await waitForAttention(task.id);
+    expect(getTask(task.id)).toMatchObject({ state: "completed" });
+    expect(readFileSync(join(cwd, "retry-count"), "utf8")).toBe("3");
+    expect(stateStore().listTaskEvents(task.id).filter((event) => event.type === "provider_retry"))
+      .toHaveLength(2);
   });
 
   integrationTest("names the structural limitation when a custom-command profile resumes", async () => {
@@ -206,5 +250,31 @@ describe("task lifecycle integration", () => {
     await waitForAttention(resumed.id);
     expect(getTask(resumed.id)).toMatchObject({ state: "completed", parentTaskId: failed.id });
     expect(getTask(failed.id)?.childTaskId).toBe(resumed.id);
+  });
+
+  // The broker inherits PWD from whatever shell launched the app. A worker that
+  // trusts PWD over getcwd would read that directory, which the sandbox denies,
+  // so the task directory has to be the only one the worker can see.
+  integrationTest("names the task directory as the worker's only cwd", async () => {
+    const { cwd, profile } = setup([
+      "/bin/sh",
+      "-c",
+      'printf "%s\\n%s" "$PWD" "$(pwd -P)" > pwd.txt; printf "INTER_RESULT: completed\\n"',
+    ]);
+    const previousPwd = process.env.PWD;
+    process.env.PWD = "/Users/nobody/some-other-checkout";
+    try {
+      const task = await delegate(profile.id, "record cwd", cwd, undefined, undefined, {
+        scope: { read: [], write: ["pwd.txt"] },
+      });
+      await waitForAttention(task.id);
+      expect(getTask(task.id)).toMatchObject({ state: "completed" });
+      const [announced, actual] = readFileSync(join(cwd, "pwd.txt"), "utf8").split("\n");
+      expect(announced).toBe(cwd);
+      expect(actual).toBe(realpathSync(cwd));
+    } finally {
+      if (previousPwd === undefined) delete process.env.PWD;
+      else process.env.PWD = previousPwd;
+    }
   });
 });

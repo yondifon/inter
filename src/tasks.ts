@@ -8,12 +8,14 @@ import { taskEventView } from "./events";
 import { continuationPrompt, interpretWorkerOutcome, needsInputQuestion, workerPrompt } from "./task-protocol";
 import { normalizeTaskScope, sandboxedCommand, scopeRefusedWrite } from "./task-scope";
 import { stateStore, type StateStore, type TaskListQuery } from "./store";
+import { promptWithMemories } from "./memories";
 import { TaskWaiter, type TaskWaitResult, type WaitUntil } from "./task-waiter";
 import type { Profile, Task, TaskScope, TaskSummary } from "./types";
 
 const MAX_EVENT_LINE = 64 * 1024;
 const MAX_EVENTS = 5_000;
 const MAX_OUTPUT = 10 * 1024 * 1024;
+const MAX_ANTIGRAVITY_BOOTSTRAP_RETRIES = 2;
 const taskWaiter = new TaskWaiter(
   (id) => stateStore().getTask(id),
   (ids) => stateStore().latestTaskEventId(ids, true),
@@ -202,10 +204,26 @@ async function runTask(
   try {
     scratchDir = mkdtempSync(resolve(tmpdir(), "inter-worker-"));
     const hookUrl = `${Bun.env.INTER_BROKER_URL ?? `http://127.0.0.1:${Bun.env.INTER_PORT ?? 7331}`}/api/hooks/${task.id}`;
-    const prompt = workerPrompt(promptOverride ?? task.prompt, task.allowQuestions, task.scope);
+    const sharedPrompt = promptWithMemories(
+      promptOverride ?? task.prompt,
+      stateStore().listMemories(task.cwd),
+    );
+    const prompt = workerPrompt(sharedPrompt, task.allowQuestions, task.scope);
     const env = {
       ...Bun.env,
       ...profileEnv(profile),
+      // Bun.spawn sets the real working directory but leaves PWD inherited from
+      // whatever shell launched the broker. Workers that trust PWD over getcwd
+      // (opencode stats it at startup) would probe that directory and take an
+      // EPERM from the sandbox, so the task cwd is the only directory a worker
+      // ever learns about.
+      PWD: task.cwd,
+      OLDPWD: task.cwd,
+      // OpenCode shells out to Git while locating the project root. Reading a
+      // user's global Git config is outside delegated scope and may follow
+      // arbitrary include paths, so project discovery uses repository-local
+      // metadata only.
+      ...(profile.provider === "opencode" ? { GIT_CONFIG_GLOBAL: "/dev/null" } : {}),
       TMPDIR: scratchDir,
       INTER_TASK_ID: task.id,
       INTER_HOOK_URL: hookUrl,
@@ -220,6 +238,7 @@ async function runTask(
     let stdout = "";
     let stderr = "";
     let exitCode = 0;
+    let bootstrapRetries = 0;
     while (true) {
       const command = resumeWith
         ? resumeCommandFor(profile, prompt, task.cwd, resumeWith, task.model, hookUrl)
@@ -323,6 +342,29 @@ async function runTask(
         readStream(child.stderr, undefined, MAX_EVENT_LINE),
         child.exited,
       ]);
+      const retryReason = antigravityBootstrapRetryReason(
+        profile.provider,
+        bootstrapRetries,
+        task.sessionId,
+        attemptEvents,
+        stdout,
+      );
+      if (
+        exitCode !== 0 && !resumeWith && !profile.command && !oversizedLine &&
+        !eventCaptureStopped && retryReason && !active.cancelled &&
+        stateStore().getTask(task.id)?.state !== "cancelled"
+      ) {
+        bootstrapRetries++;
+        appendTaskEvent(task.id, "provider_retry", task.state, {
+          provider: profile.provider,
+          attempt: bootstrapRetries + 1,
+          maxAttempts: MAX_ANTIGRAVITY_BOOTSTRAP_RETRIES + 1,
+          error: retryReason,
+        });
+        await Bun.sleep(bootstrapRetries * 1_000);
+        if (active.cancelled || stateStore().getTask(task.id)?.state === "cancelled") return;
+        continue;
+      }
       // Never turn a failed resume into a fresh session. A fresh worker would
       // receive the answer but lose the provider's accumulated context.
       if (
@@ -376,6 +418,38 @@ async function runTask(
     if (activeWorkers.get(task.id) === active) activeWorkers.delete(task.id);
     if (scratchDir) rmSync(scratchDir, { recursive: true, force: true });
   }
+}
+
+export function antigravityBootstrapRetryReason(
+  provider: Profile["provider"],
+  retries: number,
+  sessionId: string | undefined,
+  attemptEvents: number,
+  stdout: string,
+): string | undefined {
+  if (
+    provider !== "antigravity" || retries >= MAX_ANTIGRAVITY_BOOTSTRAP_RETRIES ||
+    sessionId || attemptEvents !== 1
+  ) return undefined;
+  for (const line of stdout.trimEnd().split(/\r?\n/).reverse()) {
+    try {
+      const event = JSON.parse(line) as Record<string, unknown>;
+      if (event.event !== "result") continue;
+      const result = event.result;
+      if (!result || typeof result !== "object" || Array.isArray(result)) return undefined;
+      const value = result as Record<string, unknown>;
+      if (
+        value.status !== "ERROR" || value.num_turns !== 0 || value.conversation_id !== ""
+      ) return undefined;
+      const error = typeof value.error === "string" ? value.error : "";
+      if (
+        !/eligibility check failed: failed to get profile picture/i.test(error) ||
+        !/(?:no route to host|i\/o timeout|connection timed out|temporary failure|connection reset)/i.test(error)
+      ) return undefined;
+      return error.replace(/\s+/g, " ").trim().slice(0, 500);
+    } catch {}
+  }
+  return undefined;
 }
 
 function lastWorkerErrorDetail(

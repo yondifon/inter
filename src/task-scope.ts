@@ -61,6 +61,8 @@ export function sandboxProfile(
       '(allow file-write* (regex #"^/tmp/claude-[^/]*-cwd(/.*)?$"))',
       '(allow file-write* (regex #"^/private/tmp/claude-[^/]*-cwd(/.*)?$"))',
     ]
+    : profile.provider === "opencode"
+    ? opencodeBootstrapRules(workspace)
     : [];
   const metadataRules = ancestorsForRules(workspace, [...scope.read, ...scope.write]).map((path) =>
     `(allow file-read-metadata (literal ${quote(path)}))(allow file-read-data (literal ${quote(path)}))`
@@ -82,6 +84,32 @@ export function sandboxProfile(
     ...readRules,
     ...writeRules,
   ].join("");
+}
+
+// OpenCode finds the project boundary through Git before it loads project
+// config. Its Git subprocess must see only the identity files it needs: opening
+// all of .git would let a narrow-scope worker reconstruct every committed file.
+// When cwd is not a Git root, OpenCode treats it as a global project and probes
+// the legacy top-level home config candidates instead.
+function opencodeBootstrapRules(workspace: string): string[] {
+  const configNames = ["opencode.json", "opencode.jsonc"];
+  const paths = configNames.flatMap((name) => [
+    resolve(workspace, name),
+    resolve(workspace, ".opencode", name),
+  ]);
+  const gitDir = resolve(workspace, ".git");
+  if (existsSync(gitDir)) {
+    paths.push(
+      gitDir,
+      resolve(gitDir, "HEAD"),
+      resolve(gitDir, "config"),
+      resolve(gitDir, "commondir"),
+      resolve(gitDir, "opencode"),
+    );
+  } else {
+    for (const name of configNames) paths.push(resolve(homedir(), name));
+  }
+  return unique(paths).map((path) => `(allow file-read* (literal ${quote(path)}))`);
 }
 
 // Mirrors the seatbelt write rules so the broker can call a refusal before the

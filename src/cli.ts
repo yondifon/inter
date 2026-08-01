@@ -26,10 +26,11 @@ import { taskEventView } from "./events";
 import { DELEGATE_DESCRIPTION, MCP_INSTRUCTIONS, dynamicDelegateDescription } from "./mcp-copy";
 import { defaultModelFor } from "./provider-defaults";
 import { normalizeProfile } from "./profile-input";
+import { deleteMemory, getMemory, listMemories, setMemory } from "./memories";
 
 const port = Number(Bun.env.INTER_PORT ?? 7331);
-const VERSION = "0.3.2";
-const MCP_CONTRACT_VERSION = 9;
+const VERSION = "0.4.0";
+const MCP_CONTRACT_VERSION = 11;
 // Idle transports get cut somewhere above ~2 minutes (field-observed: waits of
 // 180s+ died with socket-closed errors, ≤120s never did). Answer before that
 // with reason "timeout" and a cursor so clients re-poll instead of erroring.
@@ -250,18 +251,18 @@ async function createMcpServer(): Promise<McpServer> {
     return result({ ...startedTask(task), selection });
   });
   server.registerTool("route", {
-    description: "Preview Inter's model choice and top candidates without starting work.",
+    description: "Choose a profile and model for a proposed task without starting it. Use before delegate to compare providers by quality, cost, speed, and available rate-limit headroom, especially when the current provider is low on usage.",
     inputSchema: z.object({
       prompt: z.string().min(1).max(64_000),
       modelHint: z.string().min(1).max(200).optional(),
       preference: z.enum(["balanced", "quality", "cost", "speed"]).optional(),
-      cwd: z.string().min(1).optional(),
+      cwd: z.string().min(1),
     }),
   }, async ({ prompt, modelHint, preference, cwd }) => result(
     await routeModel(prompt, { modelHint, preference, cwd }),
   ));
   server.registerTool("inspect", {
-    description: "Read one delegated task, including its provider-native resume sessionId when captured. Prefer wait when work is still running.",
+    description: "Get the full current snapshot of one delegated task, including its prompt, output, state, and provider sessionId. Use for an immediate lookup; use wait to follow running work.",
     inputSchema: z.object({ taskId: z.string() }),
   }, async ({ taskId }) => {
     const task = getTask(taskId);
@@ -269,7 +270,7 @@ async function createMcpServer(): Promise<McpServer> {
     return result(task);
   });
   server.registerTool("wait", {
-    description: "Block until meaningful progress or attention. Returns events, progress, and task snapshots with provider-native sessionId when captured. until \"attention\" sleeps through progress events and returns only for needs_input or terminal states — use it for long tasks instead of absorbing a wake every few seconds. A single call blocks at most 110s regardless of timeoutMs; on reason \"timeout\", call again with the returned cursor.",
+    description: "Follow one to eight delegated tasks until new progress, a question, completion, or timeout. Use after delegate, reply, or resume; pass the returned cursor as afterCursor on the next call. Set until to \"attention\" for long tasks when only questions or terminal states matter. Each call blocks for at most 110 seconds, so call wait again after a timeout.",
     inputSchema: z.object({
       taskIds: z.array(z.string()).min(1).max(8),
       timeoutMs: z.number().int().min(1).max(300_000).default(30_000),
@@ -280,11 +281,11 @@ async function createMcpServer(): Promise<McpServer> {
     await waitForTasks(taskIds, Math.min(timeoutMs, MAX_WAIT_BLOCK_MS), extra.mcpReq.signal, afterCursor, until),
   ));
   server.registerTool("health", {
-    description: "Report broker and MCP contract versions.",
+    description: "Check whether the Inter broker is running and read its broker and MCP contract versions. Use for connection or compatibility diagnosis, not worker availability.",
     inputSchema: z.object({}),
   }, async () => result({ status: "ok", version: VERSION, mcpContractVersion: MCP_CONTRACT_VERSION }));
   server.registerTool("tasks", {
-    description: "List concise task summaries, including provider-native sessionId when captured. Use inspect for full prompt and output.",
+    description: "Find recent delegated tasks by state, time, or profile. Returns concise summaries for task discovery; use inspect for a task's full prompt and output, or wait to follow active work.",
     inputSchema: z.object({
       limit: z.number().int().min(1).max(100).default(20),
       state: taskStateSchema.optional(),
@@ -292,12 +293,31 @@ async function createMcpServer(): Promise<McpServer> {
       profile: z.string().optional(),
     }),
   }, async (query) => result(listTaskSummaries(query)));
+  server.registerTool("memory", {
+    description: "Read or update durable project facts shared across Inter callers and delegated workers. Delegation automatically includes active memories for its cwd. Store decisions, constraints, and conventions; never store secrets or transient task status. Use expectedVersion to prevent concurrent overwrites.",
+    inputSchema: z.object({
+      action: z.enum(["list", "get", "set", "remove"]),
+      cwd: z.string().min(1),
+      key: z.string().optional(),
+      value: z.string().optional(),
+      expectedVersion: z.number().int().min(0).optional(),
+    }),
+  }, async ({ action, cwd, key, value, expectedVersion }) => {
+    if (action === "list") return result(listMemories(cwd));
+    if (!key) throw new Error(`memory ${action} requires key`);
+    if (action === "get") return result(getMemory(cwd, key) ?? null);
+    if (action === "set") {
+      if (value === undefined) throw new Error("memory set requires value");
+      return result(setMemory(cwd, key, value, expectedVersion));
+    }
+    return result({ removed: deleteMemory(cwd, key, expectedVersion) });
+  });
   server.registerTool("reply", {
-    description: "Answer a needs_input question in the same task and provider session. Wait on the same returned task ID.",
+    description: "Answer a question from a task in needs_input state and continue it in the same provider session. Use only for requested input; then wait on the same returned task ID.",
     inputSchema: z.object({ taskId: z.string(), answer: z.string().min(1) }),
   }, async ({ taskId, answer }) => result(startedTask(await reply(taskId, answer))));
   server.registerTool("resume", {
-    description: "Resume a failed, cancelled, or blocked task in its captured provider session. Returns a linked continuation task; wait on the returned task ID.",
+    description: "Retry a failed, cancelled, or blocked task in its captured provider session, with an optional new instruction. Returns a linked continuation task; use wait on the new task ID. Use reply instead when the task needs input.",
     inputSchema: z.object({
       taskId: z.string(),
       instruction: z.string().min(1).max(64_000).optional(),
@@ -306,18 +326,18 @@ async function createMcpServer(): Promise<McpServer> {
   }, async ({ taskId, instruction, timeoutMs }) =>
     result(startedTask(await resumeTask(taskId, instruction, timeoutMs))));
   server.registerTool("cancel", {
-    description: "Stop a queued or running task and its worker process tree.",
+    description: "Stop a queued or running delegated task and its worker process tree. Use when the work is no longer useful; this does not delete the task record.",
     inputSchema: z.object({
       taskId: z.string(),
       reason: z.string().min(1).max(500).optional(),
     }),
   }, async ({ taskId, reason }) => result(await cancelTask(taskId, reason)));
   server.registerTool("profiles", {
-    description: "List CLI accounts and their default models.",
+    description: "List configured AI provider profiles, capabilities, and default models. Use to choose a provider for a second opinion or more usage capacity; use status to check availability and models to browse model IDs.",
     inputSchema: z.object({}),
   }, async () => result(publicProfiles((await loadConfig()).profiles)));
   server.registerTool("models", {
-    description: "List models available to enabled CLI account profiles. Filter by profile or provider; refresh bypasses the five-minute cache.",
+    description: "List model IDs offered by enabled CLI account profiles. Use to choose a model for route or delegate; filter by profile or provider, and set refresh to bypass the five-minute catalog cache.",
     inputSchema: z.object({
       profile: z.string().optional(),
       provider: z.enum(["claude", "codex", "opencode", "antigravity"]).optional(),
@@ -325,7 +345,7 @@ async function createMcpServer(): Promise<McpServer> {
     }),
   }, async (query) => result(await listModels(query)));
   server.registerTool("status", {
-    description: "Report normalized profile/model availability. Refresh uses safe catalog checks only and never sends a generation prompt. Opencode usage stats are not supported.",
+    description: "Check whether profiles and models are available, unavailable, or unknown. Use before delegation when account or model readiness is uncertain. Refresh performs safe catalog checks without sending a generation prompt; use usage for rate-limit windows.",
     inputSchema: z.object({
       profile: z.string().optional(),
       model: z.string().min(1).max(200).optional(),
@@ -334,7 +354,7 @@ async function createMcpServer(): Promise<McpServer> {
     }),
   }, async (query) => result(await listProfileStatuses(query)));
   server.registerTool("usage", {
-    description: "Report provider rate-limit usage per profile (session and weekly windows) without spending tokens. Claude reads the local /usage command; codex reads the latest session log; opencode is not supported.",
+    description: "Read session and weekly rate-limit usage for each profile without spending inference tokens. Use to find capacity on another provider and spread work across model quotas; use status for availability. Claude and Codex are supported; OpenCode is not.",
     inputSchema: z.object({
       profile: z.string().optional(),
       provider: z.enum(["claude", "codex", "opencode", "antigravity"]).optional(),

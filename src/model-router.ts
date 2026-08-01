@@ -41,17 +41,23 @@ export interface ModelRoute {
   warnings: string[];
 }
 
-export interface RouteOptions {
+export interface RoutePreferences {
   preference?: RoutePreference;
   modelHint?: string;
-  cwd?: string;
 }
 
-export async function routeModel(prompt: string, options: RouteOptions = {}): Promise<ModelRoute> {
+export interface RouteOptions extends RoutePreferences {
+  /// The target directory the work runs in. Required so the project policy is
+  /// read from the workspace under discussion and never from the broker's own
+  /// location, which reflects wherever the app happened to be launched.
+  cwd: string;
+}
+
+export async function routeModel(prompt: string, options: RouteOptions): Promise<ModelRoute> {
   const [models, config, policy, usage] = await Promise.all([
     listModels(),
     loadConfig(),
-    options.cwd === undefined ? Promise.resolve(undefined) : loadRoutingPolicy(options.cwd),
+    loadRoutingPolicy(options.cwd),
     listProfileUsage().catch(() => [] as ProfileUsage[]),
   ]);
   const store = stateStore();
@@ -68,7 +74,7 @@ export function chooseModel(
   prompt: string,
   models: ModelInfo[],
   profiles: Profile[],
-  options: RouteOptions = {},
+  options: RoutePreferences = {},
   statuses: ProfileStatus[] = [],
   policy?: RoutingPolicy,
   usage: ProfileUsage[] = [],
