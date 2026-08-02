@@ -193,6 +193,7 @@ function runtimeReadPaths(profile: Profile, command: string[], scratchDir: strin
     resolve(userHome, ".local/share/claude"),
     resolve(userHome, ".bun"),
     ...rustRuntimeReadPaths(userHome),
+    ...gitRuntimeReadPaths(userHome),
     resolve(userHome, "Library/Keychains"),
     "/Library/Keychains",
   ];
@@ -217,6 +218,22 @@ function runtimeWritePaths(profile: Profile, scratchDir: string): string[] {
     paths.push(resolve("/tmp", name), resolve("/private/tmp", name));
   }
   return unique(paths.flatMap((path) => [path, realpathIfPresent(path)]));
+}
+
+// Git reads its global config before it will run any command, so a worker
+// without it gets "fatal: unable to access '~/.gitconfig'" instead of a diff.
+// The config is granted rather than suppressed: pointing GIT_CONFIG_GLOBAL at
+// /dev/null also strips user.name, aliases, and safe.directory, which breaks
+// the ordinary Git work a delegated task is there to do. Only the config files
+// are readable — repository contents stay governed by the task scope, and an
+// include.path aimed outside that scope is still denied.
+function gitRuntimeReadPaths(userHome: string): string[] {
+  const xdgConfig = runtimeHome(Bun.env.XDG_CONFIG_HOME, resolve(userHome, ".config"), userHome);
+  return [
+    ...(Bun.env.GIT_CONFIG_GLOBAL ? [resolve(Bun.env.GIT_CONFIG_GLOBAL)] : []),
+    resolve(userHome, ".gitconfig"),
+    resolve(xdgConfig, "git"),
+  ];
 }
 
 function rustRuntimeReadPaths(userHome: string): string[] {

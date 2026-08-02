@@ -42,6 +42,27 @@ export interface ResumeOptions {
   timeoutMs?: number;
 }
 
+/**
+ * Reads a run's own report of what it spent. Providers put it either at the top
+ * of the result event or one level down under `result`.
+ */
+export function runCostFrom(payload: Record<string, unknown>): { costUsd?: number; turns?: number } {
+  const nested = payload.result && typeof payload.result === "object" && !Array.isArray(payload.result)
+    ? payload.result as Record<string, unknown>
+    : {};
+  const costUsd = numberOr(nested.total_cost_usd, payload.total_cost_usd);
+  const turns = numberOr(nested.num_turns, payload.num_turns);
+  return {
+    ...(costUsd === undefined ? {} : { costUsd }),
+    ...(turns === undefined ? {} : { turns }),
+  };
+}
+
+function numberOr(...values: unknown[]): number | undefined {
+  for (const value of values) if (typeof value === "number" && Number.isFinite(value)) return value;
+  return undefined;
+}
+
 export function listTasks(archived: TaskListQuery["archived"] = "active"): Task[] {
   return stateStore().listTasks(200, archived);
 }
@@ -113,7 +134,7 @@ export async function delegate(
   parentTaskId?: string,
   options: DelegateOptions = {},
 ): Promise<Task> {
-  const { task, profile } = await prepareTask(
+  const { task, profile, inheritedFrom } = await prepareTask(
     profileId,
     prompt,
     cwd,
@@ -122,8 +143,31 @@ export async function delegate(
     options,
   );
   stateStore().createTask(task);
+  // Record and flag, never block: the caller stated no scope and this cwd has
+  // none on file, so the run gets whole-tree access and says so out loud.
+  if (!task.grantId) {
+    appendTaskEvent(task.id, "scope_ungranted", task.state, {
+      scope: task.scope,
+      reason: "no scope stated and no grant on file for this cwd; defaulted to the whole working tree",
+    });
+  } else if (inheritedFrom) {
+    appendTaskEvent(task.id, "scope_inherited", task.state, {
+      scope: task.scope,
+      approvedFor: inheritedFrom,
+      usedBy: profileId,
+      reason: `scope was approved for profile ${inheritedFrom}, not ${profileId}`,
+    });
+  }
   launchTask(task, profile);
   return task;
+}
+
+/** Set when a task reused a scope the user approved for a different destination. */
+export function scopeInheritanceWarning(task: Task): string | undefined {
+  const event = stateStore().listTaskEvents(task.id)
+    .find(({ type }) => type === "scope_inherited");
+  if (!event) return undefined;
+  return `${task.profileId} inherited a scope approved for ${event.payload.approvedFor}; state scope explicitly to approve this destination`;
 }
 
 async function prepareTask(
@@ -133,11 +177,11 @@ async function prepareTask(
   requestedModel?: string,
   parentTaskId?: string,
   options: DelegateOptions = {},
-): Promise<{ task: Task; profile: Profile }> {
+): Promise<{ task: Task; profile: Profile; inheritedFrom?: string }> {
   const workspace = await validateWorkspace(cwd);
   const config = await loadConfig();
   const profile = config.profiles.find((item) => item.id === profileId);
-  if (!profile) throw new Error(`unknown profile: ${profileId}`);
+  if (!profile) throw new Error(unknownProfileMessage(profileId, config.profiles));
   if (!profile.enabled) throw new Error(`profile disabled: ${profileId}`);
   const model = requestedModel?.trim() || profile.model;
   if (model.length > 200) throw new Error("model exceeds 200 characters");
@@ -150,6 +194,7 @@ async function prepareTask(
   validateTimeoutMs(timeoutMs);
 
   const now = new Date().toISOString();
+  const granted = resolveScope(workspace, profileId, options.scope);
   const task: Task = {
     id: crypto.randomUUID(),
     profileId,
@@ -160,12 +205,57 @@ async function prepareTask(
     createdAt: now,
     updatedAt: now,
     output: "",
-    scope: normalizeTaskScope(options.scope, workspace),
+    scope: granted.scope,
+    ...(granted.grantId ? { grantId: granted.grantId } : {}),
     allowQuestions: options.allowQuestions !== false,
     ...(parentTaskId ? { parentTaskId } : {}),
     ...(timeoutMs ? { timeoutMs } : {}),
   };
-  return { task, profile };
+  return { task, profile, ...(granted.inheritedFrom ? { inheritedFrom: granted.inheritedFrom } : {}) };
+}
+
+/**
+ * A stated scope becomes a grant on this cwd; a later call that states none
+ * reuses it. Falling back to the whole tree only happens when nothing was ever
+ * approved here, which makes the laziest call the narrowest one available
+ * rather than the widest.
+ */
+function resolveScope(
+  workspace: string,
+  profileId: string,
+  requested?: TaskScope,
+): { scope: TaskScope; grantId?: string; inheritedFrom?: string } {
+  const store = stateStore();
+  if (requested) {
+    const scope = normalizeTaskScope(requested, workspace);
+    return { scope, grantId: store.recordScopeGrant(workspace, profileId, scope).id };
+  }
+  const existing = store.latestScopeGrant(workspace, profileId);
+  if (existing) {
+    store.touchScopeGrant(existing.id);
+    return {
+      scope: existing.scope,
+      grantId: existing.id,
+      // Approval names a destination, not just a folder. Reusing a scope the
+      // user approved for a different provider is allowed but never silent.
+      ...(existing.profileId && existing.profileId !== profileId
+        ? { inheritedFrom: existing.profileId }
+        : {}),
+    };
+  }
+  return { scope: normalizeTaskScope(undefined, workspace) };
+}
+
+/** A dead-end id should say where the live ones are listed. */
+export function unknownTaskMessage(taskId: string): string {
+  return `unknown task: ${taskId} — call tasks to list recent task ids`;
+}
+
+function unknownProfileMessage(profileId: string, profiles: Profile[]): string {
+  const known = profiles.filter(({ enabled }) => enabled).map(({ id }) => id);
+  return known.length > 0
+    ? `unknown profile: ${profileId} — enabled profiles are ${known.join(", ")}`
+    : `unknown profile: ${profileId} — no profiles are enabled`;
 }
 
 async function validateWorkspace(cwd: string): Promise<string> {
@@ -209,6 +299,9 @@ async function runTask(
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   let active: ActiveWorker | undefined;
   let scratchDir: string | undefined;
+  // Declared out here so the finally block can bank it: the provider has
+  // already charged for whatever this run reported, however the run ends.
+  let runCost: { costUsd?: number; turns?: number } = {};
   try {
     scratchDir = mkdtempSync(resolve(tmpdir(), "inter-worker-"));
     const hookUrl = `${Bun.env.INTER_BROKER_URL ?? `http://127.0.0.1:${Bun.env.INTER_PORT ?? 7331}`}/api/hooks/${task.id}`;
@@ -217,6 +310,10 @@ async function runTask(
       stateStore().listMemories(task.cwd),
     );
     const prompt = workerPrompt(sharedPrompt, task.allowQuestions, task.scope);
+    // The caller's prompt is only part of what leaves the machine; store the
+    // real text so "what was sent to this provider" is answerable later.
+    stateStore().recordShippedPrompt(task.id, prompt);
+    task.shippedPrompt = prompt;
     const env = {
       ...Bun.env,
       ...profileEnv(profile),
@@ -314,6 +411,10 @@ async function runTask(
               : { value: parsed };
             const kind = typeof payload.type === "string" ? payload.type : "event";
             appendTaskEvent(task.id, `agent.${kind}`, task.state, payload);
+            // The run reports its own spend once, near the end; a retry inside
+            // this same run replaces it rather than adding to it.
+            const reported = runCostFrom(payload);
+            if (reported.costUsd !== undefined || reported.turns !== undefined) runCost = reported;
             lastAgentEventAt = Date.now();
             eventCount++;
             attemptEvents++;
@@ -443,6 +544,10 @@ async function runTask(
       }, ["running"]);
     }
   } finally {
+    // Every exit lands here: clean finish, cancel during a retry backoff, or a
+    // thrown spawn error. Anywhere else and a run the provider already billed
+    // for reports no spend at all.
+    stateStore().recordTaskCost(task.id, runCost.costUsd, runCost.turns);
     if (heartbeat) clearInterval(heartbeat);
     if (active?.timeout) clearTimeout(active.timeout);
     if (active?.forceKill) clearTimeout(active.forceKill);
@@ -552,7 +657,7 @@ function tail(value: string, limit: number): string {
 
 export async function reply(id: string, answer: string): Promise<Task> {
   const old = stateStore().getTask(id);
-  if (!old) throw new Error(`unknown task: ${id}`);
+  if (!old) throw new Error(unknownTaskMessage(id));
   if (old.state !== "needs_input") {
     throw new Error(old.state === "blocked"
       ? `task does not need input: ${id} — state is blocked; use resume with your answer as the instruction`
@@ -581,7 +686,7 @@ export async function resumeTask(
   options: ResumeOptions = {},
 ): Promise<Task> {
   const old = stateStore().getTask(id);
-  if (!old) throw new Error(`unknown task: ${id}`);
+  if (!old) throw new Error(unknownTaskMessage(id));
   if (!["failed", "cancelled", "blocked"].includes(old.state)) {
     throw new Error(`task cannot be resumed from state ${old.state}: ${id}`);
   }
@@ -599,7 +704,9 @@ export async function resumeTask(
     );
   }
   validateTimeoutMs(options.timeoutMs);
-  const scope = options.scope ? normalizeTaskScope(options.scope, old.cwd) : undefined;
+  // A replacement scope is a fresh statement of what this cwd may touch, so it
+  // becomes the grant later delegations inherit.
+  const replacement = options.scope ? resolveScope(old.cwd, old.profileId, options.scope) : undefined;
   const resumeInstruction = instruction?.trim() || "Continue the original task from where the previous run stopped.";
   const prompt = [
     "# Resume instruction",
@@ -609,7 +716,8 @@ export async function resumeTask(
   ].join("\n");
   const task = stateStore().resumeTask(id, {
     ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
-    ...(scope ? { scope } : {}),
+    ...(replacement ? { scope: replacement.scope } : {}),
+    ...(replacement?.grantId ? { grantId: replacement.grantId } : {}),
     ...(options.allowQuestions !== undefined ? { allowQuestions: options.allowQuestions } : {}),
   });
   taskWaiter.notify(id);
@@ -631,7 +739,7 @@ function sessionResumeUnsupported(profileId: string, profile?: Profile): string 
 
 export async function cancelTask(id: string, reason = "cancelled by caller", timedOut = false): Promise<Task> {
   const task = stateStore().getTask(id);
-  if (!task) throw new Error(`unknown task: ${id}`);
+  if (!task) throw new Error(unknownTaskMessage(id));
   if (task.state === "cancelled") return task;
   const completion = {
     blocked: true,
@@ -668,7 +776,6 @@ function update(task: Task, patch: Partial<Task>, expectedStates: Task["state"][
   const saved = stateStore().saveTask(task, eventType, {
     ...(task.error ? { error: task.error } : {}),
     ...(task.question ? { question: task.question } : {}),
-    ...(task.childTaskId ? { childTaskId: task.childTaskId } : {}),
     ...(task.completion ? { completion: task.completion } : {}),
   }, expectedStates);
   if (!saved) {

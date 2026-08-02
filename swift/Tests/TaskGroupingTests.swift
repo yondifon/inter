@@ -197,4 +197,16 @@ final class TaskGroupingTests: XCTestCase {
         XCTAssertEqual(TaskOrganizer.projectName("inter"), "inter")
         XCTAssertEqual(TaskOrganizer.projectName("/Users/malico/desgn/inter/"), "inter")
     }
+
+    func testArchiveSelectionMovesToTheNextTask() {
+        XCTAssertEqual(
+            TaskOrganizer.neighbor(afterRemoving: "second", from: ["first", "second", "third"]),
+            "third"
+        )
+    }
+
+    func testArchiveSelectionFallsBackToThePreviousTask() {
+        XCTAssertEqual(TaskOrganizer.neighbor(afterRemoving: "third", from: ["first", "second", "third"]), "second")
+        XCTAssertNil(TaskOrganizer.neighbor(afterRemoving: "only", from: ["only"]))
+    }
 }

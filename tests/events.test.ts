@@ -467,6 +467,7 @@ describe("task event views", () => {
         type: "step_finish",
         part: {
           type: "step-finish", reason: "tool-calls",
+          cost: 0.1935846,
           tokens: { total: 30820, input: 30650, output: 116, reasoning: 54, cache: { read: 28000, write: 0 } },
         },
       },
@@ -475,7 +476,10 @@ describe("task event views", () => {
     expect(view.kind).toBe("usage");
     expect(view.title).toBe("Step finished");
     expect(view.detail).toBe("tool calls · 116 tokens out");
-    expect(view.presentation).toEqual({ type: "usage", tokensIn: 30650, tokensOut: 116, tokensCached: 28000 });
+    expect(view.presentation).toEqual({
+      type: "usage", costUsd: 0.1935846,
+      tokensIn: 30650, tokensOut: 116, tokensCached: 28000,
+    });
     expect(view.minor).toBe(true);
   });
 

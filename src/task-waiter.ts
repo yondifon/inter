@@ -51,11 +51,15 @@ export class TaskWaiter {
 
     const current = this.tasks(ids);
     const baseline = afterCursor ?? this.getCursor(ids);
+    // A cursor is the high-water mark of the id set that produced it. Carrying
+    // one to a smaller set would otherwise hand back a lower number and replay
+    // events the caller already saw.
+    const cursor = () => Math.max(afterCursor ?? 0, this.getCursor(ids));
     if (current.some(needsAttention)) {
-      return { reason: "attention", tasks: current, cursor: this.getCursor(ids) };
+      return { reason: "attention", tasks: current, cursor: cursor() };
     }
     if (until === "progress" && afterCursor !== undefined && this.getCursor(ids) > afterCursor) {
-      return { reason: "progress", tasks: current, cursor: this.getCursor(ids) };
+      return { reason: "progress", tasks: current, cursor: cursor() };
     }
 
     return new Promise((resolve, reject) => {
@@ -85,9 +89,10 @@ export class TaskWaiter {
         if (changedId && !ids.includes(changedId)) return;
         try {
           const tasks = this.tasks(ids);
-          const cursor = this.getCursor(ids);
+          const latest = this.getCursor(ids);
+          const cursor = Math.max(afterCursor ?? 0, latest);
           if (tasks.some(needsAttention)) finish({ reason: "attention", tasks, cursor });
-          else if (until === "progress" && cursor > baseline) finish({ reason: "progress", tasks, cursor });
+          else if (until === "progress" && latest > baseline) finish({ reason: "progress", tasks, cursor });
         } catch (error) {
           if (settled) return;
           settled = true;
@@ -102,7 +107,7 @@ export class TaskWaiter {
       timer = setTimeout(() => finish({
         reason: "timeout",
         tasks: this.tasks(ids),
-        cursor: this.getCursor(ids),
+        cursor: Math.max(afterCursor ?? 0, this.getCursor(ids)),
       }), timeoutMs);
       onChange();
     });

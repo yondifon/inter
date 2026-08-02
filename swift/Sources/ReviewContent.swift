@@ -324,6 +324,7 @@ private struct MarkdownBlockView: View {
                         .foregroundStyle(.secondary)
                         .frame(width: 20 * uiScale, alignment: .trailing)
                     inline(item)
+                        .scaledFont(.body)
                 }
             }
         }

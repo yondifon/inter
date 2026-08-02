@@ -12,7 +12,9 @@ import {
   listTaskSummaries,
   reply,
   resumeTask,
+  scopeInheritanceWarning,
   setTaskArchived,
+  unknownTaskMessage,
   waitForTasks,
 } from "./tasks";
 import { listModels } from "./models";
@@ -21,19 +23,19 @@ import { listProfileStatuses } from "./profile-status";
 import { listProfileUsage } from "./usage";
 import { stateStore } from "./store";
 import type { Profile, Provider, Task } from "./types";
-import { dynamicProfileTools } from "./dynamic-tools";
 import { finalText } from "./adapters";
 import { taskEventView } from "./events";
-import { DELEGATE_DESCRIPTION, MCP_INSTRUCTIONS, dynamicDelegateDescription } from "./mcp-copy";
+import { DELEGATE_DESCRIPTION, MCP_INSTRUCTIONS } from "./mcp-copy";
 import { defaultModelFor } from "./provider-defaults";
 import { normalizeProfile } from "./profile-input";
 import { deleteMemory, getMemory, listMemories, setMemory } from "./memories";
-import { publicTask, publicTaskSummary } from "./public-task";
+import { publicTask, publicTaskSummary, waitTaskView } from "./public-task";
 import { mcpWaitBlockMs } from "./mcp-wait";
+import { loadRoutingPolicy } from "./routing-policy";
 
 const port = Number(Bun.env.INTER_PORT ?? 7331);
-const VERSION = "0.5.0";
-const MCP_CONTRACT_VERSION = 15;
+const VERSION = "0.6.0";
+const MCP_CONTRACT_VERSION = 16;
 // A foreground MCP call owns the caller's agent turn. Keep status checks short
 // so delegated work cannot stop that caller from chatting or dispatching more
 // work. The HTTP events endpoint remains available for UI-side long polling.
@@ -73,17 +75,29 @@ Bun.serve({
           const profile = config.profiles.find(({ id }) => id === task.profileId);
           return profile && task.output ? { ...task, output: finalText(profile, task.output) } : task;
         }),
-        settings: stateStore().getSettings(),
+        // Why a provider is being avoided, and what each cwd is allowed to
+        // touch — both cheap reads, both previously invisible in the app.
+        profileFailures: stateStore().listProfileFailures(),
+        grants: stateStore().listScopeGrants(),
       });
     }
-    if (url.pathname === "/api/settings" && request.method === "PUT") {
-      const body = await request.json() as { dynamicProfileTools?: unknown };
-      if (typeof body.dynamicProfileTools !== "boolean") {
-        return Response.json({ error: "dynamicProfileTools must be a boolean" }, { status: 400 });
+    // Quota lives on its own route: it shells out to provider CLIs and must not
+    // slow the state poll that drives the whole UI.
+    if (url.pathname === "/api/usage" && request.method === "GET") {
+      const provider = url.searchParams.get("provider") as Provider | null;
+      const profile = url.searchParams.get("profile") ?? undefined;
+      const refresh = url.searchParams.get("refresh") === "true";
+      try {
+        return Response.json(await listProfileUsage({ ...(provider ? { provider } : {}), profile, refresh }));
+      } catch (error) {
+        return Response.json({ error: String(error) }, { status: 400 });
       }
-      const settings = { dynamicProfileTools: body.dynamicProfileTools };
-      stateStore().saveSettings(settings);
-      return Response.json(settings);
+    }
+    const grantId = url.pathname.match(/^\/api\/grants\/([^/]+)$/)?.[1];
+    if (grantId && request.method === "DELETE") {
+      const revoked = stateStore().revokeScopeGrant(decodeURIComponent(grantId));
+      if (!revoked) return Response.json({ error: "unknown grant" }, { status: 404 });
+      return new Response(null, { status: 204 });
     }
     if (url.pathname === "/api/models" && request.method === "GET") {
       const provider = url.searchParams.get("provider") as Provider | null;
@@ -241,20 +255,32 @@ async function createMcpServer(): Promise<McpServer> {
   server.registerTool("delegate", {
     description: DELEGATE_DESCRIPTION,
     inputSchema: z.object({
-      profile: z.string().optional(),
-      model: z.string().min(1).max(200).optional(),
-      preference: z.enum(["balanced", "quality", "cost", "speed"]).optional(),
-      prompt: z.string().min(1).max(64_000),
-      cwd: z.string().min(1),
-      parent: z.string().optional(),
-      scope: scopeSchema.optional(),
-      allowQuestions: z.boolean().default(true),
-      timeoutMs: z.number().int().min(1).max(86_400_000).optional(),
+      profile: z.string().optional()
+        .describe("Profile id to run on. Omit for automatic routing; see profiles."),
+      model: z.string().min(1).max(200).optional()
+        .describe("Model id for that profile. Omit to use the profile's default."),
+      preference: z.enum(["balanced", "quality", "cost", "speed"]).optional()
+        .describe("Bias for automatic routing. Ignored when profile is set."),
+      prompt: z.string().min(1).max(64_000)
+        .describe("Structured markdown: Goal, Context, Scope, numbered Instructions, Guardrails, Output Format."),
+      cwd: z.string().min(1)
+        .describe("Absolute path the worker runs in. Scope and grants are keyed to it."),
+      parent: z.string().optional()
+        .describe("Task id of the first task in a fan-out, so the batch groups together."),
+      scope: scopeSchema.optional()
+        .describe(
+          "Paths the worker may touch, relative to cwd: literal file paths, dir/** for recursive, ** for the whole tree. " +
+          "Stating it records a grant on this cwd; omitting it reuses the newest grant, or falls back to ** and flags the task when none exists.",
+        ),
+      allowQuestions: z.boolean().default(true)
+        .describe("Whether the worker may pause in needs_input to ask. False makes it guess or stop."),
+      timeoutMs: z.number().int().min(1).max(86_400_000).optional()
+        .describe("Hard runtime limit. The task lands in failed with code timeout."),
     }),
   }, async ({ profile, model, preference, prompt, cwd, parent, scope, allowQuestions, timeoutMs }) => {
     if (profile) {
       const task = await delegate(profile, prompt, cwd, model, parent, { scope, allowQuestions, timeoutMs });
-      return result(startedTask(task));
+      return result({ ...startedTask(task), ...(await warningsFor(cwd, task)) });
     }
     const selection = await routeModel(prompt, { preference, modelHint: model, cwd });
     const task = await delegate(selection.profileId, prompt, cwd, selection.model, parent, {
@@ -262,7 +288,7 @@ async function createMcpServer(): Promise<McpServer> {
       allowQuestions,
       timeoutMs,
     });
-    return result({ ...startedTask(task), selection });
+    return result({ ...startedTask(task), selection, ...(await warningsFor(cwd, task)) });
   });
   server.registerTool("route", {
     description: "Choose a profile and model for a proposed task without starting it. Use before delegate to compare providers by quality, cost, speed, and available rate-limit headroom, especially when the current provider is low on usage.",
@@ -276,20 +302,28 @@ async function createMcpServer(): Promise<McpServer> {
     await routeModel(prompt, { modelHint, preference, cwd }),
   ));
   server.registerTool("inspect", {
-    description: "Get the full current snapshot of one delegated task by its Inter task ID, including its prompt, output, and state. Use for an immediate lookup; use wait to follow running work.",
-    inputSchema: z.object({ taskId: z.string() }),
+    description: "Get the full snapshot of one delegated task: the caller's prompt, the prompt actually shipped to the provider, output, earlier attempts, scope, grant, and spend. Use after wait reports something worth reading in full.",
+    inputSchema: z.object({
+      taskId: z.string().describe("Inter task id returned by delegate, reply, or resume."),
+    }),
   }, async ({ taskId }) => {
     const task = getTask(taskId);
-    if (!task) throw new Error(`unknown task: ${taskId}`);
+    if (!task) throw new Error(unknownTaskMessage(taskId));
     return result(publicTask(task));
   });
   server.registerTool("wait", {
-    description: "Check one to eight delegated tasks for new progress, a question, or completion. This is a quick foreground poll capped at 250ms so the caller stays free to chat or dispatch other work. Pass the returned cursor as afterCursor on a later check. Do not loop; the worker continues independently.",
+    description: "Check one to eight delegated tasks for new progress, a question, or completion. A quick foreground poll capped at 250ms so the caller stays free to chat or dispatch other work. Returns a prompt preview rather than the prompt, and full output only once a task has settled; use inspect for everything else. Heartbeats do not count as progress. Do not loop; the worker continues independently.",
     inputSchema: z.object({
-      taskIds: z.array(z.string()).min(1).max(8),
-      timeoutMs: z.number().int().min(0).max(300_000).default(0),
-      afterCursor: z.number().int().min(0).optional(),
-      until: z.enum(["progress", "attention"]).default("progress"),
+      taskIds: z.array(z.string()).min(1).max(8)
+        .describe("Inter task ids to check together."),
+      timeoutMs: z.number().int().min(0).max(300_000).default(0)
+        .describe("Requested block, clamped to 250ms. Leave at 0 for an immediate read."),
+      afterCursor: z.number().int().min(0).optional()
+        .describe(
+          "Cursor from an earlier wait on this same set of taskIds. A cursor belongs to the set that produced it — reusing one across a different set replays or skips events.",
+        ),
+      until: z.enum(["progress", "attention"]).default("progress")
+        .describe("progress returns on any new event; attention returns only on a question or a terminal state."),
     }),
   }, async ({ taskIds, timeoutMs, afterCursor, until }, extra) => {
     const waited = await waitForTasks(
@@ -299,19 +333,21 @@ async function createMcpServer(): Promise<McpServer> {
       afterCursor,
       until,
     );
-    return result({ ...waited, tasks: waited.tasks.map(publicTask) });
+    return result({ ...waited, tasks: waited.tasks.map(waitTaskView) });
   });
   server.registerTool("health", {
     description: "Check whether the Inter broker is running and read its broker and MCP contract versions. Use for connection or compatibility diagnosis, not worker availability.",
     inputSchema: z.object({}),
   }, async () => result({ status: "ok", version: VERSION, mcpContractVersion: MCP_CONTRACT_VERSION }));
   server.registerTool("tasks", {
-    description: "Find recent delegated tasks by state, time, or profile. Returns concise summaries for task discovery; use inspect for a task's full prompt and output, or wait to follow active work.",
+    description: "Find recent delegated tasks by state, time, profile, or fan-out batch. Returns concise summaries for discovery; use inspect for one task in full, or wait to follow active work.",
     inputSchema: z.object({
       limit: z.number().int().min(1).max(100).default(20),
-      state: taskStateSchema.optional(),
-      since: z.string().datetime().optional(),
-      profile: z.string().optional(),
+      state: taskStateSchema.optional().describe("Only tasks currently in this state."),
+      since: z.string().datetime().optional().describe("Only tasks updated at or after this ISO timestamp."),
+      profile: z.string().optional().describe("Only tasks sent to this profile id."),
+      parent: z.string().optional()
+        .describe("A fan-out batch: the task with this id plus every task delegated with it as parent."),
       archived: z.enum(["active", "only", "include"]).default("active"),
     }),
   }, async (query) => result(listTaskSummaries(query).map(publicTaskSummary)));
@@ -350,10 +386,11 @@ async function createMcpServer(): Promise<McpServer> {
   }, async ({ taskId, instruction, timeoutMs, scope, allowQuestions }) =>
     result(startedTask(await resumeTask(taskId, instruction, { timeoutMs, scope, allowQuestions }))));
   server.registerTool("cancel", {
-    description: "Stop a queued or running delegated task and its worker process tree. Use when the work is no longer useful; this does not delete the task record.",
+    description: "Stop a delegated task and its worker process tree. Works on queued, running, needs_input, and blocked tasks, so a task parked on a question you do not want to answer is not a dead end. This does not delete the task record.",
     inputSchema: z.object({
       taskId: z.string(),
-      reason: z.string().min(1).max(500).optional(),
+      reason: z.string().min(1).max(500).optional()
+        .describe("Stored as the task error and shown to the user."),
     }),
   }, async ({ taskId, reason }) => result(publicTask(await cancelTask(taskId, reason))));
   server.registerTool("archive", {
@@ -364,58 +401,64 @@ async function createMcpServer(): Promise<McpServer> {
     }),
   }, async ({ taskId, archived }) => result(publicTask(setTaskArchived(taskId, archived))));
   server.registerTool("profiles", {
-    description: "List configured AI provider profiles, capabilities, and default models. Use to choose a provider for a second opinion or more usage capacity; use status to check availability and models to browse model IDs.",
-    inputSchema: z.object({}),
-  }, async () => result(publicProfiles((await loadConfig()).profiles)));
-  server.registerTool("models", {
-    description: "List model IDs offered by enabled CLI account profiles. Use to choose a model for route or delegate; filter by profile or provider, and set refresh to bypass the five-minute catalog cache.",
+    description: "Everything needed to pick a destination: configured provider profiles with their capabilities and default models, plus — on request — their model catalogs, availability, and rate-limit headroom. This is the one capacity read; use route to have Inter choose for you.",
     inputSchema: z.object({
-      profile: z.string().optional(),
-      provider: z.enum(["claude", "codex", "opencode", "antigravity"]).optional(),
-      refresh: z.boolean().optional(),
+      profile: z.string().optional().describe("Restrict to one profile id."),
+      provider: z.enum(["claude", "codex", "opencode", "antigravity"]).optional()
+        .describe("Restrict to one provider."),
+      include: z.array(z.enum(["models", "status", "usage"])).optional()
+        .describe(
+          "Extra sections to fetch. models lists model ids; status reports whether a profile answers; " +
+          "usage reports session and weekly quota. Each costs a provider call, so ask only for what you will use.",
+        ),
+      refresh: z.boolean().optional()
+        .describe("Bypass the five-minute cache for the requested sections."),
     }),
-  }, async (query) => result(await listModels(query)));
-  server.registerTool("status", {
-    description: "Check whether profiles and models are available, unavailable, or unknown. Use before delegation when account or model readiness is uncertain. Refresh performs safe catalog checks without sending a generation prompt; use usage for rate-limit windows.",
-    inputSchema: z.object({
-      profile: z.string().optional(),
-      model: z.string().min(1).max(200).optional(),
-      provider: z.enum(["claude", "codex", "opencode", "antigravity"]).optional(),
-      refresh: z.boolean().optional(),
-    }),
-  }, async (query) => result(await listProfileStatuses(query)));
-  server.registerTool("usage", {
-    description: "Read session and weekly rate-limit usage for each profile without spending inference tokens. Use to find capacity on another provider and spread work across model quotas; use status for availability. Claude and Codex are supported; OpenCode is not.",
-    inputSchema: z.object({
-      profile: z.string().optional(),
-      provider: z.enum(["claude", "codex", "opencode", "antigravity"]).optional(),
-      refresh: z.boolean().optional(),
-    }),
-  }, async (query) => result(await listProfileUsage(query)));
-  if (stateStore().getSettings().dynamicProfileTools) {
-    for (const { name, profile } of dynamicProfileTools((await loadConfig()).profiles)) {
-      server.registerTool(name, {
-        description: dynamicDelegateDescription(profile),
-        inputSchema: z.object({
-          model: z.string().min(1).max(200).optional(),
-          prompt: z.string().min(1).max(64_000),
-          cwd: z.string().min(1),
-          parent: z.string().optional(),
-          scope: scopeSchema.optional(),
-          allowQuestions: z.boolean().default(true),
-          timeoutMs: z.number().int().min(1).max(86_400_000).optional(),
-        }),
-      }, async ({ model, prompt, cwd, parent, scope, allowQuestions, timeoutMs }) => {
-        const task = await delegate(profile.id, prompt, cwd, model, parent, {
-          scope,
-          allowQuestions,
-          timeoutMs,
-        });
-        return result(startedTask(task));
-      });
-    }
-  }
+  }, async ({ profile, provider, include, refresh }) => {
+    const query = { profile, ...(provider ? { provider } : {}), refresh };
+    const wanted = new Set(include ?? []);
+    const [models, status, usage] = await Promise.all([
+      wanted.has("models") ? listModels(query) : undefined,
+      wanted.has("status") ? listProfileStatuses(query) : undefined,
+      wanted.has("usage") ? listProfileUsage(query) : undefined,
+    ]);
+    const profiles = publicProfiles((await loadConfig()).profiles)
+      .filter((item) => (!profile || item.id === profile) && (!provider || item.provider === provider));
+    return result({
+      profiles,
+      ...(models ? { models } : {}),
+      ...(status ? { status } : {}),
+      ...(usage ? { usage } : {}),
+    });
+  });
   return server;
+}
+
+/** Everything about this dispatch the caller should repeat back to the user. */
+async function warningsFor(cwd: string, task: Task): Promise<{ warnings?: string[] }> {
+  const warnings = [
+    ...(scopeInheritanceWarning(task) ? [scopeInheritanceWarning(task)!] : []),
+    ...await policyWarnings(cwd, task),
+  ];
+  return warnings.length > 0 ? { warnings } : {};
+}
+
+/**
+ * `.inter.toml` only ever steered automatic routing, so naming a profile
+ * silently sidestepped the project's own policy. Delegation still proceeds —
+ * the file is a policy, not a lock — but it no longer does so quietly.
+ */
+async function policyWarnings(cwd: string, task: Task): Promise<string[]> {
+  const policy = await loadRoutingPolicy(cwd).catch(() => undefined);
+  if (!policy) return [];
+  const allowed = Object.values(policy.routes).flatMap((route) => route?.allow ?? []);
+  if (allowed.length === 0) return [];
+  const config = await loadConfig();
+  const provider = config.profiles.find(({ id }) => id === task.profileId)?.provider;
+  if (allowed.some((entry) => entry.provider === provider && entry.model === task.model)) return [];
+  return [
+    `${provider}/${task.model} is not in any allow list in ${policy.path}; the explicit profile overrode project routing policy`,
+  ];
 }
 
 function result(value: unknown) {

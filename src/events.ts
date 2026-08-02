@@ -336,6 +336,7 @@ function knownAgentEvent(
     const cachedTotal = Number(cached.read ?? 0) + Number(cached.write ?? 0);
     const presentation: TaskEventPresentation = {
       type: "usage",
+      ...(typeof part.cost === "number" ? { costUsd: part.cost } : {}),
       ...(typeof tokens.input === "number" ? { tokensIn: tokens.input } : {}),
       ...(typeof tokens.output === "number" ? { tokensOut: tokens.output } : {}),
       ...(cachedTotal ? { tokensCached: cachedTotal } : {}),

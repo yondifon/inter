@@ -31,6 +31,7 @@ enum TaskDetailSection: String, CaseIterable, Identifiable {
 struct TaskDetail: View {
     let task: TaskSnapshot
     let store: ProfileStore
+    let setArchived: (TaskSnapshot, Bool) -> Void
     /// Activity is where a run is read — the response is one tab away, and landing
     /// there mid-run would mean opening on an empty panel.
     @State private var section: TaskDetailSection = .activity
@@ -61,14 +62,19 @@ struct TaskDetail: View {
             .padding(.bottom, 16)
             .frame(maxWidth: .infinity)
 
-            ScrollView {
-                sectionContent
-                    .frame(maxWidth: 980 * uiScale)
-                    .padding(24)
-                    .frame(maxWidth: .infinity)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    sectionContent
+                        .frame(maxWidth: 980 * uiScale)
+                        .padding(24)
+                        .frame(maxWidth: .infinity)
+                }
+                .scrollIndicators(.never)
+                .id("\(task.id)-\(section.rawValue)")
+                .onAppear { scrollActivityToBottom(proxy) }
+                .onChange(of: section) { _, _ in scrollActivityToBottom(proxy) }
+                .onChange(of: events.last?.id) { _, _ in scrollActivityToBottom(proxy) }
             }
-            .scrollIndicators(.never)
-            .id("\(task.id)-\(section.rawValue)")
         }
         .background(Surface.content)
         .task(id: task.id) {
@@ -147,7 +153,7 @@ struct TaskDetail: View {
                 symbol: task.archivedAt == nil ? "archivebox" : "arrow.uturn.backward",
                 label: task.archivedAt == nil ? "Archive task" : "Restore task"
             ) {
-                Task { await store.setArchived(task, task.archivedAt == nil) }
+                setArchived(task, task.archivedAt == nil)
             }
             IconButton(symbol: "ellipsis", label: "Run details", rotation: .degrees(90)) {
                 showingRunFacts.toggle()
@@ -225,6 +231,9 @@ struct TaskDetail: View {
                     .foregroundStyle(.secondary)
                     .padding(.top, 2)
                 }
+                Color.clear
+                    .frame(height: 1)
+                    .id(activityBottomID)
             }
         }
     }
@@ -238,6 +247,16 @@ struct TaskDetail: View {
     }
 
     private var state: TaskState { TaskState(task.state) }
+
+    private var activityBottomID: String { "\(task.id)-activity-bottom" }
+
+    private func scrollActivityToBottom(_ proxy: ScrollViewProxy) {
+        guard section == .activity else { return }
+        Task { @MainActor in
+            await Task.yield()
+            proxy.scrollTo(activityBottomID, anchor: .bottom)
+        }
+    }
 
     private func loadEvents() async {
         do {

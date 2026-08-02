@@ -58,7 +58,7 @@ struct ContentView: View {
                                 .contextMenu {
                                     Button(showArchivedTasks ? "Restore" : "Archive",
                                            systemImage: showArchivedTasks ? "arrow.uturn.backward" : "archivebox") {
-                                        Task { await store.setArchived(task, !showArchivedTasks) }
+                                        setArchived(task, !showArchivedTasks)
                                     }
                                 }
                             }
@@ -104,7 +104,7 @@ struct ContentView: View {
                 ProfileDetail(profile: profile, store: store) { editing = profile }
             } else if case let .task(id) = selection,
                       let task = store.tasks.first(where: { $0.id == id }) {
-                TaskDetail(task: task, store: store)
+                TaskDetail(task: task, store: store, setArchived: setArchived)
                     .id(task.id)
             } else {
                 ContentUnavailableView("Choose a worker or task", systemImage: "point.3.connected.trianglepath.dotted")
@@ -147,6 +147,21 @@ struct ContentView: View {
             project: projectFilter.isEmpty ? nil : projectFilter,
             grouping: grouping
         )
+    }
+
+    private var listedTaskIDs: [String] {
+        taskGroups.flatMap { TaskOrganizer.visibleTasks(in: $0, collapsed: collapsedGroups) }.map(\.id)
+    }
+
+    private func setArchived(_ task: TaskSnapshot, _ archived: Bool) {
+        let nextID = selection == .task(task.id)
+            ? TaskOrganizer.neighbor(afterRemoving: task.id, from: listedTaskIDs)
+            : nil
+        Task {
+            let changed = await store.setArchived(task, archived)
+            guard changed, selection == .task(task.id) else { return }
+            selection = nextID.map(SidebarSelection.task)
+        }
     }
 
     /// Filtering and grouping belong to the task list, so the control sits on the
@@ -263,11 +278,6 @@ private struct ProfileDetail: View {
             }
 
             Section {
-                Toggle("Named worker tools", isOn: Binding(
-                    get: { store.settings.dynamicProfileTools },
-                    set: { enabled in Task { await store.setDynamicProfileTools(enabled) } }
-                ))
-                .toggleStyle(.switch)
                 LabeledContent("Endpoint") {
                     HStack(spacing: 8) {
                         Text(InterServer.mcpURL)

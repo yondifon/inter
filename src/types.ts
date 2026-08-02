@@ -48,8 +48,25 @@ export interface Config {
   profiles: Profile[];
 }
 
-export interface BrokerSettings {
-  dynamicProfileTools: boolean;
+/** A scope the caller stated for a cwd, kept so later delegations can reuse it. */
+export interface ScopeGrant {
+  id: string;
+  cwd: string;
+  /** Profile the scope was stated for. Approval is per destination, not just per folder. */
+  profileId: string;
+  scope: TaskScope;
+  createdAt: string;
+  lastUsedAt: string;
+  useCount: number;
+}
+
+/** What one worker run produced, kept when reply or resume starts the next run. */
+export interface TaskAttempt {
+  output: string;
+  error?: string;
+  question?: string;
+  completion?: TaskCompletion;
+  endedAt: string;
 }
 
 export interface MemoryEntry {
@@ -66,6 +83,8 @@ export interface Task {
   profileId: string;
   model: string;
   prompt: string;
+  /** The prompt actually sent to the worker: caller text plus memories and protocol wrapper. */
+  shippedPrompt?: string;
   cwd: string;
   state: TaskState;
   createdAt: string;
@@ -74,12 +93,16 @@ export interface Task {
   error?: string;
   question?: string;
   parentTaskId?: string;
-  childTaskId?: string;
   scope: TaskScope;
+  /** Grant the scope came from; absent means the caller stated no scope and none was on file. */
+  grantId?: string;
   allowQuestions: boolean;
   timeoutMs?: number;
   sessionId?: string;
   completion?: TaskCompletion;
+  attempts?: TaskAttempt[];
+  costUsd?: number;
+  turns?: number;
   archivedAt?: string;
 }
 
@@ -95,9 +118,10 @@ export interface TaskSummary {
   error?: string;
   question?: string;
   parentTaskId?: string;
-  childTaskId?: string;
+  grantId?: string;
   sessionId?: string;
   completion?: TaskCompletion;
+  costUsd?: number;
   archivedAt?: string;
 }
 

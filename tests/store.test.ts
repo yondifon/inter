@@ -45,6 +45,130 @@ function task(state: Task["state"] = "queued"): Task {
 }
 
 describe("SQLite state store", () => {
+  test("keeps a run's result as an attempt when reply starts the next one", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const asking = task("running");
+    store.createTask(asking);
+    asking.state = "needs_input";
+    asking.output = "read three files, need a decision";
+    asking.question = "Which database?";
+    store.saveTask(asking);
+
+    const answered = store.answerTask(asking.id);
+
+    // The work that earned the question must survive the run that answers it.
+    expect(answered.state).toBe("queued");
+    expect(answered.output).toBe("");
+    expect(answered.question).toBeUndefined();
+    expect(answered.attempts).toHaveLength(1);
+    expect(answered.attempts?.[0]).toMatchObject({
+      output: "read three files, need a decision",
+      question: "Which database?",
+    });
+    store.close();
+  });
+
+  test("keeps every earlier attempt when resume retries a failed task", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const failing = task("running");
+    store.createTask(failing);
+    failing.state = "failed";
+    failing.output = "partial work";
+    failing.error = "provider timed out";
+    store.saveTask(failing);
+
+    const resumed = store.resumeTask(failing.id);
+    expect(resumed.attempts).toHaveLength(1);
+    expect(resumed.attempts?.[0]).toMatchObject({
+      output: "partial work",
+      error: "provider timed out",
+    });
+
+    resumed.state = "failed";
+    resumed.output = "second try";
+    resumed.error = "failed again";
+    store.saveTask(resumed);
+    expect(store.resumeTask(failing.id).attempts?.map(({ output }) => output))
+      .toEqual(["partial work", "second try"]);
+    store.close();
+  });
+
+  test("cancels a task parked on a question or blocked mid-run", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    for (const state of ["needs_input", "blocked"] as const) {
+      const parked = task("running");
+      store.createTask(parked);
+      parked.state = state;
+      store.saveTask(parked);
+
+      const cancelled = store.cancelTask(parked.id, "no longer useful", {
+        blocked: true,
+        code: "cancelled",
+        reason: "no longer useful",
+      });
+      expect(cancelled?.state).toBe("cancelled");
+    }
+    // A task that already finished still cannot be cancelled.
+    const done = task("running");
+    store.createTask(done);
+    done.state = "completed";
+    store.saveTask(done);
+    expect(store.cancelTask(done.id, "too late", {
+      blocked: true,
+      code: "cancelled",
+      reason: "too late",
+    })).toBeUndefined();
+    store.close();
+  });
+
+  test("finds a fan-out batch by its parent task", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const parent = task("completed");
+    store.createTask(parent);
+    const child = { ...task("completed"), parentTaskId: parent.id };
+    store.createTask(child);
+    store.createTask(task("completed"));
+
+    // The batch is the parent plus its children, and nothing else.
+    expect(new Set(store.listTaskSummaries({ parent: parent.id }).map(({ id }) => id)))
+      .toEqual(new Set([parent.id, child.id]));
+    expect(store.listTaskSummaries({}).length).toBe(3);
+    store.close();
+  });
+
+  test("accumulates reported spend across runs of one task", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const work = task("running");
+    store.createTask(work);
+    expect(store.getTask(work.id)?.costUsd).toBeUndefined();
+
+    store.recordTaskCost(work.id, 1.64, 21);
+    expect(store.getTask(work.id)).toMatchObject({ costUsd: 1.64, turns: 21 });
+
+    // A reply or resume is another run on the same task, so spend adds up.
+    store.recordTaskCost(work.id, 0.36, 4);
+    expect(store.getTask(work.id)).toMatchObject({ costUsd: 2, turns: 25 });
+    store.close();
+  });
+
+  test("stores the prompt the worker actually received", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const work = task("running");
+    store.createTask(work);
+    expect(store.getTask(work.id)?.shippedPrompt).toBeUndefined();
+
+    store.recordShippedPrompt(work.id, "review\n\n## Memories\nUse SQLite");
+    expect(store.getTask(work.id)?.prompt).toBe("review");
+    expect(store.getTask(work.id)?.shippedPrompt).toBe("review\n\n## Memories\nUse SQLite");
+    store.close();
+  });
+
   test("persists project memories and protects concurrent updates", () => {
     const { db } = paths();
     const store = new StateStore({ path: db, seedProfiles: [] });
@@ -245,16 +369,73 @@ describe("SQLite state store", () => {
     store.close();
   });
 
-  test("persists dynamic profile tool setting", () => {
+  test("reuses a recorded scope grant when a later task states none", () => {
     const { db } = paths();
-    const store = new StateStore({ path: db, seedProfiles: [] });
-    expect(store.getSettings().dynamicProfileTools).toBe(false);
-    store.saveSettings({ dynamicProfileTools: true });
-    store.close();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const scope = { read: ["src/**"], write: [] };
+    const grant = store.recordScopeGrant("/tmp/project", "claude-work", scope);
 
-    const reopened = new StateStore({ path: db, seedProfiles: [] });
-    expect(reopened.getSettings().dynamicProfileTools).toBe(true);
-    reopened.close();
+    expect(store.latestScopeGrant("/tmp/project", "claude-work")?.id).toBe(grant.id);
+    expect(store.latestScopeGrant("/tmp/project", "claude-work")?.scope).toEqual(scope);
+    expect(store.latestScopeGrant("/tmp/other", "claude-work")).toBeUndefined();
+
+    // Re-stating the same scope refreshes the grant instead of forking it.
+    expect(store.recordScopeGrant("/tmp/project", "claude-work", scope).id).toBe(grant.id);
+    expect(store.listScopeGrants()).toHaveLength(1);
+    expect(store.getScopeGrant(grant.id)?.useCount).toBe(2);
+
+    expect(store.revokeScopeGrant(grant.id)).toBe(true);
+    expect(store.latestScopeGrant("/tmp/project", "claude-work")).toBeUndefined();
+    store.close();
+  });
+
+  test("prefers a profile's own grant and reports when it borrows another's", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const wide = { read: ["**"], write: ["**"] };
+    const narrow = { read: ["src/**"], write: [] };
+    store.recordScopeGrant("/tmp/project", "trusted", wide);
+    const own = store.recordScopeGrant("/tmp/project", "sketchy", narrow);
+
+    // A profile with its own approval uses it, even though the other grant is
+    // wider and was recorded first.
+    const mine = store.latestScopeGrant("/tmp/project", "sketchy");
+    expect(mine?.id).toBe(own.id);
+    expect(mine?.scope).toEqual(narrow);
+
+    // A profile the user never approved here still gets an answer, but one
+    // stamped with whose approval it is, so the caller can flag the reuse.
+    const borrowed = store.latestScopeGrant("/tmp/project", "never-approved");
+    expect(borrowed).toBeDefined();
+    expect(borrowed!.profileId).not.toBe("never-approved");
+    store.close();
+  });
+
+  test("keeps only the most recent attempts so a long chain cannot grow forever", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const work = task("running");
+    store.createTask(work);
+
+    for (let run = 1; run <= 14; run++) {
+      work.state = "failed";
+      work.output = `run ${run}`;
+      work.error = `failed ${run}`;
+      store.saveTask(work);
+      Object.assign(work, store.resumeTask(work.id));
+    }
+
+    const attempts = store.getTask(work.id)?.attempts ?? [];
+    expect(attempts).toHaveLength(10);
+    // The oldest are dropped, not the newest.
+    expect(attempts.at(0)?.output).toBe("run 5");
+    expect(attempts.at(-1)?.output).toBe("run 14");
+
+    // Summaries never pay to parse that history.
+    const summary = store.listTaskSummaries({}).find(({ id }) => id === work.id);
+    expect(summary).toBeDefined();
+    expect(summary).not.toHaveProperty("attempts");
+    store.close();
   });
 
   test("returns filtered summaries without full prompts or outputs", () => {
@@ -271,7 +452,7 @@ describe("SQLite state store", () => {
     store.close();
   });
 
-  test("lists meaningful events for several tasks and latest heartbeat progress", () => {
+  test("treats heartbeats as progress reporting, not as meaningful events", () => {
     const { db } = paths();
     const store = new StateStore({ path: db, seedProfiles: [profile] });
     const first = task("running");
@@ -285,13 +466,22 @@ describe("SQLite state store", () => {
       silentMs: 4_000,
       stalled: false,
     });
-    expect(store.listTaskEventsForTasks([first.id, second.id], cursor, 10, true)
-      .map(({ type }) => type)).toEqual(["heartbeat"]);
+
+    // Heartbeats fire on a timer, so counting them would advance the cursor
+    // every 10s and wake a caller that has no new news to read.
+    expect(store.listTaskEventsForTasks([first.id, second.id], cursor, 10, true)).toEqual([]);
+    expect(store.latestTaskEventId([first.id, second.id], true)).toBe(cursor);
+    // The progress summary still carries what the heartbeat measured.
     expect(store.latestTaskProgress([first.id, second.id])[second.id]).toMatchObject({
       elapsedMs: 10_000,
       silentMs: 4_000,
       stalled: false,
     });
+
+    store.appendTaskEvent(first.id, "agent.assistant", first.state, { real: true });
+    expect(store.listTaskEventsForTasks([first.id, second.id], cursor, 10, true)
+      .map(({ type }) => type)).toEqual(["agent.assistant"]);
+    expect(store.latestTaskEventId([first.id, second.id], true)).toBeGreaterThan(cursor);
     store.close();
   });
 

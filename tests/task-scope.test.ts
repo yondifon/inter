@@ -117,6 +117,25 @@ describe("task scope", () => {
     expect(opencodePolicy).not.toContain(`${process.env.HOME}/.cargo/credentials.toml`);
   });
 
+  test("lets every worker read Git's own config but not the rest of home", () => {
+    const cwd = workspace();
+    const scope = { read: ["src/**"], write: [] };
+    for (const provider of ["claude", "codex", "opencode", "antigravity"] as const) {
+      const policy = sandboxProfile(cwd, scope, { ...profile, provider }, ["/bin/sh"]);
+
+      // Without this, git refuses to run at all: "unable to access
+      // '~/.gitconfig': Operation not permitted" — before it reads a single
+      // repository file.
+      expect(policy).toContain(`(allow file-read* (literal "${process.env.HOME}/.gitconfig"))`);
+      expect(policy).toContain(`(allow file-read* (subpath "${process.env.HOME}/.config/git"))`);
+
+      // Granting the config must not grant the home directory around it.
+      expect(policy).not.toContain(`(allow file-read* (subpath "${process.env.HOME}"))`);
+      expect(policy).not.toContain(`(allow file-read* (subpath "${process.env.HOME}/.ssh"))`);
+      expect(policy).not.toContain(`(allow file-write* (literal "${process.env.HOME}/.gitconfig"))`);
+    }
+  });
+
   test("allows OpenCode's legacy home config probe only outside Git projects", () => {
     const cwd = workspace();
     const policy = sandboxProfile(

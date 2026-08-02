@@ -157,4 +157,13 @@ enum TaskOrganizer {
         guard line.count > headingLimit else { return line }
         return "\(line.prefix(headingLimit - 1))…"
     }
+
+    /// Keeps keyboard and reading flow after a row leaves the sidebar. Prefer the
+    /// row below; when the last row is removed, fall back to the one above it.
+    static func neighbor(afterRemoving id: String, from ids: [String]) -> String? {
+        guard let index = ids.firstIndex(of: id) else { return ids.first }
+        if index + 1 < ids.count { return ids[index + 1] }
+        if index > 0 { return ids[index - 1] }
+        return nil
+    }
 }

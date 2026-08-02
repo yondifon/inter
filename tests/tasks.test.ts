@@ -10,10 +10,38 @@ import {
 import {
   antigravityBootstrapRetryReason,
   delegate,
+  getTask,
   needsInputQuestion,
   recordProfileTaskOutcome,
 } from "../src/tasks";
-import { closeStateStore } from "../src/store";
+import { closeStateStore, stateStore } from "../src/store";
+import type { Profile, Task } from "../src/types";
+
+// A custom command means delegate exercises real scope resolution without
+// needing a provider CLI on the machine; the worker exits immediately.
+const noopProfile: Profile = {
+  id: "noop",
+  label: "Noop",
+  provider: "antigravity",
+  model: "fake",
+  enabled: true,
+  env: {},
+  capabilities: [],
+  command: ["true"],
+};
+
+// delegate() launches the worker without awaiting it. A test that returns
+// before the run settles leaves `runTask` calling stateStore() after afterEach
+// has closed the store and cleared INTER_DB — which reopens, and migrates, the
+// real broker database.
+async function settled(id: string): Promise<Task> {
+  for (let attempt = 0; attempt < 200; attempt++) {
+    const task = getTask(id);
+    if (task && !["queued", "running"].includes(task.state)) return task;
+    await Bun.sleep(25);
+  }
+  throw new Error(`task never settled: ${id}`);
+}
 
 describe("delegate workspace roots", () => {
   const savedRoots = process.env.INTER_ROOTS;
@@ -41,6 +69,51 @@ describe("delegate workspace roots", () => {
     // even though the broker process cwd is a single project.
     await expect(delegate("missing-profile", "x", homedir()))
       .rejects.toThrow("unknown profile: missing-profile");
+  });
+
+  test("names the profiles a caller could have used", async () => {
+    const root = mkdtempSync(join(tmpdir(), "inter-grants-"));
+    scratch.push(root);
+    process.env.INTER_DB = join(root, "inter.db");
+    process.env.INTER_ROOTS = root;
+    stateStore().saveProfiles([
+      { ...noopProfile, id: "live" },
+      { ...noopProfile, id: "retired", enabled: false },
+    ]);
+
+    // A dead end should say where the live options are.
+    await expect(delegate("typo", "x", root))
+      .rejects.toThrow("unknown profile: typo — enabled profiles are live");
+  });
+
+  test("reuses a cwd's stated scope instead of falling back to the whole tree", async () => {
+    const root = mkdtempSync(join(tmpdir(), "inter-grants-"));
+    const other = mkdtempSync(join(tmpdir(), "inter-grants-"));
+    scratch.push(root, other);
+    process.env.INTER_DB = join(root, "inter.db");
+    process.env.INTER_ROOTS = `${root}:${other}`;
+    stateStore().saveProfiles([noopProfile]);
+    const scope = { read: ["src/**"], write: [] };
+
+    const stated = await delegate(noopProfile.id, "first", root, undefined, undefined, { scope });
+    expect(stated.scope).toEqual(scope);
+    expect(stated.grantId).toBeString();
+    await settled(stated.id);
+
+    // The whole point: omitting scope now inherits what was already approved
+    // here rather than silently widening to the entire working tree.
+    const inherited = await delegate(noopProfile.id, "second", root);
+    expect(inherited.scope).toEqual(scope);
+    expect(inherited.grantId).toBe(stated.grantId!);
+    await settled(inherited.id);
+
+    // A cwd nobody has approved still falls back, and is flagged for it.
+    const ungranted = await delegate(noopProfile.id, "third", other);
+    expect(ungranted.scope).toEqual({ read: ["**"], write: ["**"] });
+    expect(ungranted.grantId).toBeUndefined();
+    expect(stateStore().listTaskEvents(ungranted.id).map(({ type }) => type))
+      .toContain("scope_ungranted");
+    await settled(ungranted.id);
   });
 });
 

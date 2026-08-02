@@ -65,6 +65,22 @@ final class AppZoomTests: XCTestCase {
         XCTAssertLessThan(try height(0.85), actual, "Zoom out must render smaller text")
     }
 
+    func testZoomChangesRenderedMarkdownListSize() throws {
+        func height(_ scale: CGFloat) throws -> CGFloat {
+            let renderer = ImageRenderer(
+                content: ReviewContentView(source: "- First item\n- Second item")
+                    .environment(\.uiScale, scale)
+            )
+            return try XCTUnwrap(renderer.nsImage?.size.height)
+        }
+
+        XCTAssertGreaterThan(
+            try height(2.0),
+            try height(1.0),
+            "Request and response Markdown must follow app zoom"
+        )
+    }
+
     /// Markers and hit targets are tuned against the text, so they track the same
     /// scale instead of staying pinned while type grows.
     func testMarkersAndHitTargetsFollowZoom() throws {

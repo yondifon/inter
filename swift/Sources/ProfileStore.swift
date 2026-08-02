@@ -6,7 +6,8 @@ import Observation
 final class ProfileStore {
     var profiles: [Profile] = []
     var tasks: [TaskSnapshot] = []
-    var settings = BrokerSettings(dynamicProfileTools: false)
+    var profileFailures: [ProfileFailureSnapshot] = []
+    var grants: [ScopeGrantSnapshot] = []
     var error: String?
     private var polling: Task<Void, Never>?
 
@@ -29,7 +30,8 @@ final class ProfileStore {
             let state = try JSONDecoder().decode(BrokerState.self, from: data)
             profiles = state.profiles
             tasks = state.tasks
-            settings = state.settings
+            profileFailures = state.profileFailures
+            grants = state.grants
             error = nil
         } catch {
             self.error = "Broker unavailable"
@@ -59,7 +61,7 @@ final class ProfileStore {
         await refresh()
     }
 
-    func setArchived(_ task: TaskSnapshot, _ archived: Bool) async {
+    func setArchived(_ task: TaskSnapshot, _ archived: Bool) async -> Bool {
         let id = task.id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? task.id
         var request = URLRequest(url: InterServer.api("tasks/\(id)"))
         request.httpMethod = "PATCH"
@@ -69,28 +71,28 @@ final class ProfileStore {
             let (_, response) = try await URLSession.shared.data(for: request)
             guard (response as? HTTPURLResponse)?.statusCode == 200 else {
                 self.error = "Couldn’t update task archive"
-                return
+                return false
             }
             await refresh()
+            return true
         } catch {
             self.error = "Couldn’t update task archive"
+            return false
         }
     }
 
-    func setDynamicProfileTools(_ enabled: Bool) async {
-        var request = URLRequest(url: InterServer.api("settings"))
-        request.httpMethod = "PUT"
-        request.setValue("application/json", forHTTPHeaderField: "content-type")
-        request.httpBody = try? JSONEncoder().encode(BrokerSettings(dynamicProfileTools: enabled))
+    func revokeGrant(_ id: String) async {
+        var request = URLRequest(url: InterServer.api("grants/\(id)"))
+        request.httpMethod = "DELETE"
         do {
             let (_, response) = try await URLSession.shared.data(for: request)
-            guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-                self.error = "Couldn’t update MCP tools"
+            guard (response as? HTTPURLResponse)?.statusCode == 204 else {
+                self.error = "Couldn’t revoke scope grant"
                 return
             }
             await refresh()
         } catch {
-            self.error = "Couldn’t update MCP tools"
+            self.error = "Couldn’t revoke scope grant"
         }
     }
 }

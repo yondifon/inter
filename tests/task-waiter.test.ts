@@ -149,16 +149,23 @@ describe("TaskWaiter", () => {
     }
   });
 
-  test("detects an external heartbeat as cursor progress", async () => {
+  test("does not wake on a heartbeat, but does on a real agent event", async () => {
     const { reader, writer } = stores();
     try {
       const work = task("heartbeat");
       writer.createTask(work);
-      const afterCursor = writer.latestTaskEventId([work.id]);
-      const waiting = storeWaiter(reader).wait([work.id], 2_000, undefined, afterCursor);
+      const afterCursor = writer.latestTaskEventId([work.id], true);
 
+      // A heartbeat every 10s must not read as news, or a long task bills the
+      // caller a wake-up on a fixed timer for as long as it runs.
+      const quiet = storeWaiter(reader).wait([work.id], 300, undefined, afterCursor);
       writer.appendTaskEvent(work.id, "heartbeat", work.state, { elapsedMs: 10_000 });
+      const idle = await quiet;
+      expect(idle.reason).toBe("timeout");
+      expect(idle.cursor).toBe(afterCursor);
 
+      const waiting = storeWaiter(reader).wait([work.id], 2_000, undefined, afterCursor);
+      writer.appendTaskEvent(work.id, "agent.assistant", work.state, { text: "working" });
       const result = await waiting;
       expect(result.reason).toBe("progress");
       expect(result.tasks[0]?.state).toBe("running");

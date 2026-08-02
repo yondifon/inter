@@ -5,10 +5,11 @@ import { Database } from "bun:sqlite";
 import { discoverProfiles } from "./profile-discovery";
 import { sessionIdFrom } from "./adapters";
 import type {
-  BrokerSettings,
   Profile,
   MemoryEntry,
+  ScopeGrant,
   Task,
+  TaskAttempt,
   TaskCompletion,
   TaskState,
   TaskSummary,
@@ -31,22 +32,42 @@ interface TaskRow {
   profile_id: string;
   model: string;
   prompt: string;
+  shipped_prompt: string | null;
   cwd: string;
   state: TaskState;
   output: string;
   error: string | null;
   question: string | null;
   parent_task_id: string | null;
-  child_task_id: string | null;
   scope_json: string;
+  grant_id: string | null;
   allow_questions: number;
   timeout_ms: number | null;
   session_id: string | null;
   completion_json: string | null;
+  attempts_json: string | null;
+  cost_usd: number | null;
+  turns: number | null;
   archived_at: string | null;
   created_at: string;
   updated_at: string;
 }
+
+const TASK_COLUMNS = `id, profile_id, model, prompt, shipped_prompt, cwd, state, output, error,
+             question, parent_task_id, scope_json, grant_id, allow_questions, timeout_ms,
+             session_id, completion_json, attempts_json, cost_usd, turns, archived_at,
+             created_at, updated_at`;
+
+// Heartbeats fire every 10s regardless of worker activity, so counting them as
+// progress would wake every caller on a fixed timer instead of on real news.
+// The `progress` summary still carries elapsed/silent/stalled for the same tasks.
+const NOISE_EVENTS = "('agent.system','heartbeat')";
+
+// How many prior worker runs a task keeps. Enough to see how a task got where
+// it is; bounded so a long reply/resume chain cannot grow the row without end.
+const MAX_ATTEMPTS = 10;
+
+const GRANT_COLUMNS = "id, cwd, profile_id, scope_json, created_at, last_used_at, use_count";
 
 export interface TaskEvent {
   id: number;
@@ -67,6 +88,7 @@ export interface TaskListQuery {
   state?: TaskState;
   since?: string;
   profile?: string;
+  parent?: string;
   archived?: "active" | "only" | "include";
 }
 
@@ -156,17 +178,76 @@ export class StateStore {
     });
   }
 
-  getSettings(): BrokerSettings {
-    return {
-      dynamicProfileTools: this.getSetting("dynamic_profile_tools") === "1",
-    };
+  /**
+   * Records the scope a caller stated for a cwd so a later delegation that
+   * omits scope reuses what was already approved instead of falling back to
+   * whole-tree access. Re-stating the same scope refreshes the existing grant.
+   */
+  recordScopeGrant(cwd: string, profileId: string, scope: TaskScope): ScopeGrant {
+    const project = resolve(cwd);
+    const scopeJson = JSON.stringify(scope);
+    const now = new Date().toISOString();
+    const existing = this.database.query<{ id: string }, [string, string, string]>(
+      "SELECT id FROM scope_grants WHERE cwd = ? AND profile_id = ? AND scope_json = ?",
+    ).get(project, profileId, scopeJson);
+    if (existing) {
+      this.database.query(`
+        UPDATE scope_grants
+        SET last_used_at = ?, use_count = use_count + 1
+        WHERE id = ?
+      `).run(now, existing.id);
+      return this.getScopeGrant(existing.id)!;
+    }
+    const id = crypto.randomUUID();
+    this.database.query(`
+      INSERT INTO scope_grants(id, cwd, profile_id, scope_json, created_at, last_used_at, use_count)
+      VALUES (?, ?, ?, ?, ?, ?, 1)
+    `).run(id, project, profileId, scopeJson, now, now);
+    return this.getScopeGrant(id)!;
   }
 
-  saveSettings(settings: BrokerSettings): void {
+  /**
+   * The grant a delegation should inherit. A scope stated for this profile wins;
+   * only when the profile has none of its own does a grant approved for some
+   * other destination come back, so the caller can flag the reuse.
+   */
+  latestScopeGrant(cwd: string, profileId?: string): ScopeGrant | undefined {
+    const project = resolve(cwd);
+    if (profileId) {
+      const own = this.database.query<ScopeGrantRow, [string, string]>(`
+        SELECT ${GRANT_COLUMNS} FROM scope_grants WHERE cwd = ? AND profile_id = ?
+        ORDER BY last_used_at DESC, id DESC LIMIT 1
+      `).get(project, profileId);
+      if (own) return scopeGrantFromRow(own);
+    }
+    const row = this.database.query<ScopeGrantRow, [string]>(`
+      SELECT ${GRANT_COLUMNS} FROM scope_grants WHERE cwd = ?
+      ORDER BY last_used_at DESC, id DESC LIMIT 1
+    `).get(project);
+    return row ? scopeGrantFromRow(row) : undefined;
+  }
+
+  getScopeGrant(id: string): ScopeGrant | undefined {
+    const row = this.database.query<ScopeGrantRow, [string]>(
+      `SELECT ${GRANT_COLUMNS} FROM scope_grants WHERE id = ?`,
+    ).get(id);
+    return row ? scopeGrantFromRow(row) : undefined;
+  }
+
+  listScopeGrants(): ScopeGrant[] {
+    return this.database.query<ScopeGrantRow, []>(
+      `SELECT ${GRANT_COLUMNS} FROM scope_grants ORDER BY last_used_at DESC, id DESC`,
+    ).all().map(scopeGrantFromRow);
+  }
+
+  touchScopeGrant(id: string): void {
     this.database.query(`
-      INSERT INTO settings(key, value) VALUES (?, ?)
-      ON CONFLICT(key) DO UPDATE SET value = excluded.value
-    `).run("dynamic_profile_tools", settings.dynamicProfileTools ? "1" : "0");
+      UPDATE scope_grants SET last_used_at = ?, use_count = use_count + 1 WHERE id = ?
+    `).run(new Date().toISOString(), id);
+  }
+
+  revokeScopeGrant(id: string): boolean {
+    return this.database.query("DELETE FROM scope_grants WHERE id = ?").run(id).changes === 1;
   }
 
   listMemories(cwd: string): MemoryEntry[] {
@@ -221,18 +302,38 @@ export class StateStore {
     this.database.query(`
       INSERT INTO tasks(
         id, profile_id, model, prompt, cwd, state, output, error, question,
-        parent_task_id, child_task_id, scope_json, allow_questions, timeout_ms,
+        parent_task_id, scope_json, grant_id, allow_questions, timeout_ms,
         session_id, completion_json, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       task.id, task.profileId, task.model, task.prompt, task.cwd, task.state,
       task.output, task.error ?? null, task.question ?? null, task.parentTaskId ?? null,
-      task.childTaskId ?? null, JSON.stringify(task.scope), task.allowQuestions ? 1 : 0,
+      JSON.stringify(task.scope), task.grantId ?? null, task.allowQuestions ? 1 : 0,
       task.timeoutMs ?? null, task.sessionId ?? null,
       task.completion ? JSON.stringify(task.completion) : null,
       task.createdAt, task.updatedAt,
     );
     this.addTaskEvent(task.id, "created", task.state, {});
+  }
+
+  /**
+   * Stores the text the worker actually received. The caller's prompt is only
+   * part of it: memories and the protocol wrapper are appended at launch, and
+   * without this the product cannot answer what was sent to the provider.
+   */
+  recordShippedPrompt(id: string, shippedPrompt: string): void {
+    this.database.query("UPDATE tasks SET shipped_prompt = ? WHERE id = ?").run(shippedPrompt, id);
+  }
+
+  /** Rolls a run's reported cost onto the task so spend survives the event stream. */
+  recordTaskCost(id: string, costUsd?: number, turns?: number): void {
+    if (costUsd === undefined && turns === undefined) return;
+    this.database.query(`
+      UPDATE tasks
+      SET cost_usd = COALESCE(cost_usd, 0) + COALESCE(?, 0),
+          turns = COALESCE(turns, 0) + COALESCE(?, 0)
+      WHERE id = ?
+    `).run(costUsd ?? null, turns ?? null, id);
   }
 
   captureTaskSessionId(id: string, provider: Profile["provider"], sessionId: string): boolean {
@@ -269,11 +370,11 @@ export class StateStore {
         : "";
       const changed = this.database.query<unknown, Array<string | number | null>>(`
         UPDATE tasks SET
-          state = ?, output = ?, error = ?, question = ?, child_task_id = ?,
+          state = ?, output = ?, error = ?, question = ?,
           completion_json = ?, updated_at = ?
         WHERE id = ? ${expected}
       `).run(
-        task.state, task.output, task.error ?? null, task.question ?? null, task.childTaskId ?? null,
+        task.state, task.output, task.error ?? null, task.question ?? null,
         task.completion ? JSON.stringify(task.completion) : null,
         task.updatedAt, task.id, ...expectedStates,
       );
@@ -295,10 +396,12 @@ export class StateStore {
     const state = completion.code === "timeout" ? "failed" : "cancelled";
     let cancelled = false;
     this.transaction(() => {
+      // A task parked on a question or blocked mid-run is exactly the one a
+      // caller most often wants to abandon, so those states cancel too.
       const changed = this.database.query(`
         UPDATE tasks
         SET state = ?, error = ?, completion_json = ?, updated_at = ?
-        WHERE id = ? AND state IN ('queued', 'running')
+        WHERE id = ? AND state IN ('queued', 'running', 'needs_input', 'blocked')
       `).run(state, reason, JSON.stringify(completion), now, id);
       if (changed.changes !== 1) return;
       this.addTaskEvent(id, state, state, { error: reason, completion });
@@ -311,14 +414,15 @@ export class StateStore {
     const now = new Date().toISOString();
     let answered = false;
     this.transaction(() => {
+      const attempts = this.closeAttempt(id, now);
       const changed = this.database.query(`
         UPDATE tasks
         SET state = 'queued', output = '', error = NULL, question = NULL,
-            completion_json = NULL, updated_at = ?
+            completion_json = NULL, attempts_json = ?, updated_at = ?
         WHERE id = ? AND state = 'needs_input'
-      `).run(now, id);
+      `).run(JSON.stringify(attempts), now, id);
       if (changed.changes !== 1) throw new Error(`task does not need input: ${id}`);
-      this.addTaskEvent(id, "answered", "queued", {});
+      this.addTaskEvent(id, "answered", "queued", { attempt: attempts.length });
       answered = true;
     });
     const task = answered ? this.getTask(id) : undefined;
@@ -326,9 +430,48 @@ export class StateStore {
     return task;
   }
 
+  /**
+   * Moves the finished run's result into `attempts` and returns the new list.
+   * Reply and resume reuse the same row, so without this the output that
+   * prompted the question is overwritten by the run that answers it.
+   */
+  private closeAttempt(id: string, endedAt: string): TaskAttempt[] {
+    const row = this.database.query<{
+      output: string;
+      error: string | null;
+      question: string | null;
+      completion_json: string | null;
+      attempts_json: string | null;
+    }, [string]>(`
+      SELECT output, error, question, completion_json, attempts_json FROM tasks WHERE id = ?
+    `).get(id);
+    if (!row) return [];
+    const attempts = row.attempts_json ? JSON.parse(row.attempts_json) as TaskAttempt[] : [];
+    if (!row.output && !row.error && !row.question) return attempts;
+    // A task can be answered or resumed indefinitely, and each attempt carries a
+    // full worker output. Keeping only the most recent bounds both the row and
+    // the JSON parse every read of that row pays for.
+    while (attempts.length >= MAX_ATTEMPTS) attempts.shift();
+    attempts.push({
+      output: row.output,
+      ...(row.error ? { error: row.error } : {}),
+      ...(row.question ? { question: row.question } : {}),
+      ...(row.completion_json
+        ? { completion: JSON.parse(row.completion_json) as TaskCompletion }
+        : {}),
+      endedAt,
+    });
+    return attempts;
+  }
+
   resumeTask(
     id: string,
-    updates: { timeoutMs?: number; scope?: TaskScope; allowQuestions?: boolean } = {},
+    updates: {
+      timeoutMs?: number;
+      scope?: TaskScope;
+      grantId?: string;
+      allowQuestions?: boolean;
+    } = {},
   ): Task {
     const now = new Date().toISOString();
     let resumed = false;
@@ -339,17 +482,21 @@ export class StateStore {
       if (!current || !["failed", "cancelled", "blocked"].includes(current.state)) {
         throw new Error(`task cannot be resumed: ${id}`);
       }
+      const attempts = this.closeAttempt(id, now);
       const changed = this.database.query(`
         UPDATE tasks
         SET state = 'queued', output = '', error = NULL, question = NULL,
-            completion_json = NULL, timeout_ms = COALESCE(?, timeout_ms),
+            completion_json = NULL, attempts_json = ?, timeout_ms = COALESCE(?, timeout_ms),
             scope_json = COALESCE(?, scope_json),
+            grant_id = COALESCE(?, grant_id),
             allow_questions = COALESCE(?, allow_questions), updated_at = ?
         WHERE id = ?
           AND state IN ('failed', 'cancelled', 'blocked')
       `).run(
+        JSON.stringify(attempts),
         updates.timeoutMs ?? null,
         updates.scope ? JSON.stringify(updates.scope) : null,
+        updates.grantId ?? null,
         updates.allowQuestions === undefined ? null : updates.allowQuestions ? 1 : 0,
         now,
         id,
@@ -357,6 +504,7 @@ export class StateStore {
       if (changed.changes !== 1) throw new Error(`task cannot be resumed: ${id}`);
       this.addTaskEvent(id, "resumed", "queued", {
         previousState: current.state,
+        attempt: attempts.length,
         ...(updates.timeoutMs !== undefined ? { timeoutMs: updates.timeoutMs } : {}),
         ...(updates.scope ? { scopeUpdated: true } : {}),
         ...(updates.allowQuestions !== undefined ? { allowQuestions: updates.allowQuestions } : {}),
@@ -370,9 +518,7 @@ export class StateStore {
 
   getTask(id: string): Task | undefined {
     const row = this.database.query<TaskRow, [string]>(`
-      SELECT id, profile_id, model, prompt, cwd, state, output, error, question,
-             parent_task_id, child_task_id, scope_json, allow_questions, timeout_ms,
-             session_id, completion_json, archived_at, created_at, updated_at
+      SELECT ${TASK_COLUMNS}
       FROM tasks WHERE id = ?
     `).get(id);
     return row ? taskFromRow(row) : undefined;
@@ -381,9 +527,7 @@ export class StateStore {
   listTasks(limit = 200, archived: TaskListQuery["archived"] = "active"): Task[] {
     const where = archiveClause(archived);
     return this.database.query<TaskRow, [number]>(`
-      SELECT id, profile_id, model, prompt, cwd, state, output, error, question,
-             parent_task_id, child_task_id, scope_json, allow_questions, timeout_ms,
-             session_id, completion_json, archived_at, created_at, updated_at
+      SELECT ${TASK_COLUMNS}
       FROM tasks
       WHERE ${where}
       ORDER BY updated_at DESC, id DESC
@@ -407,12 +551,15 @@ export class StateStore {
       clauses.push("profile_id = ?");
       values.push(query.profile);
     }
+    if (query.parent) {
+      // The batch is the parent plus everything fanned out under it.
+      clauses.push("(parent_task_id = ? OR id = ?)");
+      values.push(query.parent, query.parent);
+    }
     clauses.push(archiveClause(query.archived));
     const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
     const rows = this.database.query<TaskRow, Array<string | number>>(`
-      SELECT id, profile_id, model, prompt, cwd, state, output, error, question,
-             parent_task_id, child_task_id, scope_json, allow_questions, timeout_ms,
-             session_id, completion_json, archived_at, created_at, updated_at
+      SELECT ${TASK_COLUMNS}
       FROM tasks
       ${where}
       ORDER BY updated_at DESC, id DESC
@@ -469,7 +616,7 @@ export class StateStore {
   ): TaskEvent[] {
     if (taskIds.length === 0) return [];
     const placeholders = taskIds.map(() => "?").join(",");
-    const meaningful = meaningfulOnly ? "AND event_type != 'agent.system'" : "";
+    const meaningful = meaningfulOnly ? `AND event_type NOT IN ${NOISE_EVENTS}` : "";
     const rows = this.database.query<{
       id: number;
       task_id: string;
@@ -495,7 +642,7 @@ export class StateStore {
     let latest = 0;
     const query = this.database.query<{ id: number | null }, [string]>(
       `SELECT MAX(id) AS id FROM task_events WHERE task_id = ? ${
-        meaningfulOnly ? "AND event_type != 'agent.system'" : ""
+        meaningfulOnly ? `AND event_type NOT IN ${NOISE_EVENTS}` : ""
       }`,
     );
     for (const taskId of taskIds) latest = Math.max(latest, query.get(taskId)?.id ?? 0);
@@ -606,12 +753,6 @@ export class StateStore {
     this.database.exec("PRAGMA foreign_keys = ON");
   }
 
-  private getSetting(key: string): string | undefined {
-    return this.database.query<{ value: string }, [string]>(
-      "SELECT value FROM settings WHERE key = ?",
-    ).get(key)?.value;
-  }
-
   private migrate(): void {
     this.database.exec(`
       CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -649,16 +790,21 @@ export class StateStore {
         error TEXT,
         question TEXT,
         parent_task_id TEXT REFERENCES tasks(id),
-        child_task_id TEXT REFERENCES tasks(id),
         scope_json TEXT NOT NULL DEFAULT '{"read":["**"],"write":["**"]}' CHECK(json_valid(scope_json)),
+        grant_id TEXT,
         allow_questions INTEGER NOT NULL DEFAULT 1 CHECK(allow_questions IN (0,1)),
         timeout_ms INTEGER,
         session_id TEXT,
+        shipped_prompt TEXT,
         completion_json TEXT CHECK(completion_json IS NULL OR json_valid(completion_json)),
+        attempts_json TEXT CHECK(attempts_json IS NULL OR json_valid(attempts_json)),
+        cost_usd REAL,
+        turns INTEGER,
         archived_at TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+      CREATE INDEX IF NOT EXISTS tasks_parent ON tasks(parent_task_id);
       CREATE INDEX IF NOT EXISTS tasks_updated_at ON tasks(updated_at DESC, id DESC);
       CREATE INDEX IF NOT EXISTS tasks_profile_updated ON tasks(profile_id, updated_at DESC);
       CREATE TABLE IF NOT EXISTS task_events (
@@ -687,6 +833,16 @@ export class StateStore {
         updated_at TEXT NOT NULL,
         PRIMARY KEY(cwd, key)
       );
+      CREATE TABLE IF NOT EXISTS scope_grants (
+        id TEXT PRIMARY KEY,
+        cwd TEXT NOT NULL,
+        profile_id TEXT,
+        scope_json TEXT NOT NULL CHECK(json_valid(scope_json)),
+        created_at TEXT NOT NULL,
+        last_used_at TEXT NOT NULL,
+        use_count INTEGER NOT NULL DEFAULT 1
+      );
+      CREATE INDEX IF NOT EXISTS scope_grants_cwd ON scope_grants(cwd, last_used_at DESC);
       INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (1, 'profiles tasks and events');
     `);
     const columns = new Set(this.database.query<{ name: string }, []>(
@@ -702,6 +858,31 @@ export class StateStore {
     }
     if (!taskColumns.has("archived_at")) {
       this.database.exec("ALTER TABLE tasks ADD COLUMN archived_at TEXT");
+    }
+    for (const [column, type] of [
+      ["grant_id", "TEXT"],
+      ["shipped_prompt", "TEXT"],
+      ["attempts_json", "TEXT"],
+      ["cost_usd", "REAL"],
+      ["turns", "INTEGER"],
+    ] as const) {
+      if (!taskColumns.has(column)) {
+        this.database.exec(`ALTER TABLE tasks ADD COLUMN ${column} ${type}`);
+      }
+    }
+    // child_task_id was never written by any code path, so it always read NULL
+    // and made the lineage look richer than it was.
+    if (taskColumns.has("child_task_id")) {
+      this.database.exec("ALTER TABLE tasks DROP COLUMN child_task_id");
+    }
+    // Grants predating per-destination approval keep a NULL profile_id, which
+    // reads as "approved for no particular profile" and so always reports as
+    // inherited rather than silently counting as this profile's own.
+    const grantColumns = new Set(this.database.query<{ name: string }, []>(
+      "PRAGMA table_info(scope_grants)",
+    ).all().map(({ name }) => name));
+    if (grantColumns.size > 0 && !grantColumns.has("profile_id")) {
+      this.database.exec("ALTER TABLE scope_grants ADD COLUMN profile_id TEXT");
     }
     const failureColumns = new Set(this.database.query<{ name: string }, []>(
       "PRAGMA table_info(profile_failures)",
@@ -733,6 +914,10 @@ export class StateStore {
     this.database.query(`
       INSERT OR IGNORE INTO schema_migrations(version, name)
       VALUES (7, 'task archives')
+    `).run();
+    this.database.query(`
+      INSERT OR IGNORE INTO schema_migrations(version, name)
+      VALUES (8, 'scope grants, shipped prompts, attempts and cost')
     `).run();
     const backfilled = this.database.query<{ version: number }, []>(
       "SELECT version FROM schema_migrations WHERE version = 5",
@@ -910,6 +1095,14 @@ export function closeStateStore(): void {
 
 export function databasePath(): string {
   if (Bun.env.INTER_DB) return resolve(Bun.env.INTER_DB);
+  // Opening the store runs migrations. A test that reaches this path would
+  // migrate the developer's live broker database out from under the running
+  // app, so tests must always name their own file.
+  if (Bun.env.NODE_ENV === "test") {
+    throw new Error(
+      "refusing to open the default broker database from a test; set INTER_DB to a temporary path first",
+    );
+  }
   return join(homedir(), ".inter", "inter.db");
 }
 
@@ -932,6 +1125,7 @@ function taskFromRow(row: TaskRow): Task {
     profileId: row.profile_id,
     model: row.model,
     prompt: row.prompt,
+    ...(row.shipped_prompt ? { shippedPrompt: row.shipped_prompt } : {}),
     cwd: row.cwd,
     state: row.state,
     output: row.output,
@@ -940,20 +1134,50 @@ function taskFromRow(row: TaskRow): Task {
     ...(row.error ? { error: row.error } : {}),
     ...(row.question ? { question: row.question } : {}),
     ...(row.parent_task_id ? { parentTaskId: row.parent_task_id } : {}),
-    ...(row.child_task_id ? { childTaskId: row.child_task_id } : {}),
     scope: JSON.parse(row.scope_json) as Task["scope"],
+    ...(row.grant_id ? { grantId: row.grant_id } : {}),
     allowQuestions: row.allow_questions === 1,
     ...(row.timeout_ms ? { timeoutMs: row.timeout_ms } : {}),
     ...(row.session_id ? { sessionId: row.session_id } : {}),
     ...(row.completion_json
       ? { completion: JSON.parse(row.completion_json) as TaskCompletion }
       : {}),
+    ...(row.attempts_json
+      ? { attempts: JSON.parse(row.attempts_json) as TaskAttempt[] }
+      : {}),
+    ...(row.cost_usd === null ? {} : { costUsd: row.cost_usd }),
+    ...(row.turns === null ? {} : { turns: row.turns }),
     ...(row.archived_at ? { archivedAt: row.archived_at } : {}),
   };
 }
 
+interface ScopeGrantRow {
+  id: string;
+  cwd: string;
+  profile_id: string | null;
+  scope_json: string;
+  created_at: string;
+  last_used_at: string;
+  use_count: number;
+}
+
+function scopeGrantFromRow(row: ScopeGrantRow): ScopeGrant {
+  return {
+    id: row.id,
+    cwd: row.cwd,
+    profileId: row.profile_id ?? "",
+    scope: JSON.parse(row.scope_json) as TaskScope,
+    createdAt: row.created_at,
+    lastUsedAt: row.last_used_at,
+    useCount: row.use_count,
+  };
+}
+
+// Builds the summary from the row directly. Going through taskFromRow would
+// JSON.parse the full attempt history for every listed task only to discard it,
+// and the app polls this list continuously.
 function taskSummaryFromRow(row: TaskRow): TaskSummary {
-  const task = taskFromRow(row);
+  const task = taskFromRow({ ...row, attempts_json: null });
   return {
     id: task.id,
     profileId: task.profileId,
@@ -966,9 +1190,10 @@ function taskSummaryFromRow(row: TaskRow): TaskSummary {
     ...(task.error ? { error: task.error.slice(0, 500) } : {}),
     ...(task.question ? { question: task.question } : {}),
     ...(task.parentTaskId ? { parentTaskId: task.parentTaskId } : {}),
-    ...(task.childTaskId ? { childTaskId: task.childTaskId } : {}),
+    ...(task.grantId ? { grantId: task.grantId } : {}),
     ...(task.sessionId ? { sessionId: task.sessionId } : {}),
     ...(task.completion ? { completion: task.completion } : {}),
+    ...(task.costUsd === undefined ? {} : { costUsd: task.costUsd }),
     ...(task.archivedAt ? { archivedAt: task.archivedAt } : {}),
   };
 }
