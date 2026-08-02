@@ -65,11 +65,23 @@ export function modelAllowed(
   providerId: string,
   modelId: string,
 ): boolean {
+  return Number.isFinite(allowRank(route, providerId, modelId));
+}
+
+/// Position of the first allow rule matching this model. Entries are written
+/// best-first, so this is the preference order to use when a caller has already
+/// named the profile and only the model is left to choose.
+export function allowRank(
+  route: RoutingPolicyRoute,
+  providerId: string,
+  modelId: string,
+): number {
   const provider = normalizeId(providerId);
   const model = normalizeId(modelId);
-  return route.allow.some((rule) =>
+  const index = route.allow.findIndex((rule) =>
     rule.provider === provider && globMatches(rule.model, model)
   );
+  return index < 0 ? Number.POSITIVE_INFINITY : index;
 }
 
 export function normalizeTaskClass(value: string): TaskClass | undefined {

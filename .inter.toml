@@ -1,22 +1,31 @@
 version = 1
 
-# Routing policy for this repo: pin each task class to a provider so routing
-# does not collapse onto zero-cost opencode catalog entries.
+# Routing policy for this repo. Each class lists more than one provider so the
+# rate-limit penalty in model-router has somewhere to route when an account is
+# spent. Entries are ordered best-first per provider: that order decides which
+# model a caller gets when they name the profile but not the model.
+#
+# No haiku and no free-tier catalog entries anywhere. Cheapest-wins produced
+# models that answer without thinking, so the floor is sonnet on claude and a
+# gpt-5.6 or kimi elsewhere. Luna leads on codex and opencode-go.
 
 [routes.mechanical]
 preference = "speed"
-min_quality = 2
+min_quality = 3
 allow = [
-  { provider = "claude", model = "haiku" },
-  { provider = "codex", model = "*mini*" },
+  { provider = "claude", model = "sonnet" },
+  { provider = "opencode", model = "opencode-go/gpt-5.6-luna" },
+  { provider = "codex", model = "gpt-5.6-luna" },
 ]
 
 [routes.general]
-preference = "cost"
-min_quality = 3
+preference = "balanced"
+min_quality = 4
 allow = [
-  { provider = "opencode", model = "opencode-go/*" },
-  { provider = "codex", model = "*mini*" },
+  { provider = "claude", model = "sonnet" },
+  { provider = "opencode", model = "opencode-go/gpt-5.6-luna" },
+  { provider = "opencode", model = "opencode-go/kimi-k2.7-code" },
+  { provider = "codex", model = "gpt-5.6-luna" },
 ]
 
 [routes.context]
@@ -24,6 +33,10 @@ preference = "quality"
 min_quality = 4
 allow = [
   { provider = "claude", model = "sonnet" },
+  { provider = "claude", model = "opus" },
+  { provider = "opencode", model = "opencode-go/gpt-5.6-luna" },
+  { provider = "opencode", model = "opencode-go/kimi-k2.7-code" },
+  { provider = "codex", model = "gpt-5.6-luna" },
 ]
 
 [routes.build]
@@ -31,11 +44,24 @@ preference = "quality"
 min_quality = 5
 allow = [
   { provider = "claude", model = "opus" },
+  { provider = "claude", model = "sonnet" },
+  { provider = "opencode", model = "opencode-go/gpt-5.6-luna" },
+  { provider = "opencode", model = "opencode-go/kimi-k3" },
+  { provider = "codex", model = "gpt-5.6-luna" },
 ]
 
+# Security, architecture, and root-cause work lands here. Kimi is listed first
+# because this class is where provider policy refusals bite hardest on
+# authorized security work, so naming the opencode profile explicitly gets kimi.
+# Automatic routing is score-driven and currently lands on luna, which is both
+# quality 5 and far cheaper. Claude/opus is the fallback whose remaining
+# headroom Inter can actually measure, since opencode reports no usage at all.
 [routes.reasoning]
 preference = "quality"
 min_quality = 5
 allow = [
-  { provider = "codex", model = "*" },
+  { provider = "opencode", model = "opencode-go/kimi-k3" },
+  { provider = "opencode", model = "opencode-go/gpt-5.6-luna" },
+  { provider = "claude", model = "opus" },
+  { provider = "codex", model = "gpt-5.6-luna" },
 ]

@@ -274,18 +274,31 @@ async function createMcpServer(): Promise<McpServer> {
         ),
       allowQuestions: z.boolean().default(true)
         .describe("Whether the worker may pause in needs_input to ask. False makes it guess or stop."),
+      effort: z.enum(["minimal", "low", "medium", "high", "xhigh", "max"]).optional()
+        .describe(
+          "Reasoning effort for this run. Honoured by codex and opencode only; claude and " +
+          "antigravity expose no lever and ignore it. Call profiles with include: [\"models\"] " +
+          "to read each model's published ladder before choosing.",
+        ),
       timeoutMs: z.number().int().min(1).max(86_400_000).optional()
         .describe("Hard runtime limit. The task lands in failed with code timeout."),
     }),
-  }, async ({ profile, model, preference, prompt, cwd, parent, scope, allowQuestions, timeoutMs }) => {
+  }, async ({ profile, model, preference, prompt, cwd, parent, scope, allowQuestions, effort, timeoutMs }) => {
     if (profile) {
-      const task = await delegate(profile, prompt, cwd, model, parent, { scope, allowQuestions, timeoutMs });
+      // The caller named the account but not the model. Let the project policy
+      // pick that profile's best model for this task class instead of falling
+      // back to its single static default, which ignores difficulty entirely.
+      const chosen = model ?? await routeModel(prompt, { preference, cwd, profileId: profile })
+        .then((route) => route.model)
+        .catch(() => undefined);
+      const task = await delegate(profile, prompt, cwd, chosen, parent, { scope, allowQuestions, effort, timeoutMs });
       return result({ ...startedTask(task), ...(await warningsFor(cwd, task)) });
     }
     const selection = await routeModel(prompt, { preference, modelHint: model, cwd });
     const task = await delegate(selection.profileId, prompt, cwd, selection.model, parent, {
       scope,
       allowQuestions,
+      effort,
       timeoutMs,
     });
     return result({ ...startedTask(task), selection, ...(await warningsFor(cwd, task)) });

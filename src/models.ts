@@ -74,10 +74,47 @@ async function run(command: string[], profile: Profile): Promise<string> {
 }
 
 export function parseCodexModels(raw: string, profile: Profile): ModelInfo[] {
-  const parsed = JSON.parse(raw) as { models?: Array<{ slug?: string; display_name?: string; visibility?: string }> };
+  const parsed = JSON.parse(raw) as {
+    models?: Array<{
+      slug?: string;
+      display_name?: string;
+      visibility?: string;
+      default_reasoning_level?: unknown;
+      supported_reasoning_levels?: unknown;
+    }>;
+  };
   return (parsed.models ?? [])
     .filter((item) => item.slug && item.visibility !== "hidden")
-    .map((item) => model(profile, item.slug!, item.display_name || item.slug!, "discovered"));
+    .map((item) =>
+      model(
+        profile,
+        item.slug!,
+        item.display_name || item.slug!,
+        "discovered",
+        parseEfforts(item.supported_reasoning_levels, item.default_reasoning_level),
+      )
+    );
+}
+
+/// Codex publishes an effort ladder per model. Entries arrive as objects
+/// carrying an effort id and a description; only the id is needed to dispatch,
+/// so the description is dropped rather than stored and never used.
+function parseEfforts(supported: unknown, fallback: unknown): Partial<ModelInfo> {
+  const levels = Array.isArray(supported)
+    ? supported
+      .map((level) => {
+        if (typeof level === "string") return level;
+        const effort = (level as { effort?: unknown } | null)?.effort;
+        return typeof effort === "string" ? effort : undefined;
+      })
+      .filter((level): level is string => Boolean(level))
+    : [];
+  const efforts = [...new Set(levels)];
+  const defaultEffort = typeof fallback === "string" ? fallback : undefined;
+  return {
+    ...(efforts.length > 0 ? { efforts } : {}),
+    ...(defaultEffort !== undefined ? { defaultEffort } : {}),
+  };
 }
 
 export function parseOpenCodeModels(raw: string, profile: Profile): ModelInfo[] {

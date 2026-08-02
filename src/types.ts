@@ -98,6 +98,8 @@ export interface Task {
   grantId?: string;
   allowQuestions: boolean;
   timeoutMs?: number;
+  /** Reasoning effort requested for this run; persisted so resume reuses it. */
+  effort?: string;
   sessionId?: string;
   completion?: TaskCompletion;
   attempts?: TaskAttempt[];
@@ -137,5 +139,10 @@ export interface ModelInfo {
   };
   contextWindow?: number;
   reasoning?: boolean;
+  /// Reasoning effort levels this model accepts, weakest first, as published by
+  /// the provider. Undefined means the provider does not publish a ladder, not
+  /// that the model has none.
+  efforts?: string[];
+  defaultEffort?: string;
   toolCall?: boolean;
 }

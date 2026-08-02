@@ -42,6 +42,42 @@ describe("CLI adapters", () => {
     expect(command).not.toContain('approval_policy="never"');
   });
 
+  test("passes reasoning effort to Codex as a quoted TOML config override", () => {
+    const command = commandFor({ ...base, provider: "codex" }, "review", "/workspace", "gpt-5.6-luna", undefined, "max");
+    expect(command).toContain("-c");
+    expect(command).toContain('model_reasoning_effort="max"');
+  });
+
+  test("passes reasoning effort to OpenCode as a variant", () => {
+    const command = commandFor({ ...base, provider: "opencode" }, "review", "/workspace", "opencode-go/gpt-5.6-luna", undefined, "high");
+    expect(command.join(" ")).toContain("--variant high");
+  });
+
+  test("omits the effort flag entirely when no effort is requested", () => {
+    const codex = commandFor({ ...base, provider: "codex" }, "review", "/workspace");
+    const opencode = commandFor({ ...base, provider: "opencode" }, "review", "/workspace");
+    expect(codex).not.toContain("-c");
+    expect(opencode).not.toContain("--variant");
+  });
+
+  test("drops effort for providers with no lever rather than faking one", () => {
+    const claude = commandFor({ ...base, provider: "claude" }, "review", "/workspace", "opus", undefined, "max");
+    expect(claude.join(" ")).not.toContain("max");
+  });
+
+  test("keeps reasoning effort when resuming a session", () => {
+    const command = resumeCommandFor(
+      { ...base, provider: "codex" },
+      "continue",
+      "/repo",
+      "thread-9",
+      "gpt-5.6-luna",
+      undefined,
+      "xhigh",
+    );
+    expect(command).toContain('model_reasoning_effort="xhigh"');
+  });
+
   test("extracts Claude final response", () => {
     expect(finalText(base, [
       JSON.stringify({ type: "system", subtype: "init" }),

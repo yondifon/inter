@@ -1,15 +1,25 @@
 import type { Profile, Provider } from "./types";
 
-export function commandFor(profile: Profile, prompt: string, cwd: string, model = profile.model, hookUrl?: string): string[] {
+export function commandFor(
+  profile: Profile,
+  prompt: string,
+  cwd: string,
+  model = profile.model,
+  hookUrl?: string,
+  effort?: string,
+): string[] {
   if (profile.command) {
     return profile.command.map((part) => part
       .replaceAll("{prompt}", prompt)
       .replaceAll("{model}", model)
-      .replaceAll("{cwd}", cwd));
+      .replaceAll("{cwd}", cwd)
+      .replaceAll("{effort}", effort ?? ""));
   }
 
   switch (profile.provider) {
     case "claude":
+      // Claude Code exposes no reasoning-effort flag, so effort cannot be
+      // honoured here and is deliberately dropped rather than faked.
       return [
         "claude", "-p", "--output-format", "stream-json", "--verbose", "--model", model,
         "--permission-mode", "acceptEdits",
@@ -21,11 +31,17 @@ export function commandFor(profile: Profile, prompt: string, cwd: string, model 
       // Inter remains the sole enforcement boundary for the approved task scope.
       return [
         "codex", "exec", "--json", "--model", model,
+        // -c values parse as TOML, so the level ships quoted as a string.
+        ...(effort ? ["-c", `model_reasoning_effort="${effort}"`] : []),
         "--dangerously-bypass-approvals-and-sandbox",
         "--cd", cwd, "--skip-git-repo-check", prompt,
       ];
     case "opencode":
-      return ["opencode", "run", "--format", "json", "--model", model, "--dir", cwd, "--auto", prompt];
+      return [
+        "opencode", "run", "--format", "json", "--model", model,
+        ...(effort ? ["--variant", effort] : []),
+        "--dir", cwd, "--auto", prompt,
+      ];
     case "antigravity":
       // Inter's outer sandbox enforces task scope. Auto-approve Antigravity's
       // inner prompts so non-interactive tool calls do not stall.
@@ -52,6 +68,7 @@ export function resumeCommandFor(
   sessionId: string,
   model = profile.model,
   hookUrl?: string,
+  effort?: string,
 ): string[] {
   if (!profile.command) {
     switch (profile.provider) {
@@ -66,13 +83,15 @@ export function resumeCommandFor(
         // Resume inherits cwd from the process and scope from Inter's outer sandbox.
         return [
           "codex", "exec", "resume", sessionId, "--json", "--model", model,
+          ...(effort ? ["-c", `model_reasoning_effort="${effort}"`] : []),
           "--dangerously-bypass-approvals-and-sandbox",
           "--skip-git-repo-check", prompt,
         ];
       case "opencode":
         return [
-          "opencode", "run", "--format", "json", "--model", model, "--dir", cwd,
-          "--auto", "--session", sessionId, prompt,
+          "opencode", "run", "--format", "json", "--model", model,
+          ...(effort ? ["--variant", effort] : []),
+          "--dir", cwd, "--auto", "--session", sessionId, prompt,
         ];
       case "antigravity":
         return [

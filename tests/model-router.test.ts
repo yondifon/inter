@@ -127,6 +127,105 @@ allow = [{ provider = "claude", model = "opus" }]
     expect(route.profileId).toBe("opencode");
   });
 
+  test("picks a named profile's best model for the class by allow order", () => {
+    // The allow list puts kimi-k3 ahead of big-pickle, so naming the profile
+    // must yield kimi-k3 even though it is not the profile's static default.
+    const orderedPolicy: RoutingPolicy = {
+      version: 1,
+      path: "/project/.inter.toml",
+      routes: {
+        build: {
+          preference: "quality",
+          minQuality: 4,
+          allow: [
+            { provider: "opencode", model: "opencode/kimi-k3" },
+            { provider: "opencode", model: "opencode/big-pickle" },
+          ],
+        },
+      },
+    };
+    const route = chooseModel(
+      "Implement the feature.",
+      models,
+      profiles,
+      { profileId: "opencode" },
+      [],
+      orderedPolicy,
+    );
+
+    expect(route.profileId).toBe("opencode");
+    expect(route.model).toBe("opencode/kimi-k3");
+  });
+
+  test("falls to the next allowed model when the profile's first choice is down", () => {
+    const orderedPolicy: RoutingPolicy = {
+      version: 1,
+      path: "/project/.inter.toml",
+      routes: {
+        build: {
+          preference: "quality",
+          minQuality: 4,
+          allow: [
+            { provider: "opencode", model: "opencode/kimi-k3" },
+            { provider: "opencode", model: "opencode/big-pickle" },
+          ],
+        },
+      },
+    };
+    const route = chooseModel(
+      "Implement the feature.",
+      models,
+      profiles,
+      { profileId: "opencode" },
+      [{
+        profile: "opencode",
+        provider: "opencode",
+        model: "opencode/kimi-k3",
+        state: "unavailable",
+        source: "task",
+        reason: "Observed rate limit",
+        checkedAt: "2026-08-02T00:00:00.000Z",
+      }],
+      orderedPolicy,
+    );
+
+    expect(route.model).toBe("opencode/big-pickle");
+  });
+
+  test("leaves automatic routing score-driven so the usage penalty still wins", () => {
+    // No profileId: allow order must not override the rate-limit deprioritization.
+    const claudeSpent = {
+      profile: "claude",
+      provider: "claude" as const,
+      supported: true,
+      source: "claude-cli" as const,
+      windows: [{ label: "Current session", kind: "session" as const, usedPercent: 96 }],
+    };
+    const route = chooseModel(
+      "Implement the feature.",
+      models,
+      profiles,
+      {},
+      [],
+      {
+        version: 1,
+        path: "/project/.inter.toml",
+        routes: {
+          build: {
+            minQuality: 4,
+            allow: [
+              { provider: "claude", model: "opus" },
+              { provider: "opencode", model: "opencode/kimi-k3" },
+            ],
+          },
+        },
+      },
+      [claudeSpent],
+    );
+
+    expect(route.profileId).toBe("opencode");
+  });
+
   test("classifies commit-message work as mechanical", () => {
     expect(classifyTask("Write a commit message for this diff.").requiredQuality).toBe(2);
   });

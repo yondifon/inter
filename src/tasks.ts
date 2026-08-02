@@ -34,6 +34,8 @@ export interface DelegateOptions {
   scope?: TaskScope;
   allowQuestions?: boolean;
   timeoutMs?: number;
+  /** Reasoning effort. Only codex and opencode expose a lever for it. */
+  effort?: string;
 }
 
 export interface ResumeOptions {
@@ -210,6 +212,7 @@ async function prepareTask(
     allowQuestions: options.allowQuestions !== false,
     ...(parentTaskId ? { parentTaskId } : {}),
     ...(timeoutMs ? { timeoutMs } : {}),
+    ...(options.effort ? { effort: options.effort } : {}),
   };
   return { task, profile, ...(granted.inheritedFrom ? { inheritedFrom: granted.inheritedFrom } : {}) };
 }
@@ -348,8 +351,8 @@ async function runTask(
     let resumeSessionMismatch: string | undefined;
     while (true) {
       const command = resumeWith
-        ? resumeCommandFor(profile, prompt, task.cwd, resumeWith, task.model, hookUrl)
-        : commandFor(profile, prompt, task.cwd, task.model, hookUrl);
+        ? resumeCommandFor(profile, prompt, task.cwd, resumeWith, task.model, hookUrl, task.effort)
+        : commandFor(profile, prompt, task.cwd, task.model, hookUrl, task.effort);
       const child = Bun.spawn(sandboxedCommand(command, task.cwd, task.scope, profile, scratchDir), {
         cwd: task.cwd,
         detached: true,

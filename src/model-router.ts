@@ -2,6 +2,7 @@ import { loadConfig } from "./config";
 import { listModels } from "./models";
 import { normalizeProfileStatuses, type ProfileStatus } from "./profile-status";
 import {
+  allowRank,
   loadRoutingPolicy,
   modelAllowed,
   routeForTask,
@@ -44,6 +45,10 @@ export interface ModelRoute {
 export interface RoutePreferences {
   preference?: RoutePreference;
   modelHint?: string;
+  /// Restrict routing to one profile the caller already named, leaving only the
+  /// model to choose. Within a named profile the policy allow order wins, since
+  /// the caller picked the account and wants its best model for this class.
+  profileId?: string;
 }
 
 export interface RouteOptions extends RoutePreferences {
@@ -86,9 +91,13 @@ export function chooseModel(
   const enabled = new Set(profiles.filter(({ enabled }) => enabled).map(({ id }) => id));
   const base = models.filter((model) =>
     enabled.has(model.profileId) &&
+    (options.profileId === undefined || model.profileId === options.profileId) &&
     model.toolCall !== false &&
     !/(?:image|video|audio|embedding|tts)(?:[-/:]|$)/i.test(model.id)
   );
+  if (options.profileId && base.length === 0) {
+    throw new Error(`profile ${options.profileId} has no routable model`);
+  }
   const requested = options.modelHint ? matchHint(base, options.modelHint) : base;
   if (options.modelHint && requested.length === 0) {
     throw new Error(`no model matches hint: ${options.modelHint}`);
@@ -150,6 +159,15 @@ export function chooseModel(
     }
   }
 
+  // Rank only bites when the caller named the profile. Left flat otherwise, so
+  // automatic routing stays score-driven and the rate-limit penalty still wins.
+  const rankByModel = new Map(usable.map((model) => [
+    statusKey(model.profileId, model.id),
+    options.profileId && policyRoute ? allowRank(policyRoute, model.provider, model.id) : 0,
+  ]));
+  const rankOf = ({ profileId, model }: ModelCandidate): number =>
+    rankByModel.get(statusKey(profileId, model)) ?? 0;
+
   const candidates = usable.map((model) => {
     const traits = modelTraits(model);
     return {
@@ -159,6 +177,7 @@ export function chooseModel(
       traits,
     };
   }).sort((a, b) =>
+    rankOf(a) - rankOf(b) ||
     b.score - a.score ||
     a.profileId.localeCompare(b.profileId) ||
     a.model.localeCompare(b.model)

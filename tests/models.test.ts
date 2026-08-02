@@ -26,6 +26,40 @@ describe("model catalogs", () => {
     }]);
   });
 
+  test("keeps the codex reasoning effort ladder and its default", () => {
+    const [model] = parseCodexModels(
+      JSON.stringify({
+        models: [{
+          slug: "gpt-5.6-luna",
+          display_name: "GPT-5.6-Luna",
+          visibility: "list",
+          default_reasoning_level: "medium",
+          supported_reasoning_levels: [
+            { effort: "low", description: "Fast responses with lighter reasoning" },
+            { effort: "medium", description: "Balances speed and reasoning depth" },
+            { effort: "high", description: "Greater reasoning depth" },
+            { effort: "xhigh", description: "Extra high reasoning depth" },
+            { effort: "max", description: "Maximum reasoning depth" },
+          ],
+        }],
+      }),
+      codex,
+    );
+
+    expect(model!.efforts).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    expect(model!.defaultEffort).toBe("medium");
+  });
+
+  test("omits the effort ladder when the provider publishes none", () => {
+    const [model] = parseCodexModels(
+      JSON.stringify({ models: [{ slug: "gpt-a", visibility: "list" }] }),
+      codex,
+    );
+
+    expect(model!.efforts).toBeUndefined();
+    expect(model!.defaultEffort).toBeUndefined();
+  });
+
   test("normalizes OpenCode provider/model lines", () => {
     const profile = { ...codex, provider: "opencode" as const };
     expect(parseOpenCodeModels("openai/gpt-5\nbad line\nanthropic/sonnet\n", profile).map(({ id }) => id))

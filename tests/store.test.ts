@@ -226,6 +226,20 @@ describe("SQLite state store", () => {
     reopened.close();
   });
 
+  test("round-trips reasoning effort so a resumed run keeps the level", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const withEffort = { ...task(), effort: "xhigh" };
+    store.createTask(withEffort);
+    expect(store.getTask(withEffort.id)!.effort).toBe("xhigh");
+
+    // Absent stays absent rather than surfacing as an empty string.
+    const withoutEffort = task();
+    store.createTask(withoutEffort);
+    expect(store.getTask(withoutEffort.id)!.effort).toBeUndefined();
+    store.close();
+  });
+
   test("persists terminal tasks and ordered lifecycle events", () => {
     const { db } = paths();
     const store = new StateStore({ path: db, seedProfiles: [profile] });
