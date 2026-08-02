@@ -60,7 +60,7 @@ export function taskEventView(event: TaskEvent, provider: Profile["provider"]): 
       ? `${formatBytes(Number(event.payload.bytes ?? 0))} payload over the ${formatBytes(Number(event.payload.limit ?? 0))} line limit — one event skipped, the trace continues`
       : undefined;
     const detail = event.type === "session_captured"
-      ? firstString(event.payload.sessionId)
+      ? "Root provider session mapped"
       : dropped
       ?? (event.payload.stalled === true
         ? `No agent event for ${Math.round(Number(event.payload.silentMs ?? 0) / 1_000)}s`

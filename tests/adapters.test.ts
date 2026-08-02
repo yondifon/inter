@@ -113,10 +113,11 @@ describe("CLI adapters", () => {
     expect(sessionIdFrom("claude", { type: "system", session_id: "11296fa9" })).toBe("11296fa9");
     expect(sessionIdFrom("codex", { type: "thread.started", thread_id: "019fb42b" })).toBe("019fb42b");
     expect(sessionIdFrom("opencode", { type: "step_start", sessionID: "ses_04bd" })).toBe("ses_04bd");
-    expect(sessionIdFrom("claude", { type: "assistant" })).toBeUndefined();
+    expect(sessionIdFrom("claude", { type: "assistant", session_id: "child" })).toBeUndefined();
     expect(sessionIdFrom("claude", { session_id: 42 })).toBeUndefined();
     expect(sessionIdFrom("claude", { session_id: "   " })).toBeUndefined();
-    expect(sessionIdFrom("codex", { thread_id: " thread-1 " })).toBe("thread-1");
+    expect(sessionIdFrom("codex", { thread_id: " thread-1 " })).toBeUndefined();
+    expect(sessionIdFrom("opencode", { type: "tool_use", sessionID: "child" })).toBeUndefined();
     expect(sessionIdFrom("antigravity", {
       event: "init",
       conversation_id: "conversation-1",
@@ -125,6 +126,10 @@ describe("CLI adapters", () => {
       event: "result",
       result: { conversation_id: "conversation-2" },
     })).toBe("conversation-2");
+    expect(sessionIdFrom("antigravity", {
+      event: "step_update",
+      conversation_id: "child",
+    })).toBeUndefined();
     expect(sessionIdFrom("antigravity", { session_id: "x" })).toBeUndefined();
   });
 });

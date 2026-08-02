@@ -137,9 +137,7 @@ async function prepareTask(
     throw new Error(`unknown parent task: ${parentTaskId}`);
   }
   const timeoutMs = options.timeoutMs;
-  if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 86_400_000)) {
-    throw new Error("timeoutMs must be an integer between 1 and 86400000");
-  }
+  validateTimeoutMs(timeoutMs);
 
   const now = new Date().toISOString();
   const task: Task = {
@@ -239,6 +237,8 @@ async function runTask(
     let stderr = "";
     let exitCode = 0;
     let bootstrapRetries = 0;
+    let resumeSessionConfirmed = false;
+    let resumeSessionMismatch: string | undefined;
     while (true) {
       const command = resumeWith
         ? resumeCommandFor(profile, prompt, task.cwd, resumeWith, task.model, hookUrl)
@@ -321,6 +321,23 @@ async function runTask(
             }
             const sessionId = sessionIdFrom(profile.provider, payload);
             if (sessionId) {
+              if (resumeWith) {
+                if (sessionId !== resumeWith && !resumeSessionMismatch) {
+                  resumeSessionMismatch = sessionId;
+                  appendTaskEvent(task.id, "resume_session_mismatch", task.state, {
+                    expectedSession: resumeWith,
+                    actualSession: sessionId,
+                  });
+                  killProcessGroup(child, "SIGTERM");
+                } else if (sessionId === resumeWith && !resumeSessionConfirmed) {
+                  resumeSessionConfirmed = true;
+                  appendTaskEvent(task.id, "session_reused", task.state, {
+                    provider: profile.provider,
+                    sessionId,
+                  });
+                }
+                return;
+              }
               const store = stateStore();
               if (!task.sessionId) {
                 if (store.captureTaskSessionId(task.id, profile.provider, sessionId)) {
@@ -329,12 +346,6 @@ async function runTask(
                 } else {
                   task.sessionId = store.getTask(task.id)?.sessionId;
                 }
-              } else if (
-                sessionId !== task.sessionId &&
-                store.replaceTaskSessionId(task.id, profile.provider, task.sessionId, sessionId)
-              ) {
-                task.sessionId = sessionId;
-                taskWaiter.notify(task.id);
               }
             }
           } catch {}
@@ -342,6 +353,7 @@ async function runTask(
         readStream(child.stderr, undefined, MAX_EVENT_LINE),
         child.exited,
       ]);
+      if (resumeSessionMismatch) break;
       const retryReason = antigravityBootstrapRetryReason(
         profile.provider,
         bootstrapRetries,
@@ -380,6 +392,15 @@ async function runTask(
       break;
     }
     if (active?.cancelled || stateStore().getTask(task.id)?.state === "cancelled") return;
+    if (resumeSessionMismatch) {
+      const message = "provider resumed a different root session";
+      update(task, {
+        state: "failed",
+        error: message,
+        completion: { blocked: true, code: "worker_error", reason: message },
+      }, ["running"]);
+      return;
+    }
     const output = finalText(profile, stdout);
     const outcome = interpretWorkerOutcome(exitCode, output, stderr);
     // A worker that dies during startup prints its real error as a stream
@@ -563,33 +584,24 @@ export async function resumeTask(id: string, instruction?: string, timeoutMs?: n
       `task has no captured session to resume: ${id} — the worker exited before the provider created a session; delegate a fresh task instead`,
     );
   }
+  validateTimeoutMs(timeoutMs);
   const resumeInstruction = instruction?.trim() || "Continue the original task from where the previous run stopped.";
-  const { task } = await prepareTask(
-    old.profileId,
-    [
-      "# Original task",
-      old.prompt,
-      "",
-      "# Resume instruction",
-      resumeInstruction,
-      "",
-      `The previous run ended in state \`${old.state}\`. Do not repeat completed work.`,
-    ].join("\n"),
-    old.cwd,
-    old.model,
-    old.id,
-    {
-      scope: old.scope,
-      allowQuestions: old.allowQuestions,
-      ...(timeoutMs !== undefined
-        ? { timeoutMs }
-        : old.timeoutMs ? { timeoutMs: old.timeoutMs } : {}),
-    },
-  );
-  stateStore().createResumption(old.id, task);
-  taskWaiter.notify(old.id);
-  launchTask(task, profile, old.sessionId);
+  const prompt = [
+    "# Resume instruction",
+    resumeInstruction,
+    "",
+    `The previous Inter run ended in state \`${old.state}\`. Continue the existing provider session without repeating completed work.`,
+  ].join("\n");
+  const task = stateStore().resumeTask(id, timeoutMs);
+  taskWaiter.notify(id);
+  launchTask(task, profile, old.sessionId, prompt);
   return task;
+}
+
+function validateTimeoutMs(timeoutMs?: number): void {
+  if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 86_400_000)) {
+    throw new Error("timeoutMs must be an integer between 1 and 86400000");
+  }
 }
 
 function sessionResumeUnsupported(profileId: string, profile?: Profile): string {

@@ -86,10 +86,14 @@ export function resumeCommandFor(
 }
 
 export function sessionIdFrom(provider: Provider, event: Record<string, unknown>): string | undefined {
-  const value = provider === "claude" ? event.session_id
-    : provider === "codex" ? event.thread_id
-    : provider === "opencode" ? event.sessionID
-    : provider === "antigravity" ? event.conversation_id ?? object(event.result).conversation_id
+  const value = provider === "claude" && (event.type === "system" || event.type === "result")
+    ? event.session_id
+    : provider === "codex" && event.type === "thread.started"
+    ? event.thread_id
+    : provider === "opencode" && event.type === "step_start"
+    ? event.sessionID
+    : provider === "antigravity" && (event.event === "init" || event.event === "result")
+    ? event.conversation_id ?? object(event.result).conversation_id
     : undefined;
   if (typeof value !== "string") return undefined;
   const sessionId = value.trim();

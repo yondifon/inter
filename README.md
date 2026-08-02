@@ -20,7 +20,8 @@ Agent flow:
 1. Delegation can share the prompt and worker-read project data with an external
    CLI account. If the user has not approved a destination and data scope, call
    `route` without reading file contents, then ask: “Allow Inter to share
-   `<scope>` with `<provider>` profile `<label>` for this task?”
+   `<scope>` and any saved Inter memories with `<provider>` profile `<label>`
+   for this task?”
 2. After approval, call `delegate` with `scope.read` and `scope.write` paths
    relative to `cwd`, plus explicit success criteria and checks. Inter enforces
    literal paths and recursive `directory/**` rules with the macOS process sandbox.
@@ -31,13 +32,69 @@ Agent flow:
 5. If input is needed, answer reversible, in-scope implementation details
    directly. Ask the user about product intent, secrets, destructive actions, or
    new authority.
-6. Call `reply` with the answer. It returns a linked continuation task; wait on
-   that new task ID. The answered parent links forward to the child and stops
-   counting as open work. The continuation resumes the worker's own CLI session
-   when the provider supports it, so the worker keeps everything it already
-   read and planned; if the session is gone it falls back to a fresh run.
+6. Call `reply` with the answer, or `resume` for a failed, cancelled, or blocked
+   task. Keep waiting on the same task ID. Both operations continue the captured
+   provider session, so the worker keeps everything it already read and planned.
+   If the provider reports a different session ID, Inter fails loudly instead
+   of silently starting a fresh conversation.
+   Provider session IDs are private implementation data; callers pass only the
+   Inter task ID returned by `delegate`.
 7. Call `cancel` when work is no longer useful, or set `timeoutMs` on `delegate`
    for automatic cancellation.
+
+### Task scope rules
+
+All scope rules are relative to `cwd`. Inter supports literal paths and recursive
+directory rules; it does not support general glob syntax.
+
+| Rule | Access granted |
+| --- | --- |
+| `README.md` | That file only |
+| `src/**` | `src` and every descendant |
+| `**` | The whole working tree under `cwd` |
+
+`src` is a literal path, not a recursive directory grant. Use `src/**` when the
+worker must access files inside it. Patterns such as `src/*.rs` are rejected.
+
+`scope.read: ["**"]` lets the external worker read every file below `cwd`,
+including hidden files, `.env` files, and `.git` contents. It does not grant
+project-data access to parent or sibling directories, and symlinks cannot be
+used to escape `cwd`. Request `**` only when the user explicitly approves
+sharing the complete working tree with the selected provider.
+
+Task scope is the project-data boundary, not a list of every path the worker
+process can access. Inter separately grants narrow system, provider config,
+credential, and temporary paths required to start the selected worker CLI.
+Those runtime allowances do not make other project directories readable.
+
+Read and write scope are separate. A write rule is also readable, but a read
+rule never permits writes. Include generated paths such as `target/**` or
+`dist/**` in `scope.write` when validation creates files there. Use `write:
+["**"]` only when the worker truly needs to modify any file in the working tree.
+
+Example for a Rust implementation task:
+
+```json
+{
+  "scope": {
+    "read": ["**"],
+    "write": ["src/**", "migrations/**", "tests/**", "target/**"]
+  }
+}
+```
+
+`reply` and `resume` keep the original scope. If a task needs broader access,
+get approval for the expanded data or write scope and start a fresh delegation.
+
+Project memory:
+
+- Use the `memory` tool to `list`, `get`, `set`, or `remove` durable decisions,
+  constraints, and conventions keyed by project `cwd`.
+- Delegated workers automatically receive active memories for their `cwd`.
+- Pass `expectedVersion` when changing a fact that was read earlier, so a stale
+  agent cannot silently overwrite another agent's newer update.
+- Do not store secrets or transient task status. Each project is limited to 100
+  entries and 64,000 total characters.
 
 ## What works
 
@@ -288,8 +345,8 @@ colon-separated list to narrow the fence.
   `opencode run --session`) — same task ID, no child task. A worker that skips
   the marker but ends on a plain question also lands in `needs_input`, so
   `reply` covers prose asks too.
-- `resume`: continue a failed, cancelled, or blocked task in its captured
-  provider session, returning a linked continuation task.
+- `resume`: continue a failed, cancelled, or blocked task using the same task ID
+  and captured provider session.
 - `cancel`: stop a queued or running task and its worker process tree.
 - `profiles`: list available accounts and models without exposing secret-like env
   values.

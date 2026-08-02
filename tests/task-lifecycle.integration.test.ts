@@ -162,7 +162,7 @@ describe("task lifecycle integration", () => {
       `printf '%s\\n' "$*" >> "$(dirname "$0")/../argv.log"`,
       'case "$*" in',
       "  *--resume*)",
-      `    printf '%s\\n' '{"type":"system","session_id":"sess-2"}'`,
+      `    printf '%s\\n' '{"type":"system","session_id":"sess-1"}'`,
       `    printf '%s\\n' '{"type":"result","result":"Finished.\\nINTER_RESULT: completed"}'`,
       "    ;;",
       "  *)",
@@ -184,7 +184,7 @@ describe("task lifecycle integration", () => {
     expect(continued.id).toBe(parent.id);
     const second = await waitForAttention(parent.id);
     expect(second.tasks[0]).toMatchObject({ state: "completed", output: "Finished." });
-    expect(getTask(parent.id)?.sessionId).toBe("sess-2");
+    expect(getTask(parent.id)?.sessionId).toBe("sess-1");
     const spawns = stateStore().listTaskEvents(parent.id).filter(({ type }) => type === "worker_spawned");
     expect(spawns).toHaveLength(2);
     expect(spawns[1]?.payload.resumedSession).toBe("sess-1");
@@ -194,6 +194,35 @@ describe("task lifecycle integration", () => {
     expect(log.split("--output-format").length - 1).toBe(2);
     expect(log).toContain("--resume sess-1");
     expect(log.indexOf("--resume")).toBe(log.lastIndexOf("--resume"));
+  });
+
+  integrationTest("fails if a provider forks instead of reusing the captured session", async () => {
+    const { cwd, profile } = setupClaudeBin([
+      "#!/bin/sh",
+      'case "$*" in',
+      "  *--resume*)",
+      `    printf '%s\\n' '{"type":"system","session_id":"sess-new"}'`,
+      "    sleep 5",
+      "    ;;",
+      "  *)",
+      `    printf '%s\\n' '{"type":"system","session_id":"sess-old"}'`,
+      `    printf '%s\\n' '{"type":"result","result":"INTER_NEEDS_INPUT: Proceed?"}'`,
+      "    ;;",
+      "esac",
+      "",
+    ].join("\n"));
+    const task = await delegate(profile.id, "Do the work.", cwd);
+    await waitForAttention(task.id);
+
+    expect((await reply(task.id, "yes")).id).toBe(task.id);
+    const result = await waitForAttention(task.id);
+    expect(result.tasks[0]).toMatchObject({
+      state: "failed",
+      sessionId: "sess-old",
+      error: "provider resumed a different root session",
+    });
+    expect(stateStore().listTaskEvents(task.id).map(({ type }) => type))
+      .toContain("resume_session_mismatch");
   });
 
   integrationTest("fails rather than losing context when the session cannot resume", async () => {
@@ -247,9 +276,12 @@ describe("task lifecycle integration", () => {
 
     const resumed = await resumeTask(failed.id, "Finish the remaining work.", 5_000);
     expect(resumed.timeoutMs).toBe(5_000);
+    expect(resumed.id).toBe(failed.id);
     await waitForAttention(resumed.id);
-    expect(getTask(resumed.id)).toMatchObject({ state: "completed", parentTaskId: failed.id });
-    expect(getTask(failed.id)?.childTaskId).toBe(resumed.id);
+    expect(getTask(failed.id)).toMatchObject({ state: "completed", sessionId: "sess-failed" });
+    const events = stateStore().listTaskEvents(failed.id);
+    expect(events.filter(({ type }) => type === "worker_spawned")).toHaveLength(2);
+    expect(events.filter(({ type }) => type === "session_reused")).toHaveLength(1);
   });
 
   // The broker inherits PWD from whatever shell launched the app. A worker that

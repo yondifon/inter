@@ -184,6 +184,7 @@ function runtimeReadPaths(profile: Profile, command: string[], scratchDir: strin
   const executable = Bun.which(command[0]!, { PATH: Bun.env.PATH }) ?? command[0]!;
   const paths = [
     "/System", "/usr", "/bin", "/sbin", "/Library", "/dev",
+    "/opt/homebrew",
     "/private/etc", "/private/var/db", "/private/var/select", "/private/var/run",
     scratchDir,
     dirname(resolve(executable)),
@@ -191,6 +192,7 @@ function runtimeReadPaths(profile: Profile, command: string[], scratchDir: strin
     resolve(userHome, ".local/bin"),
     resolve(userHome, ".local/share/claude"),
     resolve(userHome, ".bun"),
+    ...rustRuntimeReadPaths(userHome),
     resolve(userHome, "Library/Keychains"),
     "/Library/Keychains",
   ];
@@ -203,9 +205,11 @@ function runtimeReadPaths(profile: Profile, command: string[], scratchDir: strin
 }
 
 function runtimeWritePaths(profile: Profile, scratchDir: string): string[] {
+  const userHome = homedir();
   const paths = [
     "/dev",
     scratchDir,
+    ...rustRuntimeWritePaths(userHome),
     ...profileDataPaths(profile),
   ];
   if (profile.provider === "claude" && typeof process.getuid === "function") {
@@ -213,6 +217,35 @@ function runtimeWritePaths(profile: Profile, scratchDir: string): string[] {
     paths.push(resolve("/tmp", name), resolve("/private/tmp", name));
   }
   return unique(paths.flatMap((path) => [path, realpathIfPresent(path)]));
+}
+
+function rustRuntimeReadPaths(userHome: string): string[] {
+  const cargoHome = runtimeHome(Bun.env.CARGO_HOME, resolve(userHome, ".cargo"), userHome);
+  const rustupHome = runtimeHome(Bun.env.RUSTUP_HOME, resolve(userHome, ".rustup"), userHome);
+  return [
+    resolve(cargoHome, "bin"),
+    resolve(cargoHome, "env"),
+    resolve(cargoHome, "config"),
+    resolve(cargoHome, "config.toml"),
+    resolve(cargoHome, "registry"),
+    resolve(cargoHome, "git"),
+    rustupHome,
+  ];
+}
+
+function rustRuntimeWritePaths(userHome: string): string[] {
+  const cargoHome = runtimeHome(Bun.env.CARGO_HOME, resolve(userHome, ".cargo"), userHome);
+  return [
+    resolve(cargoHome, "registry"),
+    resolve(cargoHome, "git"),
+    resolve(cargoHome, ".package-cache"),
+    resolve(cargoHome, ".global-cache"),
+  ];
+}
+
+function runtimeHome(value: string | undefined, fallback: string, userHome: string): string {
+  const expanded = value ? expandHome(value, userHome) : fallback;
+  return isAbsolute(expanded) ? resolve(expanded) : fallback;
 }
 
 function ancestorsForRules(cwd: string, rules: string[]): string[] {

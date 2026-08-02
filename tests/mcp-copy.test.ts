@@ -20,6 +20,7 @@ describe("MCP consent copy", () => {
   test("tells callers to route and ask before delegation", () => {
     expect(MCP_INSTRUCTIONS).toContain("call route first");
     expect(MCP_INSTRUCTIONS).toContain("Allow Inter to share <scope>");
+    expect(MCP_INSTRUCTIONS).toContain("any saved Inter memories");
     expect(MCP_INSTRUCTIONS).toContain("returned cursor");
     expect(MCP_INSTRUCTIONS).toContain("never show the raw policy rejection");
     expect(DELEGATE_DESCRIPTION).toContain("explicitly approved");
@@ -43,6 +44,20 @@ describe("MCP consent copy", () => {
     expect(MCP_INSTRUCTIONS).toContain("memory tool");
     expect(MCP_INSTRUCTIONS).toContain("never store secrets");
     expect(MCP_INSTRUCTIONS).toContain("automatically includes memories");
+  });
+
+  test("documents scope semantics and expansion limits", () => {
+    expect(MCP_INSTRUCTIONS).toContain("directory/** is recursive");
+    expect(MCP_INSTRUCTIONS).toContain("** grants the whole working tree");
+    expect(MCP_INSTRUCTIONS).toContain("hidden files and .git contents");
+    expect(MCP_INSTRUCTIONS).toContain("Scope controls project data");
+    expect(MCP_INSTRUCTIONS).toContain("read rule does not permit writes");
+    expect(MCP_INSTRUCTIONS).toContain("resume retain the original scope");
+    expect(MCP_INSTRUCTIONS).toContain("only the Inter task ID");
+    expect(MCP_INSTRUCTIONS).toContain("provider session IDs private");
+    expect(MCP_INSTRUCTIONS).toContain("session drift fails loudly");
+    expect(DELEGATE_DESCRIPTION).toContain("directory/** is recursive");
+    expect(DELEGATE_DESCRIPTION).toContain("generated build paths");
   });
 
   test("names the destination in dynamic delegate consent", () => {

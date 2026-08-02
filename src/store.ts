@@ -253,30 +253,6 @@ export class StateStore {
     return captured;
   }
 
-  replaceTaskSessionId(
-    id: string,
-    provider: Profile["provider"],
-    previousSessionId: string,
-    sessionId: string,
-  ): boolean {
-    const value = sessionId.trim();
-    if (!value || value === previousSessionId) return false;
-    let replaced = false;
-    this.transaction(() => {
-      const row = this.database.query<{ state: TaskState }, [string, string]>(`
-        SELECT state FROM tasks WHERE id = ? AND session_id = ?
-      `).get(id, previousSessionId);
-      if (!row) return;
-      const changed = this.database.query(`
-        UPDATE tasks SET session_id = ? WHERE id = ? AND session_id = ?
-      `).run(value, id, previousSessionId);
-      if (changed.changes !== 1) return;
-      this.addTaskEvent(id, "session_updated", row.state, { provider, sessionId: value });
-      replaced = true;
-    });
-    return replaced;
-  }
-
   saveTask(
     task: Task,
     eventType = "state_changed",
@@ -347,21 +323,33 @@ export class StateStore {
     return task;
   }
 
-  createResumption(parentId: string, child: Task): void {
+  resumeTask(id: string, timeoutMs?: number): Task {
+    const now = new Date().toISOString();
+    let resumed = false;
     this.transaction(() => {
-      this.createTask(child);
+      const current = this.database.query<{ state: TaskState }, [string]>(`
+        SELECT state FROM tasks WHERE id = ?
+      `).get(id);
+      if (!current || !["failed", "cancelled", "blocked"].includes(current.state)) {
+        throw new Error(`task cannot be resumed: ${id}`);
+      }
       const changed = this.database.query(`
         UPDATE tasks
-        SET child_task_id = ?, updated_at = ?
+        SET state = 'queued', output = '', error = NULL, question = NULL,
+            completion_json = NULL, timeout_ms = COALESCE(?, timeout_ms), updated_at = ?
         WHERE id = ?
           AND state IN ('failed', 'cancelled', 'blocked')
-          AND child_task_id IS NULL
-      `).run(child.id, child.createdAt, parentId);
-      if (changed.changes !== 1) throw new Error(`task cannot be resumed: ${parentId}`);
-      this.addTaskEvent(parentId, "resumed", this.getTask(parentId)?.state ?? "failed", {
-        childTaskId: child.id,
+      `).run(timeoutMs ?? null, now, id);
+      if (changed.changes !== 1) throw new Error(`task cannot be resumed: ${id}`);
+      this.addTaskEvent(id, "resumed", "queued", {
+        previousState: current.state,
+        ...(timeoutMs !== undefined ? { timeoutMs } : {}),
       });
+      resumed = true;
     });
+    const task = resumed ? this.getTask(id) : undefined;
+    if (!task) throw new Error(`unknown task: ${id}`);
+    return task;
   }
 
   getTask(id: string): Task | undefined {

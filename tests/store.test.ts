@@ -111,10 +111,7 @@ describe("SQLite state store", () => {
     expect(store.captureTaskSessionId(saved.id, "claude", "sess-123")).toBe(true);
     expect(store.captureTaskSessionId(saved.id, "claude", "sess-other")).toBe(false);
     expect(store.getTask(saved.id)?.sessionId).toBe("sess-123");
-    expect(store.replaceTaskSessionId(saved.id, "claude", "stale", "sess-456")).toBe(false);
-    expect(store.replaceTaskSessionId(saved.id, "claude", "sess-123", "sess-456")).toBe(true);
-    expect(store.getTask(saved.id)?.sessionId).toBe("sess-456");
-    expect(store.listTaskSummaries()[0]?.sessionId).toBe("sess-456");
+    expect(store.listTaskSummaries()[0]?.sessionId).toBe("sess-123");
     const sessionEvents = store.listTaskEvents(saved.id)
       .filter(({ type }) => type === "session_captured");
     expect(sessionEvents).toHaveLength(1);
@@ -147,9 +144,9 @@ describe("SQLite state store", () => {
     ];
     const store = new StateStore({ path: db, seedProfiles: profiles });
     const cases = [
-      ["claude-work", { session_id: 12 }, { session_id: "claude-first" }, { session_id: "claude-later" }],
-      ["codex", { thread_id: null }, { thread_id: "codex-first" }, { thread_id: "codex-later" }],
-      ["opencode", { sessionID: {} }, { sessionID: "opencode-first" }, { sessionID: "opencode-later" }],
+      ["claude-work", { type: "assistant", session_id: "child" }, { type: "system", session_id: "claude-first" }, { type: "system", session_id: "claude-later" }],
+      ["codex", { type: "item.started", thread_id: "child" }, { type: "thread.started", thread_id: "codex-first" }, { type: "thread.started", thread_id: "codex-later" }],
+      ["opencode", { type: "tool_use", sessionID: "child" }, { type: "step_start", sessionID: "opencode-first" }, { type: "step_start", sessionID: "opencode-later" }],
       ["antigravity", { session_id: "unsupported" }, { session_id: "still-unsupported" }],
     ] as const;
     const ids: Record<string, string> = {};
@@ -295,20 +292,23 @@ describe("SQLite state store", () => {
     store.close();
   });
 
-  test("links one resumption without changing the failed parent state", () => {
+  test("resumes the same task record and clears the prior outcome", () => {
     const { db } = paths();
     const store = new StateStore({ path: db, seedProfiles: [profile] });
     const parent = task("failed");
+    parent.output = "partial";
+    parent.error = "crashed";
+    parent.completion = { blocked: true, code: "worker_error" };
     store.createTask(parent);
-    const child = task();
-    child.parentTaskId = parent.id;
-    store.createResumption(parent.id, child);
-    expect(store.getTask(parent.id)).toMatchObject({
-      state: "failed",
-      childTaskId: child.id,
+    expect(store.resumeTask(parent.id, 5_000)).toMatchObject({
+      id: parent.id,
+      state: "queued",
+      output: "",
+      timeoutMs: 5_000,
     });
-    expect(store.getTask(child.id)?.parentTaskId).toBe(parent.id);
-    expect(() => store.createResumption(parent.id, { ...task(), parentTaskId: parent.id }))
+    expect(store.getTask(parent.id)?.error).toBeUndefined();
+    expect(store.getTask(parent.id)?.completion).toBeUndefined();
+    expect(() => store.resumeTask(parent.id))
       .toThrow("task cannot be resumed");
     store.close();
   });

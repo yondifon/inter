@@ -103,6 +103,10 @@ describe("task scope", () => {
       `(allow file-read* (literal "${process.env.HOME}/opencode.json"))`,
     );
     expect(claudePolicy).not.toContain("opencode.json");
+    expect(opencodePolicy).toContain(`${process.env.HOME}/.cargo/bin`);
+    expect(opencodePolicy).toContain(`${process.env.HOME}/.rustup`);
+    expect(opencodePolicy).toContain('/opt/homebrew');
+    expect(opencodePolicy).not.toContain(`${process.env.HOME}/.cargo/credentials.toml`);
   });
 
   test("allows OpenCode's legacy home config probe only outside Git projects", () => {
@@ -184,6 +188,21 @@ describe("task scope", () => {
       const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
       if (exitCode !== 0) throw new Error(`${provider} sandbox startup exited ${exitCode}: ${stderr}`);
     }
+  });
+
+  integrationTest("installed Rust tools can run inside an OpenCode sandbox", async () => {
+    const cargo = Bun.which("cargo", { PATH: Bun.env.PATH });
+    if (!cargo) return;
+    const cwd = workspace();
+    const scratch = mkdtempSync(join(tmpdir(), "inter-scratch-"));
+    roots.push(scratch);
+    const worker = { ...profile, provider: "opencode" as const };
+    const child = Bun.spawn(
+      sandboxedCommand([cargo, "--version"], cwd, { read: [], write: [] }, worker, scratch),
+      { cwd, stdout: "pipe", stderr: "pipe" },
+    );
+    const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+    if (exitCode !== 0) throw new Error(`cargo sandbox startup exited ${exitCode}: ${stderr}`);
   });
 
   integrationTest("provider bootstrap paths are writable inside the sandbox", async () => {
