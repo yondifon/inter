@@ -36,6 +36,12 @@ export interface DelegateOptions {
   timeoutMs?: number;
 }
 
+export interface ResumeOptions {
+  scope?: TaskScope;
+  allowQuestions?: boolean;
+  timeoutMs?: number;
+}
+
 export function listTasks(): Task[] {
   return stateStore().listTasks();
 }
@@ -565,7 +571,11 @@ export async function reply(id: string, answer: string): Promise<Task> {
   return task;
 }
 
-export async function resumeTask(id: string, instruction?: string, timeoutMs?: number): Promise<Task> {
+export async function resumeTask(
+  id: string,
+  instruction?: string,
+  options: ResumeOptions = {},
+): Promise<Task> {
   const old = stateStore().getTask(id);
   if (!old) throw new Error(`unknown task: ${id}`);
   if (!["failed", "cancelled", "blocked"].includes(old.state)) {
@@ -584,7 +594,8 @@ export async function resumeTask(id: string, instruction?: string, timeoutMs?: n
       `task has no captured session to resume: ${id} — the worker exited before the provider created a session; delegate a fresh task instead`,
     );
   }
-  validateTimeoutMs(timeoutMs);
+  validateTimeoutMs(options.timeoutMs);
+  const scope = options.scope ? normalizeTaskScope(options.scope, old.cwd) : undefined;
   const resumeInstruction = instruction?.trim() || "Continue the original task from where the previous run stopped.";
   const prompt = [
     "# Resume instruction",
@@ -592,7 +603,11 @@ export async function resumeTask(id: string, instruction?: string, timeoutMs?: n
     "",
     `The previous Inter run ended in state \`${old.state}\`. Continue the existing provider session without repeating completed work.`,
   ].join("\n");
-  const task = stateStore().resumeTask(id, timeoutMs);
+  const task = stateStore().resumeTask(id, {
+    ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+    ...(scope ? { scope } : {}),
+    ...(options.allowQuestions !== undefined ? { allowQuestions: options.allowQuestions } : {}),
+  });
   taskWaiter.notify(id);
   launchTask(task, profile, old.sessionId, prompt);
   return task;

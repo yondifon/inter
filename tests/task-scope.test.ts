@@ -29,6 +29,14 @@ function workspace(): string {
 }
 
 describe("task scope", () => {
+  test("defaults to the whole working tree", () => {
+    const cwd = workspace();
+    expect(normalizeTaskScope(undefined, cwd)).toEqual({
+      read: ["**"],
+      write: ["**"],
+    });
+  });
+
   test("accepts literal paths and recursive directories", () => {
     const cwd = workspace();
     expect(normalizeTaskScope({

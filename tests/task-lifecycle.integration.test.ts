@@ -274,8 +274,14 @@ describe("task lifecycle integration", () => {
     await waitForAttention(failed.id);
     expect(getTask(failed.id)).toMatchObject({ state: "failed", sessionId: "sess-failed" });
 
-    const resumed = await resumeTask(failed.id, "Finish the remaining work.", 5_000);
+    const resumed = await resumeTask(failed.id, "Finish the remaining work.", {
+      timeoutMs: 5_000,
+      scope: { read: ["**"], write: ["**"] },
+      allowQuestions: false,
+    });
     expect(resumed.timeoutMs).toBe(5_000);
+    expect(resumed.scope).toEqual({ read: ["**"], write: ["**"] });
+    expect(resumed.allowQuestions).toBe(false);
     expect(resumed.id).toBe(failed.id);
     await waitForAttention(resumed.id);
     expect(getTask(failed.id)).toMatchObject({ state: "completed", sessionId: "sess-failed" });

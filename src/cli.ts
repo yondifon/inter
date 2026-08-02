@@ -31,7 +31,7 @@ import { publicTask, publicTaskSummary } from "./public-task";
 
 const port = Number(Bun.env.INTER_PORT ?? 7331);
 const VERSION = "0.4.0";
-const MCP_CONTRACT_VERSION = 12;
+const MCP_CONTRACT_VERSION = 13;
 // Idle transports get cut somewhere above ~2 minutes (field-observed: waits of
 // 180s+ died with socket-closed errors, ≤120s never did). Answer before that
 // with reason "timeout" and a cursor so clients re-poll instead of erroring.
@@ -234,7 +234,7 @@ async function createMcpServer(): Promise<McpServer> {
       prompt: z.string().min(1).max(64_000),
       cwd: z.string().min(1),
       parent: z.string().optional(),
-      scope: scopeSchema,
+      scope: scopeSchema.optional(),
       allowQuestions: z.boolean().default(true),
       timeoutMs: z.number().int().min(1).max(86_400_000).optional(),
     }),
@@ -325,14 +325,16 @@ async function createMcpServer(): Promise<McpServer> {
     inputSchema: z.object({ taskId: z.string(), answer: z.string().min(1) }),
   }, async ({ taskId, answer }) => result(startedTask(await reply(taskId, answer))));
   server.registerTool("resume", {
-    description: "Retry a failed, cancelled, or blocked task. Pass only its Inter task ID; Inter maps it to the private root provider session and returns the same task ID. Use reply instead when the task needs input.",
+    description: "Retry a failed, cancelled, or blocked task. Pass only its Inter task ID; Inter maps it to the private root provider session and returns the same task ID. Optional scope and allowQuestions replace those task settings before continuation; get explicit approval before expanding scope. Use reply instead when the task needs input.",
     inputSchema: z.object({
       taskId: z.string(),
       instruction: z.string().min(1).max(64_000).optional(),
       timeoutMs: z.number().int().min(1).max(86_400_000).optional(),
+      scope: scopeSchema.optional(),
+      allowQuestions: z.boolean().optional(),
     }),
-  }, async ({ taskId, instruction, timeoutMs }) =>
-    result(startedTask(await resumeTask(taskId, instruction, timeoutMs))));
+  }, async ({ taskId, instruction, timeoutMs, scope, allowQuestions }) =>
+    result(startedTask(await resumeTask(taskId, instruction, { timeoutMs, scope, allowQuestions }))));
   server.registerTool("cancel", {
     description: "Stop a queued or running delegated task and its worker process tree. Use when the work is no longer useful; this does not delete the task record.",
     inputSchema: z.object({
@@ -378,7 +380,7 @@ async function createMcpServer(): Promise<McpServer> {
           prompt: z.string().min(1).max(64_000),
           cwd: z.string().min(1),
           parent: z.string().optional(),
-          scope: scopeSchema,
+          scope: scopeSchema.optional(),
           allowQuestions: z.boolean().default(true),
           timeoutMs: z.number().int().min(1).max(86_400_000).optional(),
         }),

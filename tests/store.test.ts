@@ -300,11 +300,17 @@ describe("SQLite state store", () => {
     parent.error = "crashed";
     parent.completion = { blocked: true, code: "worker_error" };
     store.createTask(parent);
-    expect(store.resumeTask(parent.id, 5_000)).toMatchObject({
+    expect(store.resumeTask(parent.id, {
+      timeoutMs: 5_000,
+      scope: { read: ["src/**"], write: ["src/**"] },
+      allowQuestions: false,
+    })).toMatchObject({
       id: parent.id,
       state: "queued",
       output: "",
       timeoutMs: 5_000,
+      scope: { read: ["src/**"], write: ["src/**"] },
+      allowQuestions: false,
     });
     expect(store.getTask(parent.id)?.error).toBeUndefined();
     expect(store.getTask(parent.id)?.completion).toBeUndefined();

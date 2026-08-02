@@ -52,10 +52,12 @@ describe("MCP consent copy", () => {
     expect(MCP_INSTRUCTIONS).toContain("hidden files and .git contents");
     expect(MCP_INSTRUCTIONS).toContain("Scope controls project data");
     expect(MCP_INSTRUCTIONS).toContain("read rule does not permit writes");
-    expect(MCP_INSTRUCTIONS).toContain("resume retain the original scope");
+    expect(MCP_INSTRUCTIONS).toContain("Resume retains it unless");
     expect(MCP_INSTRUCTIONS).toContain("only the Inter task ID");
     expect(MCP_INSTRUCTIONS).toContain("provider session IDs private");
     expect(MCP_INSTRUCTIONS).toContain("session drift fails loudly");
+    expect(MCP_INSTRUCTIONS).toContain("read and write default to **");
+    expect(MCP_INSTRUCTIONS).toContain("resume may replace scope and allowQuestions");
     expect(DELEGATE_DESCRIPTION).toContain("directory/** is recursive");
     expect(DELEGATE_DESCRIPTION).toContain("generated build paths");
   });

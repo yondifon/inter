@@ -22,9 +22,11 @@ Agent flow:
    `route` without reading file contents, then ask: “Allow Inter to share
    `<scope>` and any saved Inter memories with `<provider>` profile `<label>`
    for this task?”
-2. After approval, call `delegate` with `scope.read` and `scope.write` paths
-   relative to `cwd`, plus explicit success criteria and checks. Inter enforces
-   literal paths and recursive `directory/**` rules with the macOS process sandbox.
+2. After approval, call `delegate` with explicit success criteria and checks.
+   Scope defaults to the whole folder (`read: ["**"]`, `write: ["**"]`). Pass a
+   narrower `scope` when full-folder access was not approved or is not needed.
+   Inter enforces literal paths and recursive `directory/**` rules with the
+   macOS process sandbox.
 3. Pass the routed `profile` and `model`, or the user's explicit choice.
 4. Keep the returned task ID and cursor. Call `wait` with `afterCursor`; it
    returns concise new events and per-task heartbeat progress. Provider system
@@ -83,8 +85,11 @@ Example for a Rust implementation task:
 }
 ```
 
-`reply` and `resume` keep the original scope. If a task needs broader access,
-get approval for the expanded data or write scope and start a fresh delegation.
+`reply` keeps the original scope. `resume` keeps it unless a replacement is
+provided. If a task needs broader access, get approval for the expanded data or
+write scope, then pass the replacement `scope` to `resume`. The same Inter task
+ID and provider session continue. `resume` can also replace `allowQuestions`
+and `timeoutMs`.
 
 Project memory:
 

@@ -12,6 +12,7 @@ import type {
   TaskCompletion,
   TaskState,
   TaskSummary,
+  TaskScope,
 } from "./types";
 
 interface ProfileRow {
@@ -323,7 +324,10 @@ export class StateStore {
     return task;
   }
 
-  resumeTask(id: string, timeoutMs?: number): Task {
+  resumeTask(
+    id: string,
+    updates: { timeoutMs?: number; scope?: TaskScope; allowQuestions?: boolean } = {},
+  ): Task {
     const now = new Date().toISOString();
     let resumed = false;
     this.transaction(() => {
@@ -336,14 +340,24 @@ export class StateStore {
       const changed = this.database.query(`
         UPDATE tasks
         SET state = 'queued', output = '', error = NULL, question = NULL,
-            completion_json = NULL, timeout_ms = COALESCE(?, timeout_ms), updated_at = ?
+            completion_json = NULL, timeout_ms = COALESCE(?, timeout_ms),
+            scope_json = COALESCE(?, scope_json),
+            allow_questions = COALESCE(?, allow_questions), updated_at = ?
         WHERE id = ?
           AND state IN ('failed', 'cancelled', 'blocked')
-      `).run(timeoutMs ?? null, now, id);
+      `).run(
+        updates.timeoutMs ?? null,
+        updates.scope ? JSON.stringify(updates.scope) : null,
+        updates.allowQuestions === undefined ? null : updates.allowQuestions ? 1 : 0,
+        now,
+        id,
+      );
       if (changed.changes !== 1) throw new Error(`task cannot be resumed: ${id}`);
       this.addTaskEvent(id, "resumed", "queued", {
         previousState: current.state,
-        ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+        ...(updates.timeoutMs !== undefined ? { timeoutMs: updates.timeoutMs } : {}),
+        ...(updates.scope ? { scopeUpdated: true } : {}),
+        ...(updates.allowQuestions !== undefined ? { allowQuestions: updates.allowQuestions } : {}),
       });
       resumed = true;
     });
