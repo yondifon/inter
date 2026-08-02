@@ -15,13 +15,16 @@ export const MCP_INSTRUCTIONS = [
   "A write rule is also readable, but a read rule does not permit writes; include generated build paths in write scope when checks need them.",
   "Reply retains the original scope. Resume retains it unless the caller supplies a replacement scope after approval for any broader access.",
   "For a failed, blocked, or cancelled task, resume may replace scope and allowQuestions on the same Inter task and provider session after approval for any expansion.",
-  "Pass each returned cursor to wait; wait returns meaningful events and heartbeat progress instead of raw provider noise.",
+  "Delegate, reply, and resume return immediately while their workers continue independently.",
+  "Use wait once as a quick status poll and pass its returned cursor to a later check; do not loop or hold the user's turn while work runs.",
+  "After dispatch, return control so the user can chat or delegate more work. Check again only when asked or when the host can schedule a separate background check.",
   "Callers use only the Inter task ID. Inter keeps provider session IDs private and maps reply and resume to the captured root session.",
   "Reply and resume continue with the same Inter task ID; provider session drift fails loudly instead of starting a fresh conversation.",
   "Write prompt as structured markdown — Goal, Context, Scope with exact paths, numbered Instructions, Guardrails, Output Format — because workers lose scope and priority in one flattened paragraph.",
   "If a host policy blocks delegation, ask the same concise consent question; never show the raw policy rejection.",
   "Workers already know the needs_input protocol. Answer reversible in-scope questions yourself; ask the user about product intent, secrets, destructive actions, or new authority, then reply and wait on the same task.",
   "Use cancel when work is no longer useful; use delegate timeoutMs for a hard runtime limit.",
+  "Use archive to hide finished task history without deleting it; archived tasks remain available by ID and can be restored.",
 ].join(" ");
 
 export const DELEGATE_DESCRIPTION = [
@@ -37,6 +40,7 @@ export const DELEGATE_DESCRIPTION = [
   "Send prompt as structured markdown (Goal, Context, Scope with exact paths, numbered Instructions, Guardrails, Output Format), never one flattened paragraph.",
   "When fanning out several tasks for one goal, pass the first task's id as parent on the rest so the switchboard groups the batch.",
   "The returned Inter task ID is the only continuation handle; provider session IDs are private implementation data.",
+  "Dispatch returns immediately. Do not loop on wait afterward; return control while the worker runs independently.",
 ].join(" ");
 
 export function dynamicDelegateDescription(profile: Profile): string {
@@ -48,5 +52,6 @@ export function dynamicDelegateDescription(profile: Profile): string {
     "Use this named tool to get that provider's second opinion or when the current provider is low on capacity; use delegate for automatic routing or another profile.",
     "This may share the prompt and worker-read project data with that external CLI account.",
     `Before calling, ask: “Allow Inter to share <scope> and any saved Inter memories with ${profile.provider} profile ${profile.label} for this task?” unless the user's current approval already covers it.`,
+    "Dispatch returns immediately. Do not loop on wait afterward; return control while the worker runs independently.",
   ].join(" ");
 }

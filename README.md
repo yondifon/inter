@@ -28,9 +28,10 @@ Agent flow:
    Inter enforces literal paths and recursive `directory/**` rules with the
    macOS process sandbox.
 3. Pass the routed `profile` and `model`, or the user's explicit choice.
-4. Keep the returned task ID and cursor. Call `wait` with `afterCursor`; it
-   returns concise new events and per-task heartbeat progress. Provider system
-   noise does not wake it. Heartbeats mark 30-second stalls.
+4. Keep the returned task ID and cursor. `delegate` returns immediately and the
+   worker continues independently. Call `wait` once with `afterCursor` for a
+   quick status poll, then return control to the user. Do not loop in the user's
+   turn. A later call returns concise new events and heartbeat progress.
 5. If input is needed, answer reversible, in-scope implementation details
    directly. Ask the user about product intent, secrets, destructive actions, or
    new authority.
@@ -43,6 +44,8 @@ Agent flow:
    Inter task ID returned by `delegate`.
 7. Call `cancel` when work is no longer useful, or set `timeoutMs` on `delegate`
    for automatic cancellation.
+8. Call `archive` to hide old task history without deleting it. Restore the same
+   task later with `archived: false`; its Inter ID and provider session stay intact.
 
 ### Task scope rules
 
@@ -116,8 +119,9 @@ Project memory:
 - One-click global MCP install for Codex, Claude Code and every Claude account,
   OpenCode, and Antigravity. Existing config gets a `.bak`.
 - Shared Streamable HTTP MCP at `http://127.0.0.1:7331/mcp`.
-- Cursor-based progress contract: `delegate` → `wait(afterCursor)` → optional
-  `reply`, with summarized events, 10-second heartbeat, and 30-second stall signals.
+- Non-blocking progress contract: `delegate` returns immediately, while later
+  `wait(afterCursor)` polls return summarized events, 10-second heartbeat, and
+  30-second stall signals without holding the caller's turn.
 - Enforced per-task read/write scope for worker subprocesses.
 - Explicit completed, blocked, failed, cancelled, needs-input, and answered states.
 - Model catalog per account. One profile can run any listed model through a
@@ -335,16 +339,19 @@ colon-separated list to narrow the fence.
   cached catalog data using safe catalog/auth checks only. It sends no generation
   prompt, intentionally spends no inference credits, and does not claim an exact
   provider credit balance.
-- `wait`: use `afterCursor` to receive meaningful events, heartbeat progress,
-  attention, completion, or timeout. A single call blocks at most 110s (idle
-  transports get cut beyond that); on timeout, call again with the returned
-  cursor. Pass `until: "attention"` to sleep through progress events and wake
-  only for `needs_input`, terminal states, or timeout — the right mode for
-  long tasks that need no supervision every few seconds.
+- `wait`: quick status poll for meaningful events, heartbeat progress,
+  attention, or completion. It returns immediately by default and is capped at
+  250ms even when an older caller passes a larger `timeoutMs`. Pass the returned
+  cursor to a later check. Do not loop in the user's turn; delegated workers keep
+  running, so the user can chat or dispatch more work meanwhile. The HTTP task
+  events endpoint still supports UI-side long polling on a separate connection.
 - `health`: report broker and MCP contract versions.
 - `inspect`: return one task snapshot immediately.
 - `tasks`: list concise task summaries with `limit`, `state`, `since`, and
-  `profile` filters. Use `inspect` for full prompt and output.
+  `profile` filters. Archived tasks are hidden by default; pass `archived: "only"`
+  or `"include"` to find them. Use `inspect` for full prompt and output.
+- `archive`: archive or restore one task by Inter task ID. This is a soft archive;
+  prompt, output, events, scope, and provider-session mapping remain intact.
 - `reply`: answer a `needs_input` question. The same task re-runs in the
   worker's captured CLI session (`claude --resume`, `codex exec resume`,
   `opencode run --session`) — same task ID, no child task. A worker that skips

@@ -22,8 +22,13 @@ describe("MCP consent copy", () => {
     expect(MCP_INSTRUCTIONS).toContain("Allow Inter to share <scope>");
     expect(MCP_INSTRUCTIONS).toContain("any saved Inter memories");
     expect(MCP_INSTRUCTIONS).toContain("returned cursor");
+    expect(MCP_INSTRUCTIONS).toContain("do not loop");
+    expect(MCP_INSTRUCTIONS).toContain("return control");
+    expect(MCP_INSTRUCTIONS).toContain("delegate more work");
+    expect(MCP_INSTRUCTIONS).toContain("Use archive");
     expect(MCP_INSTRUCTIONS).toContain("never show the raw policy rejection");
     expect(DELEGATE_DESCRIPTION).toContain("explicitly approved");
+    expect(DELEGATE_DESCRIPTION).toContain("Dispatch returns immediately");
   });
 
   test("requires structured prompts instead of flattened prose", () => {
@@ -68,5 +73,6 @@ describe("MCP consent copy", () => {
     expect(description).toContain("codex profile Work");
     expect(description).toContain("worker-read project data");
     expect(description).toContain("current approval already covers it");
+    expect(description).toContain("Do not loop on wait");
   });
 });

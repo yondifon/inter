@@ -22,7 +22,9 @@ final class ProfileStore {
 
     func refresh() async {
         do {
-            let (data, response) = try await URLSession.shared.data(from: InterServer.api("state"))
+            var components = URLComponents(url: InterServer.api("state"), resolvingAgainstBaseURL: false)!
+            components.queryItems = [URLQueryItem(name: "archived", value: "include")]
+            let (data, response) = try await URLSession.shared.data(from: components.url!)
             guard (response as? HTTPURLResponse)?.statusCode == 200 else { return }
             let state = try JSONDecoder().decode(BrokerState.self, from: data)
             profiles = state.profiles
@@ -55,6 +57,24 @@ final class ProfileStore {
         request.httpMethod = "DELETE"
         _ = try? await URLSession.shared.data(for: request)
         await refresh()
+    }
+
+    func setArchived(_ task: TaskSnapshot, _ archived: Bool) async {
+        let id = task.id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? task.id
+        var request = URLRequest(url: InterServer.api("tasks/\(id)"))
+        request.httpMethod = "PATCH"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["archived": archived])
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+                self.error = "Couldn’t update task archive"
+                return
+            }
+            await refresh()
+        } catch {
+            self.error = "Couldn’t update task archive"
+        }
     }
 
     func setDynamicProfileTools(_ enabled: Bool) async {

@@ -143,6 +143,12 @@ struct TaskDetail: View {
             IconButton(symbol: "folder", label: "Open folder") {
                 NSWorkspace.shared.open(URL(fileURLWithPath: task.cwd))
             }
+            IconButton(
+                symbol: task.archivedAt == nil ? "archivebox" : "arrow.uturn.backward",
+                label: task.archivedAt == nil ? "Archive task" : "Restore task"
+            ) {
+                Task { await store.setArchived(task, task.archivedAt == nil) }
+            }
             IconButton(symbol: "ellipsis", label: "Run details", rotation: .degrees(90)) {
                 showingRunFacts.toggle()
             }

@@ -42,12 +42,16 @@ export interface ResumeOptions {
   timeoutMs?: number;
 }
 
-export function listTasks(): Task[] {
-  return stateStore().listTasks();
+export function listTasks(archived: TaskListQuery["archived"] = "active"): Task[] {
+  return stateStore().listTasks(200, archived);
 }
 
 export function listTaskSummaries(query: TaskListQuery = {}): TaskSummary[] {
   return stateStore().listTaskSummaries(query);
+}
+
+export function setTaskArchived(id: string, archived: boolean): Task {
+  return stateStore().setTaskArchived(id, archived);
 }
 
 export function getTask(id: string): Task | undefined {

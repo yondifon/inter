@@ -43,6 +43,7 @@ interface TaskRow {
   timeout_ms: number | null;
   session_id: string | null;
   completion_json: string | null;
+  archived_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -66,6 +67,7 @@ export interface TaskListQuery {
   state?: TaskState;
   since?: string;
   profile?: string;
+  archived?: "active" | "only" | "include";
 }
 
 export interface ProfileFailure {
@@ -370,18 +372,20 @@ export class StateStore {
     const row = this.database.query<TaskRow, [string]>(`
       SELECT id, profile_id, model, prompt, cwd, state, output, error, question,
              parent_task_id, child_task_id, scope_json, allow_questions, timeout_ms,
-             session_id, completion_json, created_at, updated_at
+             session_id, completion_json, archived_at, created_at, updated_at
       FROM tasks WHERE id = ?
     `).get(id);
     return row ? taskFromRow(row) : undefined;
   }
 
-  listTasks(limit = 200): Task[] {
+  listTasks(limit = 200, archived: TaskListQuery["archived"] = "active"): Task[] {
+    const where = archiveClause(archived);
     return this.database.query<TaskRow, [number]>(`
       SELECT id, profile_id, model, prompt, cwd, state, output, error, question,
              parent_task_id, child_task_id, scope_json, allow_questions, timeout_ms,
-             session_id, completion_json, created_at, updated_at
+             session_id, completion_json, archived_at, created_at, updated_at
       FROM tasks
+      WHERE ${where}
       ORDER BY updated_at DESC, id DESC
       LIMIT ?
     `).all(limit).map(taskFromRow);
@@ -403,17 +407,33 @@ export class StateStore {
       clauses.push("profile_id = ?");
       values.push(query.profile);
     }
+    clauses.push(archiveClause(query.archived));
     const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
     const rows = this.database.query<TaskRow, Array<string | number>>(`
       SELECT id, profile_id, model, prompt, cwd, state, output, error, question,
              parent_task_id, child_task_id, scope_json, allow_questions, timeout_ms,
-             session_id, completion_json, created_at, updated_at
+             session_id, completion_json, archived_at, created_at, updated_at
       FROM tasks
       ${where}
       ORDER BY updated_at DESC, id DESC
       LIMIT ?
     `).all(...values, limit);
     return rows.map(taskSummaryFromRow);
+  }
+
+  setTaskArchived(id: string, archived: boolean): Task {
+    const task = this.getTask(id);
+    if (!task) throw new Error(`unknown task: ${id}`);
+    if (Boolean(task.archivedAt) === archived) return task;
+    const now = new Date().toISOString();
+    this.transaction(() => {
+      const changed = this.database.query(`
+        UPDATE tasks SET archived_at = ?, updated_at = ? WHERE id = ?
+      `).run(archived ? now : null, now, id);
+      if (changed.changes !== 1) throw new Error(`unknown task: ${id}`);
+      this.addTaskEvent(id, archived ? "archived" : "unarchived", task.state, {});
+    });
+    return this.getTask(id)!;
   }
 
   listTaskEvents(taskId: string, afterId = 0, limit = 5_001): TaskEvent[] {
@@ -635,6 +655,7 @@ export class StateStore {
         timeout_ms INTEGER,
         session_id TEXT,
         completion_json TEXT CHECK(completion_json IS NULL OR json_valid(completion_json)),
+        archived_at TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -679,6 +700,9 @@ export class StateStore {
     if (!taskColumns.has("session_id")) {
       this.database.exec("ALTER TABLE tasks ADD COLUMN session_id TEXT");
     }
+    if (!taskColumns.has("archived_at")) {
+      this.database.exec("ALTER TABLE tasks ADD COLUMN archived_at TEXT");
+    }
     const failureColumns = new Set(this.database.query<{ name: string }, []>(
       "PRAGMA table_info(profile_failures)",
     ).all().map(({ name }) => name));
@@ -705,6 +729,10 @@ export class StateStore {
     this.database.query(`
       INSERT OR IGNORE INTO schema_migrations(version, name)
       VALUES (6, 'project memories')
+    `).run();
+    this.database.query(`
+      INSERT OR IGNORE INTO schema_migrations(version, name)
+      VALUES (7, 'task archives')
     `).run();
     const backfilled = this.database.query<{ version: number }, []>(
       "SELECT version FROM schema_migrations WHERE version = 5",
@@ -920,6 +948,7 @@ function taskFromRow(row: TaskRow): Task {
     ...(row.completion_json
       ? { completion: JSON.parse(row.completion_json) as TaskCompletion }
       : {}),
+    ...(row.archived_at ? { archivedAt: row.archived_at } : {}),
   };
 }
 
@@ -940,7 +969,13 @@ function taskSummaryFromRow(row: TaskRow): TaskSummary {
     ...(task.childTaskId ? { childTaskId: task.childTaskId } : {}),
     ...(task.sessionId ? { sessionId: task.sessionId } : {}),
     ...(task.completion ? { completion: task.completion } : {}),
+    ...(task.archivedAt ? { archivedAt: task.archivedAt } : {}),
   };
+}
+
+function archiveClause(archived: TaskListQuery["archived"] = "active"): string {
+  if (archived === "include") return "1 = 1";
+  return archived === "only" ? "archived_at IS NOT NULL" : "archived_at IS NULL";
 }
 
 function taskEventFromRow(row: {

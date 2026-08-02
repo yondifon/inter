@@ -198,6 +198,28 @@ describe("SQLite state store", () => {
     store.close();
   });
 
+  test("soft-archives tasks and hides them from active lists", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const saved = task("completed");
+    store.createTask(saved);
+
+    const archived = store.setTaskArchived(saved.id, true);
+    expect(archived.archivedAt).toBeString();
+    expect(store.getTask(saved.id)?.archivedAt).toBe(archived.archivedAt);
+    expect(store.listTasks()).toEqual([]);
+    expect(store.listTaskSummaries()).toEqual([]);
+    expect(store.listTasks(200, "only").map(({ id }) => id)).toEqual([saved.id]);
+    expect(store.listTaskSummaries({ archived: "include" })[0]?.archivedAt).toBe(archived.archivedAt);
+
+    const restored = store.setTaskArchived(saved.id, false);
+    expect(restored.archivedAt).toBeUndefined();
+    expect(store.listTasks().map(({ id }) => id)).toEqual([saved.id]);
+    expect(store.listTaskEvents(saved.id).slice(-2).map(({ type }) => type))
+      .toEqual(["archived", "unarchived"]);
+    store.close();
+  });
+
   test("marks running work failed after broker restart", () => {
     const { db } = paths();
     const store = new StateStore({ path: db, seedProfiles: [profile] });

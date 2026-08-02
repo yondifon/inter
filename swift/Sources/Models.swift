@@ -68,6 +68,7 @@ struct TaskSnapshot: Codable, Identifiable, Hashable {
     /// Provider-native worker session. Copy this into the provider CLI when a
     /// task must be resumed outside Inter.
     var sessionId: String?
+    var archivedAt: String?
 }
 
 struct TaskEventSnapshot: Codable, Identifiable, Hashable {

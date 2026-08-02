@@ -16,6 +16,7 @@ struct ContentView: View {
     @AppStorage("taskProjectFilter") private var projectFilter = ""
     @AppStorage("taskGrouping") private var groupingRaw = TaskGrouping.parent.rawValue
     @AppStorage("collapsedTaskGroups") private var collapsedRaw = ""
+    @AppStorage("showArchivedTasks") private var showArchivedTasks = false
     @Environment(\.uiScale) private var uiScale
 
     var body: some View {
@@ -34,8 +35,9 @@ struct ContentView: View {
                     SectionLabel(text: "Workers")
                 }
                 Section {
-                    if store.tasks.isEmpty {
-                        Text("No tasks yet").scaledFont(.callout).foregroundStyle(.tertiary)
+                    if visibleTasks.isEmpty {
+                        Text(showArchivedTasks ? "No archived tasks" : "No tasks yet")
+                            .scaledFont(.callout).foregroundStyle(.tertiary)
                     } else {
                         ForEach(taskGroups) { group in
                             if let title = group.title {
@@ -53,14 +55,20 @@ struct ContentView: View {
                                     worker: store.profiles.first { $0.id == task.profileId }?.label ?? task.profileId
                                 )
                                 .tag(SidebarSelection.task(task.id))
+                                .contextMenu {
+                                    Button(showArchivedTasks ? "Restore" : "Archive",
+                                           systemImage: showArchivedTasks ? "arrow.uturn.backward" : "archivebox") {
+                                        Task { await store.setArchived(task, !showArchivedTasks) }
+                                    }
+                                }
                             }
                         }
                     }
                 } header: {
                     HStack(spacing: 6) {
-                        SectionLabel(text: activeProjectName ?? "Recent tasks")
+                        SectionLabel(text: activeProjectName ?? (showArchivedTasks ? "Archived tasks" : "Recent tasks"))
                         Spacer(minLength: 0)
-                        if store.tasks.count > 1 { projectMenu }
+                        if !store.tasks.isEmpty { projectMenu }
                     }
                 }
             }
@@ -109,10 +117,14 @@ struct ContentView: View {
         .frame(minWidth: 760, minHeight: 520)
     }
 
-    private var projects: [TaskProject] { TaskOrganizer.projects(in: store.tasks) }
+    private var visibleTasks: [TaskSnapshot] {
+        store.tasks.filter { showArchivedTasks ? $0.archivedAt != nil : $0.archivedAt == nil }
+    }
+
+    private var projects: [TaskProject] { TaskOrganizer.projects(in: visibleTasks) }
 
     private var activeProjectName: String? {
-        TaskOrganizer.activeProjectName(tasks: store.tasks, project: projectFilter.isEmpty ? nil : projectFilter)
+        TaskOrganizer.activeProjectName(tasks: visibleTasks, project: projectFilter.isEmpty ? nil : projectFilter)
     }
 
     private var grouping: TaskGrouping { TaskGrouping(rawValue: groupingRaw) ?? .parent }
@@ -131,7 +143,7 @@ struct ContentView: View {
 
     private var taskGroups: [TaskGroup] {
         TaskOrganizer.organize(
-            tasks: store.tasks,
+            tasks: visibleTasks,
             project: projectFilter.isEmpty ? nil : projectFilter,
             grouping: grouping
         )
@@ -141,6 +153,12 @@ struct ContentView: View {
     /// list's own header rather than in the window toolbar with the global actions.
     private var projectMenu: some View {
         Menu {
+            Picker("Tasks", selection: $showArchivedTasks) {
+                Text("Active").tag(false)
+                Text("Archived").tag(true)
+            }
+            .pickerStyle(.inline)
+            Divider()
             Picker("Project", selection: $projectFilter) {
                 Text("All projects").tag("")
                 ForEach(projects) { project in

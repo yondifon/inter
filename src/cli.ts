@@ -12,6 +12,7 @@ import {
   listTaskSummaries,
   reply,
   resumeTask,
+  setTaskArchived,
   waitForTasks,
 } from "./tasks";
 import { listModels } from "./models";
@@ -28,14 +29,14 @@ import { defaultModelFor } from "./provider-defaults";
 import { normalizeProfile } from "./profile-input";
 import { deleteMemory, getMemory, listMemories, setMemory } from "./memories";
 import { publicTask, publicTaskSummary } from "./public-task";
+import { mcpWaitBlockMs } from "./mcp-wait";
 
 const port = Number(Bun.env.INTER_PORT ?? 7331);
-const VERSION = "0.4.0";
-const MCP_CONTRACT_VERSION = 13;
-// Idle transports get cut somewhere above ~2 minutes (field-observed: waits of
-// 180s+ died with socket-closed errors, ≤120s never did). Answer before that
-// with reason "timeout" and a cursor so clients re-poll instead of erroring.
-const MAX_WAIT_BLOCK_MS = 110_000;
+const VERSION = "0.5.0";
+const MCP_CONTRACT_VERSION = 15;
+// A foreground MCP call owns the caller's agent turn. Keep status checks short
+// so delegated work cannot stop that caller from chatting or dispatching more
+// work. The HTTP events endpoint remains available for UI-side long polling.
 const scopeSchema = z.object({
   read: z.array(z.string()).max(200),
   write: z.array(z.string()).max(200),
@@ -68,7 +69,7 @@ Bun.serve({
       const config = await loadConfig();
       return Response.json({
         profiles: publicProfiles(config.profiles),
-        tasks: listTasks().map((task) => {
+        tasks: listTasks(archiveFilter(url.searchParams.get("archived"))).map((task) => {
           const profile = config.profiles.find(({ id }) => id === task.profileId);
           return profile && task.output ? { ...task, output: finalText(profile, task.output) } : task;
         }),
@@ -199,6 +200,18 @@ Bun.serve({
         return Response.json({ error: String(error) }, { status: 400 });
       }
     }
+    const patchTaskId = url.pathname.match(/^\/api\/tasks\/([^/]+)$/)?.[1];
+    if (patchTaskId && request.method === "PATCH") {
+      const body = await request.json() as { archived?: unknown };
+      if (typeof body.archived !== "boolean") {
+        return Response.json({ error: "archived must be a boolean" }, { status: 400 });
+      }
+      try {
+        return Response.json(publicTask(setTaskArchived(decodeURIComponent(patchTaskId), body.archived)));
+      } catch (error) {
+        return Response.json({ error: String(error) }, { status: 400 });
+      }
+    }
     const cancelTaskId = url.pathname.match(/^\/api\/tasks\/([^/]+)$/)?.[1];
     if (cancelTaskId && request.method === "DELETE") {
       try {
@@ -271,17 +284,17 @@ async function createMcpServer(): Promise<McpServer> {
     return result(publicTask(task));
   });
   server.registerTool("wait", {
-    description: "Follow one to eight delegated tasks until new progress, a question, completion, or timeout. Use after delegate, reply, or resume; pass the returned cursor as afterCursor on the next call. Set until to \"attention\" for long tasks when only questions or terminal states matter. Each call blocks for at most 110 seconds, so call wait again after a timeout.",
+    description: "Check one to eight delegated tasks for new progress, a question, or completion. This is a quick foreground poll capped at 250ms so the caller stays free to chat or dispatch other work. Pass the returned cursor as afterCursor on a later check. Do not loop; the worker continues independently.",
     inputSchema: z.object({
       taskIds: z.array(z.string()).min(1).max(8),
-      timeoutMs: z.number().int().min(1).max(300_000).default(30_000),
+      timeoutMs: z.number().int().min(0).max(300_000).default(0),
       afterCursor: z.number().int().min(0).optional(),
       until: z.enum(["progress", "attention"]).default("progress"),
     }),
   }, async ({ taskIds, timeoutMs, afterCursor, until }, extra) => {
     const waited = await waitForTasks(
       taskIds,
-      Math.min(timeoutMs, MAX_WAIT_BLOCK_MS),
+      mcpWaitBlockMs(timeoutMs),
       extra.mcpReq.signal,
       afterCursor,
       until,
@@ -299,6 +312,7 @@ async function createMcpServer(): Promise<McpServer> {
       state: taskStateSchema.optional(),
       since: z.string().datetime().optional(),
       profile: z.string().optional(),
+      archived: z.enum(["active", "only", "include"]).default("active"),
     }),
   }, async (query) => result(listTaskSummaries(query).map(publicTaskSummary)));
   server.registerTool("memory", {
@@ -342,6 +356,13 @@ async function createMcpServer(): Promise<McpServer> {
       reason: z.string().min(1).max(500).optional(),
     }),
   }, async ({ taskId, reason }) => result(publicTask(await cancelTask(taskId, reason))));
+  server.registerTool("archive", {
+    description: "Archive or restore a delegated task without deleting its history. Archived tasks stay addressable by Inter task ID and are hidden from active task lists by default.",
+    inputSchema: z.object({
+      taskId: z.string(),
+      archived: z.boolean().default(true),
+    }),
+  }, async ({ taskId, archived }) => result(publicTask(setTaskArchived(taskId, archived))));
   server.registerTool("profiles", {
     description: "List configured AI provider profiles, capabilities, and default models. Use to choose a provider for a second opinion or more usage capacity; use status to check availability and models to browse model IDs.",
     inputSchema: z.object({}),
@@ -420,4 +441,8 @@ function publicProfile(profile: Profile): Profile {
       /(?:KEY|TOKEN|SECRET|PASS)/i.test(key) ? "••••••••" : value,
     ])),
   };
+}
+
+function archiveFilter(value: string | null): "active" | "only" | "include" {
+  return value === "only" || value === "include" ? value : "active";
 }

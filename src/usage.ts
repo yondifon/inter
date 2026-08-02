@@ -57,7 +57,13 @@ export async function listProfileUsage(query: UsageQuery = {}): Promise<ProfileU
   const rows = await Promise.all(profiles.map((profile) => usageForProfile(profile, query.refresh)));
   return rows.map((row) => withUpstreamRateLimits(
     withObservedRateLimit(row, failures),
-    stateStore().listTaskSummaries({ profile: row.profile, state: "failed", since, limit: 100 }),
+    stateStore().listTaskSummaries({
+      profile: row.profile,
+      state: "failed",
+      since,
+      limit: 100,
+      archived: "include",
+    }),
   ));
 }
 

@@ -80,6 +80,7 @@ export interface Task {
   timeoutMs?: number;
   sessionId?: string;
   completion?: TaskCompletion;
+  archivedAt?: string;
 }
 
 export interface TaskSummary {
@@ -97,6 +98,7 @@ export interface TaskSummary {
   childTaskId?: string;
   sessionId?: string;
   completion?: TaskCompletion;
+  archivedAt?: string;
 }
 
 export interface ModelInfo {
