@@ -4,6 +4,9 @@ import type { ModelInfo, Profile, Provider } from "./types";
 const CACHE_MS = 30 * 60_000;
 const cache = new Map<string, { at: number; models: ModelInfo[] }>();
 const CLAUDE_ALIASES = ["sonnet", "opus", "haiku", "fable"];
+// `claude --effort <level>` is a session flag, so the ladder is the same for
+// every model the CLI accepts rather than published per model.
+const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 
 export interface ModelQuery {
   profile?: string;
@@ -36,7 +39,9 @@ async function modelsForProfile(profile: Profile, refresh = false): Promise<Mode
 async function discover(profile: Profile): Promise<ModelInfo[]> {
   if (profile.provider === "claude") {
     return [...new Set([profile.model, ...CLAUDE_ALIASES])].map((id) =>
-      model(profile, id, id, id === profile.model ? "configured" : "alias"));
+      model(profile, id, id, id === profile.model ? "configured" : "alias", {
+        efforts: [...CLAUDE_EFFORTS],
+      }));
   }
 
   const command = profile.provider === "codex"

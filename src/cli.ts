@@ -276,9 +276,9 @@ async function createMcpServer(): Promise<McpServer> {
         .describe("Whether the worker may pause in needs_input to ask. False makes it guess or stop."),
       effort: z.enum(["minimal", "low", "medium", "high", "xhigh", "max"]).optional()
         .describe(
-          "Reasoning effort for this run. Honoured by codex and opencode only; claude and " +
-          "antigravity expose no lever and ignore it. Call profiles with include: [\"models\"] " +
-          "to read each model's published ladder before choosing.",
+          "Reasoning effort for this run. Honoured by claude, codex, and opencode; antigravity " +
+          "ignores it because its level is baked into the model id. Ladders differ per provider, " +
+          "so call profiles with include: [\"models\"] and read the model's efforts before choosing.",
         ),
       timeoutMs: z.number().int().min(1).max(86_400_000).optional()
         .describe("Hard runtime limit. The task lands in failed with code timeout."),

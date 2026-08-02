@@ -60,9 +60,15 @@ describe("CLI adapters", () => {
     expect(opencode).not.toContain("--variant");
   });
 
-  test("drops effort for providers with no lever rather than faking one", () => {
-    const claude = commandFor({ ...base, provider: "claude" }, "review", "/workspace", "opus", undefined, "max");
-    expect(claude.join(" ")).not.toContain("max");
+  test("passes reasoning effort to Claude as a session flag", () => {
+    const command = commandFor({ ...base, provider: "claude" }, "review", "/workspace", "opus", undefined, "max");
+    expect(command.join(" ")).toContain("--effort max");
+  });
+
+  test("drops effort for Antigravity, where the level is part of the model id", () => {
+    const command = commandFor({ ...base, provider: "antigravity" }, "review", "/workspace", "gemini-3.6-flash-low", undefined, "max");
+    expect(command).not.toContain("--effort");
+    expect(command).not.toContain("max");
   });
 
   test("keeps reasoning effort when resuming a session", () => {

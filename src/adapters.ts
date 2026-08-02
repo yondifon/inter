@@ -18,10 +18,9 @@ export function commandFor(
 
   switch (profile.provider) {
     case "claude":
-      // Claude Code exposes no reasoning-effort flag, so effort cannot be
-      // honoured here and is deliberately dropped rather than faked.
       return [
         "claude", "-p", "--output-format", "stream-json", "--verbose", "--model", model,
+        ...(effort ? ["--effort", effort] : []),
         "--permission-mode", "acceptEdits",
         ...(hookUrl ? ["--settings", claudeHookSettings(hookUrl)] : []),
         prompt,
@@ -75,6 +74,7 @@ export function resumeCommandFor(
       case "claude":
         return [
           "claude", "-p", "--output-format", "stream-json", "--verbose", "--model", model,
+          ...(effort ? ["--effort", effort] : []),
           "--permission-mode", "acceptEdits", "--resume", sessionId,
           ...(hookUrl ? ["--settings", claudeHookSettings(hookUrl)] : []),
           prompt,
