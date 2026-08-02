@@ -1,3 +1,5 @@
+import { existsSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import type { Profile, Provider } from "./types";
 import { defaultModelFor } from "./provider-defaults";
 
@@ -50,16 +52,17 @@ function discoverClaude(home: string, path: string): Profile[] {
     profiles.push(profile("claude", "Claude", "sonnet"));
   }
 
+  // One readdir, and isDirectory() answers from the entry type the syscall
+  // already returned. Globbing home instead made macOS classify every top-level
+  // entry, which reaches into Downloads and Desktop and raises a privacy prompt
+  // on each launch.
   let entries: string[] = [];
   try {
-    entries = [...new Bun.Glob(".claude-*/").scanSync({
-      cwd: home,
-      dot: true,
-      onlyFiles: false,
-    })];
+    entries = readdirSync(home, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && entry.name.startsWith(".claude-"))
+      .map(({ name }) => name);
   } catch {}
-  for (const entry of entries) {
-    const name = entry.replace(/\/$/, "");
+  for (const name of entries) {
     const suffix = name.slice(".claude-".length);
     if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(suffix)) continue;
     profiles.push({
@@ -91,13 +94,11 @@ function hasExecutable(command: string, path: string): boolean {
   return Bun.which(command, { PATH: path }) !== null;
 }
 
+// A literal path needs one stat, not a directory scan. Scanning asked the OS
+// about every sibling, protected folders included.
 function hasPath(home: string, path: string): boolean {
   try {
-    return !new Bun.Glob(path).scanSync({
-      cwd: home,
-      dot: true,
-      onlyFiles: false,
-    }).next().done;
+    return existsSync(join(home, path));
   } catch {
     return false;
   }

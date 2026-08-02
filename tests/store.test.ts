@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Database } from "bun:sqlite";
@@ -45,6 +45,32 @@ function task(state: Task["state"] = "queued"): Task {
 }
 
 describe("SQLite state store", () => {
+  test("discovers profiles once, not on every open", () => {
+    const { db, root } = paths();
+    const fakeHome = join(root, "home");
+    mkdirSync(join(fakeHome, ".claude-alpha"), { recursive: true });
+    const realHome = process.env.HOME;
+    try {
+      process.env.HOME = fakeHome;
+      const first = new StateStore({ path: db });
+      expect(first.listProfiles().map(({ id }) => id)).toContain("claude-alpha");
+      first.close();
+
+      // Discovery reads the user's home directory, which on macOS raises a
+      // privacy prompt for Downloads and friends. A seeded store must never
+      // pay that cost again, so a home that changed underneath is not noticed.
+      mkdirSync(join(fakeHome, ".claude-beta"), { recursive: true });
+      const reopened = new StateStore({ path: db });
+      const ids = reopened.listProfiles().map(({ id }) => id);
+      expect(ids).toContain("claude-alpha");
+      expect(ids).not.toContain("claude-beta");
+      reopened.close();
+    } finally {
+      if (realHome === undefined) delete process.env.HOME;
+      else process.env.HOME = realHome;
+    }
+  });
+
   test("keeps a run's result as an attempt when reply starts the next one", () => {
     const { db } = paths();
     const store = new StateStore({ path: db, seedProfiles: [profile] });

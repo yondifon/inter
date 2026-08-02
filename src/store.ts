@@ -117,7 +117,9 @@ export class StateStore {
     try { chmodSync(this.path, 0o600); } catch {}
     this.configure();
     this.migrate();
-    this.seed(options.seedProfiles ?? discoverProfiles());
+    // Passed as a thunk: seeding happens once, but the argument would be
+    // evaluated on every start, and discovery reads the home directory.
+    this.seed(() => options.seedProfiles ?? discoverProfiles());
     this.recoverInterruptedTasks();
   }
 
@@ -1021,13 +1023,13 @@ export class StateStore {
     }
   }
 
-  private seed(profiles: Profile[]): void {
+  private seed(profiles: () => Profile[]): void {
     const seeded = this.database.query<{ value: string }, [string]>(
       "SELECT value FROM settings WHERE key = ?",
     ).get("profiles_initialized");
     if (seeded) return;
 
-    this.saveProfiles(profiles);
+    this.saveProfiles(profiles());
     this.database.query("INSERT INTO settings(key, value) VALUES (?, ?)").run("profiles_initialized", "1");
   }
 
