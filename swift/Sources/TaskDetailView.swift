@@ -400,6 +400,7 @@ private struct ActivityWorkRow: View {
     let event: TaskEventSnapshot
     var muted = false
     @State private var showingRawDetails = false
+    @State private var showingRawEvent = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -417,7 +418,7 @@ private struct ActivityWorkRow: View {
                 if event.rawText != nil {
                     IconButton(
                         symbol: showingRawDetails ? "chevron.down" : "chevron.right",
-                        label: showingRawDetails ? "Hide raw details" : "Show raw details",
+                        label: disclosureLabel,
                         tint: AnyShapeStyle(.tertiary)
                     ) { showingRawDetails.toggle() }
                     .scaledFont(.caption2, weight: .semibold)
@@ -431,11 +432,41 @@ private struct ActivityWorkRow: View {
                 TaskEventPresentationView(presentation: presentation)
             }
             if showingRawDetails, let raw = event.rawText {
-                ReviewContentView(source: raw, initiallyExpandJSON: false)
-                    .padding(.top, 3)
+                expansion(raw: raw).padding(.top, 3)
             }
         }
         .padding(.vertical, 8)
+    }
+
+    /// A file call opens on the lines it changed, not on the payload that carried
+    /// them; the payload stays one click further in for the runs where the
+    /// argument shapes are what's in question.
+    @ViewBuilder private func expansion(raw: String) -> some View {
+        if let change = FileChange(rawEvent: raw) {
+            VStack(alignment: .leading, spacing: 6) {
+                FileChangeView(change: change)
+                Button(showingRawEvent ? "Hide raw event" : "Show raw event") {
+                    showingRawEvent.toggle()
+                }
+                .buttonStyle(.plain)
+                .scaledFont(.caption2)
+                .foregroundStyle(.tertiary)
+                if showingRawEvent {
+                    ReviewContentView(source: raw, initiallyExpandJSON: false)
+                }
+            }
+        } else {
+            ReviewContentView(source: raw, initiallyExpandJSON: false)
+        }
+    }
+
+    /// Naming the diff costs one substring scan per row — cheap enough to run
+    /// before the payload is parsed, which only expansion pays for.
+    private var disclosureLabel: String {
+        guard event.kind == "file", event.rawText.map(FileChange.mayContainEdit) == true else {
+            return showingRawDetails ? "Hide raw details" : "Show raw details"
+        }
+        return showingRawDetails ? "Hide changes" : "Show changes"
     }
 
     /// Agent prose reads as a quotation, not as a titled row.
