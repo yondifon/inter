@@ -77,6 +77,13 @@ rule never permits writes. Include generated paths such as `target/**` or
 `dist/**` in `scope.write` when validation creates files there. Use `write:
 ["**"]` only when the worker truly needs to modify any file in the working tree.
 
+Provider tool permission is separate from file scope. Inter pre-approves Claude
+Code's `Bash` tool for headless runs; the macOS sandbox still enforces the task's
+read and write rules on every command and child process. Network access is not
+currently part of task scope and remains available to worker commands. Narrow
+Go and Rust toolchain/module/cache paths are granted as runtime data so builds
+and tests can execute without opening the rest of the user's home directory.
+
 Example for a Rust implementation task:
 
 ```json

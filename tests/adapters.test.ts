@@ -16,7 +16,7 @@ describe("CLI adapters", () => {
   test("builds isolated Claude print command", () => {
     expect(commandFor(base, "review", "/repo")).toEqual([
       "claude", "-p", "--output-format", "stream-json", "--verbose", "--model", "sonnet",
-      "--permission-mode", "acceptEdits", "review",
+      "--permission-mode", "acceptEdits", "--allowedTools", "Bash", "review",
     ]);
   });
 
@@ -114,6 +114,8 @@ describe("CLI adapters", () => {
   test("resumes a Claude session with the captured session id", () => {
     const command = resumeCommandFor(base, "continue", "/repo", "sess-1", "sonnet", "http://127.0.0.1/hooks/task");
     expect(command[command.indexOf("--resume") + 1]).toBe("sess-1");
+    expect(command.slice(command.indexOf("--allowedTools"), command.indexOf("--allowedTools") + 2))
+      .toEqual(["--allowedTools", "Bash"]);
     expect(command).toContain("--settings");
     expect(command.at(-1)).toBe("continue");
   });

@@ -76,6 +76,18 @@ struct TaskSnapshot: Codable, Identifiable, Hashable {
     var costUsd: Double?
     var turns: Int?
     var archivedAt: String?
+
+    /// `opencode/big-pickle` reads as `big-pickle` in a list where the worker name
+    /// beside it already says which provider ran it.
+    var shortModel: String {
+        model.split(separator: "/").last.map(String.init) ?? model
+    }
+
+    /// Home-relative form of `cwd`. `/Users/name` is the same on every row, so it
+    /// spends header width on nothing.
+    var displayPath: String {
+        (cwd as NSString).abbreviatingWithTildeInPath
+    }
 }
 
 struct TaskEventSnapshot: Codable, Identifiable, Hashable {

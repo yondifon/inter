@@ -21,7 +21,7 @@ export function commandFor(
       return [
         "claude", "-p", "--output-format", "stream-json", "--verbose", "--model", model,
         ...(effort ? ["--effort", effort] : []),
-        "--permission-mode", "acceptEdits",
+        "--permission-mode", "acceptEdits", "--allowedTools", "Bash",
         ...(hookUrl ? ["--settings", claudeHookSettings(hookUrl)] : []),
         prompt,
       ];
@@ -75,7 +75,7 @@ export function resumeCommandFor(
         return [
           "claude", "-p", "--output-format", "stream-json", "--verbose", "--model", model,
           ...(effort ? ["--effort", effort] : []),
-          "--permission-mode", "acceptEdits", "--resume", sessionId,
+          "--permission-mode", "acceptEdits", "--allowedTools", "Bash", "--resume", sessionId,
           ...(hookUrl ? ["--settings", claudeHookSettings(hookUrl)] : []),
           prompt,
         ];

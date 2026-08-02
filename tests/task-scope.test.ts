@@ -115,6 +115,10 @@ describe("task scope", () => {
     expect(opencodePolicy).toContain(`${process.env.HOME}/.rustup`);
     expect(opencodePolicy).toContain('/opt/homebrew');
     expect(opencodePolicy).not.toContain(`${process.env.HOME}/.cargo/credentials.toml`);
+    expect(claudePolicy).toContain('/usr/local/go');
+    expect(claudePolicy).toContain(`${process.env.HOME}/go/pkg/mod`);
+    expect(claudePolicy).toContain(`${process.env.HOME}/Library/Caches/go-build`);
+    expect(claudePolicy).not.toContain(`(subpath "${process.env.HOME}/go")`);
   });
 
   test("lets every worker read Git's own config but not the rest of home", () => {

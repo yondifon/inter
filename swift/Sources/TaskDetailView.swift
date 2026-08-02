@@ -138,6 +138,11 @@ struct TaskDetail: View {
             TaskMetaChip(text: task.model, label: "Model") {
                 Image(systemName: "cpu").font(.system(size: 9 * uiScale, weight: .medium))
             }
+            // Where a run touched files is part of its identity, not a detail: two
+            // tasks with the same worker, model and prompt differ only by folder.
+            TaskMetaChip(text: task.displayPath, label: "Folder", full: task.cwd, maxWidth: 200 * uiScale) {
+                Image(systemName: "folder").font(.system(size: 9 * uiScale, weight: .medium))
+            }
             Spacer(minLength: 8)
             if let resumeCommand {
                 CopyIconButton(
@@ -163,7 +168,8 @@ struct TaskDetail: View {
     }
 
     /// Only the identifiers worth copying. Worker and model live in the header, so
-    /// repeating them here would make the reader check two places for one fact.
+    /// repeating them here would make the reader check two places for one fact; the
+    /// folder repeats because the header shows it shortened and unselectable.
     private var runFactsPopover: some View {
         VStack(alignment: .leading, spacing: 8) {
             TaskFactRow(icon: "number", label: "Task", value: task.id, copy: task.id)
@@ -742,6 +748,12 @@ private struct TaskStateChip: View {
 private struct TaskMetaChip<Icon: View>: View {
     let text: String
     let label: String
+    /// Unshortened value, when `text` is an abbreviated form of it. The tooltip and
+    /// VoiceOver read this one, so nothing is lost to truncation.
+    var full: String? = nil
+    /// Cap for values that can run long, like a path. The middle goes first so the
+    /// leading `~/` and the folder name — the two halves that identify it — stay.
+    var maxWidth: CGFloat? = nil
     @ViewBuilder let icon: Icon
 
     @Environment(\.uiScale) private var uiScale
@@ -752,14 +764,16 @@ private struct TaskMetaChip<Icon: View>: View {
             Text(text)
                 .scaledFont(.caption2, design: .monospaced)
                 .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: maxWidth, alignment: .leading)
         }
         .foregroundStyle(.secondary)
         .padding(.horizontal, 7 * uiScale)
         .padding(.vertical, 3 * uiScale)
         .background(Surface.sunken, in: Capsule())
-        .help(label)
+        .help(full.map { "\(label) — \($0)" } ?? label)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(label): \(text)")
+        .accessibilityLabel("\(label): \(full ?? text)")
     }
 }
 

@@ -407,21 +407,21 @@ private struct TaskRow: View {
         }
         .padding(.vertical, 3)
         .help(task.prompt)
-        .accessibilityLabel("\(title). \(state.label). \(worker).")
+        .accessibilityLabel("\(title). \(state.label). \(worker), \(task.model).")
     }
 
     private var state: TaskState { TaskState(task.state) }
 
     /// The check already says "completed", so only unfinished or failed runs spend
-    /// a word on their state.
+    /// a word on their state. Which model ran is worth the width the task id used
+    /// to take: a worker's model can change between runs, and the id is one click
+    /// away in the task's run details.
     private var meta: String {
         let parts = state.wantsLabelInList
-            ? [state.label, worker, shortID]
-            : [worker, shortID]
+            ? [state.label, worker, task.shortModel]
+            : [worker, task.shortModel]
         return parts.joined(separator: " · ")
     }
-
-    private var shortID: String { "#\(task.id.prefix(8))" }
     private var title: String {
         task.prompt.split(whereSeparator: \.isNewline).first.map(String.init) ?? "Untitled task"
     }

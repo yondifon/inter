@@ -193,6 +193,7 @@ function runtimeReadPaths(profile: Profile, command: string[], scratchDir: strin
     resolve(userHome, ".local/share/claude"),
     resolve(userHome, ".bun"),
     ...rustRuntimeReadPaths(userHome),
+    ...goRuntimeReadPaths(userHome),
     ...gitRuntimeReadPaths(userHome),
     resolve(userHome, "Library/Keychains"),
     "/Library/Keychains",
@@ -211,6 +212,7 @@ function runtimeWritePaths(profile: Profile, scratchDir: string): string[] {
     "/dev",
     scratchDir,
     ...rustRuntimeWritePaths(userHome),
+    ...goRuntimeWritePaths(userHome),
     ...profileDataPaths(profile),
   ];
   if (profile.provider === "claude" && typeof process.getuid === "function") {
@@ -258,6 +260,27 @@ function rustRuntimeWritePaths(userHome: string): string[] {
     resolve(cargoHome, ".package-cache"),
     resolve(cargoHome, ".global-cache"),
   ];
+}
+
+function goRuntimeReadPaths(userHome: string): string[] {
+  const paths = goRuntimePaths(userHome);
+  return [paths.root, paths.modules, paths.cache, paths.config];
+}
+
+function goRuntimeWritePaths(userHome: string): string[] {
+  const paths = goRuntimePaths(userHome);
+  return [paths.modules, paths.cache, paths.config];
+}
+
+function goRuntimePaths(userHome: string) {
+  const goPathValue = Bun.env.GOPATH?.split(":")[0];
+  const goPath = runtimeHome(goPathValue, resolve(userHome, "go"), userHome);
+  return {
+    root: runtimeHome(Bun.env.GOROOT, "/usr/local/go", userHome),
+    modules: runtimeHome(Bun.env.GOMODCACHE, resolve(goPath, "pkg/mod"), userHome),
+    cache: runtimeHome(Bun.env.GOCACHE, resolve(userHome, "Library/Caches/go-build"), userHome),
+    config: resolve(userHome, "Library/Application Support/go"),
+  };
 }
 
 function runtimeHome(value: string | undefined, fallback: string, userHome: string): string {

@@ -13,4 +13,29 @@ final class ProfileModelTests: XCTestCase {
         profile.model = "claude-sonnet-4-6"
         XCTAssertEqual(profile.resolvedModel, "claude-sonnet-4-6")
     }
+
+    func testSidebarModelDropsTheProviderPrefixOnlyWhenThereIsOne() {
+        XCTAssertEqual(task(model: "opencode/big-pickle").shortModel, "big-pickle")
+        XCTAssertEqual(task(model: "sonnet").shortModel, "sonnet")
+        XCTAssertEqual(task(model: "").shortModel, "")
+    }
+
+    func testHeaderPathCollapsesHomeAndLeavesOtherRootsAlone() {
+        XCTAssertEqual(task(cwd: "\(NSHomeDirectory())/desgn/inter").displayPath, "~/desgn/inter")
+        XCTAssertEqual(task(cwd: "/opt/build/site").displayPath, "/opt/build/site")
+    }
+
+    private func task(model: String = "sonnet", cwd: String = "/tmp") -> TaskSnapshot {
+        TaskSnapshot(
+            id: "1",
+            profileId: "worker",
+            model: model,
+            prompt: "prompt",
+            cwd: cwd,
+            state: "completed",
+            createdAt: "2026-07-29T10:00:00Z",
+            updatedAt: "2026-07-29T10:00:00Z",
+            output: ""
+        )
+    }
 }
