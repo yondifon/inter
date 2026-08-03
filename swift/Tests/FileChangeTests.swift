@@ -174,4 +174,41 @@ final class FileChangeTests: XCTestCase {
         XCTAssertTrue(FileChange.mayContainEdit(#"{"oldString":"a","newString":"b"}"#))
         XCTAssertFalse(FileChange.mayContainEdit(#"{"tool_input":{"file_path":"/repo/app.ts"}}"#))
     }
+
+    /// pi sends no before/after arguments at all — the unified diff in the
+    /// result is the only description of the edit. Payload taken verbatim from
+    /// a real run.
+    func testPiEditIsRecoveredFromItsUnifiedPatch() {
+        let change = change("""
+        {
+          "type": "tool_execution_end",
+          "toolCallId": "call_00_ET_cXKG83rh3W2xE4MBUbuv5571",
+          "toolName": "edit",
+          "result": {
+            "content": [{ "type": "text", "text": "Successfully replaced 1 block(s) in .inter-test/pi-diff.txt." }],
+            "details": {
+              "diff": "-1 status: before\\n+1 status: after",
+              "patch": "--- .inter-test/pi-diff.txt\\n+++ .inter-test/pi-diff.txt\\n@@ -1,1 +1,1 @@\\n-status: before\\n+status: after\\n",
+              "firstChangedLine": 1
+            }
+          },
+          "isError": false
+        }
+        """)
+
+        XCTAssertEqual(change?.path, ".inter-test/pi-diff.txt")
+        XCTAssertEqual(change?.blocks.count, 1)
+        XCTAssertEqual(change?.blocks.first, [
+            DiffLine(kind: .removed, text: "status: before"),
+            DiffLine(kind: .added, text: "status: after"),
+        ])
+        XCTAssertEqual(change?.added, 1)
+        XCTAssertEqual(change?.removed, 1)
+    }
+
+    /// The gate decides whether a row is even parsed for a diff.
+    func testUnifiedDiffMarkerOpensTheChangesTab() {
+        XCTAssertTrue(FileChange.mayContainEdit(#"{"patch":"@@ -1,1 +1,1 @@"}"#))
+        XCTAssertFalse(FileChange.mayContainEdit(#"{"text":"apply the patch when ready"}"#))
+    }
 }

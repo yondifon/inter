@@ -39,7 +39,9 @@ extension FileChange {
     /// Cheap enough to run on every row: the substrings only a payload carrying
     /// before/after text can hold. Parsing the payload is left to expansion.
     static func mayContainEdit(_ raw: String) -> Bool {
-        (oldKeys + newKeys + ["structuredPatch"]).contains { raw.contains($0) }
+        // `@@ -` rather than "patch": pi sends a unified diff and no before/after
+        // arguments at all, and the word alone appears in ordinary prose.
+        (oldKeys + newKeys + ["structuredPatch", "@@ -"]).contains { raw.contains($0) }
     }
 
     init?(rawEvent source: String) {
@@ -75,6 +77,7 @@ extension FileChange {
                 })])
             }
             if let patch = fields["structuredPatch"], let found = hunks(patch, path: path) { return found }
+            if let text = rawString(fields, ["patch"]), let found = unified(text, path: path) { return found }
             return merge(
                 fields.keys.sorted().compactMap { search(fields[$0]!, path: path, inInput: inInput) },
                 path: path
@@ -109,6 +112,48 @@ extension FileChange {
             if !parsed.isEmpty { blocks.append(collapse(parsed)) }
         }
         return blocks.isEmpty ? nil : FileChange(path: path, blocks: blocks)
+    }
+
+    /// pi reports an edit only as a unified diff — `--- path`, `+++ path`, then
+    /// `@@` hunks — and sends none of the before/after arguments the others do,
+    /// so without this its edits fall back to raw JSON.
+    private static func unified(_ text: String, path inherited: String?) -> FileChange? {
+        guard text.contains("@@") else { return nil }
+        var path = inherited
+        var blocks: [[DiffLine]] = []
+        var current: [DiffLine] = []
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
+            // File headers name the target and are not themselves changed lines.
+            if line.hasPrefix("--- ") || line.hasPrefix("+++ ") {
+                path = header(line) ?? path
+                continue
+            }
+            if line.hasPrefix("@@") {
+                if !current.isEmpty { blocks.append(collapse(current)) }
+                current = []
+                continue
+            }
+            // "\ No newline at end of file" is a note about the hunk, not a line.
+            if line.hasPrefix("\\") { continue }
+            switch line.first {
+            case "+": current.append(DiffLine(kind: .added, text: String(line.dropFirst())))
+            case "-": current.append(DiffLine(kind: .removed, text: String(line.dropFirst())))
+            case " ": current.append(DiffLine(kind: .context, text: String(line.dropFirst())))
+            default: continue
+            }
+        }
+        if !current.isEmpty { blocks.append(collapse(current)) }
+        return blocks.isEmpty ? nil : FileChange(path: path, blocks: blocks)
+    }
+
+    private static func header(_ line: String) -> String? {
+        let value = String(line.dropFirst(4)).trimmingCharacters(in: .whitespaces)
+        guard !value.isEmpty, value != "/dev/null" else { return nil }
+        // git writes the same path twice, prefixed a/ and b/; neither is real.
+        for prefix in ["a/", "b/"] where value.hasPrefix(prefix) {
+            return String(value.dropFirst(prefix.count))
+        }
+        return value
     }
 
     private static func merge(_ found: [FileChange], path: String?) -> FileChange? {
