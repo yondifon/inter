@@ -155,6 +155,14 @@ export function taskEventView(event: TaskEvent, provider: Profile["provider"]): 
       ...(outcome ? { presentation: { type: "tool" as const, outcome } } : {}),
       ...actionId, minor: true, rawText };
   }
+  // A progress ping repeats a call that already has a row: same tool, same id,
+  // one more tick of the clock. It is kept reachable and out of the trace.
+  if (subjectType.includes("progress") || payload.heartbeat === true) {
+    const elapsed = Number(payload.elapsed_time_seconds ?? payload.elapsedSeconds ?? 0);
+    return { ...base, kind: "raw", phase: statusPhase(status), title: "Tool progress",
+      detail: joinDetail(string(payload.tool_name) ?? tool, elapsed ? `running ${elapsed}s` : undefined),
+      ...actionId, minor: true, rawText };
+  }
   // "Reasoning", not "Thinking": the trace collapses same-titled "Thinking"
   // ticker events into one pulse line, and prose must not be pulled into it.
   // A block with no prose (redacted thinking carries only a signature) marks

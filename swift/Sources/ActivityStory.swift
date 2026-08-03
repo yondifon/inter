@@ -22,7 +22,7 @@ enum ActivityStory {
         let events = foldActions(rawEvents)
         var blocks: [ActivityBlock] = []
         var technical: [TaskEventSnapshot] = []
-        var chapter: [TaskEventSnapshot] = []
+        var chapter: [ChapterRow] = []
         var pulse: [TaskEventSnapshot] = []
         let receiptID = events.last { $0.kind == "usage" }?.id
         let stallID = events.last { isStalledHeartbeat($0) }?.id
@@ -34,25 +34,35 @@ enum ActivityStory {
 
         func flushChapter() {
             guard !chapter.isEmpty else { return }
-            blocks.append(.chapter(id: chapter[0].id, events: chapter))
+            blocks.append(.chapter(id: chapter[0].id, rows: chapter))
             chapter = []
         }
         func flushPulse() {
             guard let first = pulse.first, let last = pulse.last else { return }
             thinkingTokens += pulse.reduce(0) { $0 + ($1.presentation?.tokensThinking ?? 0) }
-            blocks.append(.reasoning(ReasoningPulse(
+            let line = ReasoningPulse(
                 id: first.id,
                 detail: (last.detail ?? "Thinking").replacingOccurrences(of: " so far", with: ""),
                 updates: pulse.count,
                 seconds: seconds(from: first.createdAt, to: last.createdAt)
-            )))
+            )
+            // Thinking between two calls belongs to the run they are part of.
+            // Ending the chapter for it cut a stretch of work into a card per
+            // call, which is how a trace of 80 rows came to be 38 cards.
+            if chapter.isEmpty { blocks.append(.reasoning(line)) } else { chapter.append(.reasoning(line)) }
             pulse = []
         }
 
         for event in events {
             if isThinkingPulse(event) {
-                flushChapter()
                 pulse.append(event)
+                continue
+            }
+            // An event nobody sees must not break a run somebody does: a
+            // heartbeat between two thinking ticks would otherwise split one
+            // pulse line in two.
+            if isTechnical(event), event.id != receiptID {
+                technical.append(event)
                 continue
             }
             flushPulse()
@@ -83,10 +93,6 @@ enum ActivityStory {
                 }
                 continue
             }
-            if isTechnical(event) {
-                technical.append(event)
-                continue
-            }
             if isSignal(event) {
                 flushChapter()
                 blocks.append(.signal(event))
@@ -95,10 +101,10 @@ enum ActivityStory {
             // One action often arrives several times — pre-hook, post-hook,
             // and the provider's own echo of the same call. Keep the last of a
             // same-shaped run: it carries the settled phase and exit state.
-            if let last = chapter.last, sameShape(last, event) {
-                chapter[chapter.count - 1] = event
+            if case .work(let last)? = chapter.last, sameShape(last, event) {
+                chapter[chapter.count - 1] = .work(event)
             } else {
-                chapter.append(event)
+                chapter.append(.work(event))
             }
         }
         flushPulse()
@@ -224,11 +230,22 @@ enum ActivityStory {
         "Hook Started", "Hook Response", "Status", "Commands Changed",
     ]
 
+    /// Bookkeeping the run states elsewhere: the worker and its session are named
+    /// in the header, and archiving is something the reader did, not the worker.
+    private static let bookkeeping: Set<String> = [
+        "Task queued", "Worker started", "Worker spawned", "Task completed",
+        "Session Captured", "Archived",
+    ]
+
     private static func isTechnical(_ event: TaskEventSnapshot) -> Bool {
         if event.minor == true { return !isStalledHeartbeat(event) }
         if event.kind == "raw" { return plumbing.contains(event.title) }
         if event.title == "Heartbeat" { return !isStalledHeartbeat(event) }
-        return ["Task queued", "Worker started", "Task completed"].contains(event.title)
+        // A tool row with neither a detail nor a presentation says only that some
+        // call happened — a progress ping from a run recorded before the broker
+        // started marking them. The title alone is not a row.
+        if event.kind == "tool", event.detail == nil, event.presentation == nil { return true }
+        return bookkeeping.contains(event.title)
     }
 
     private static func seconds(from start: String, to end: String) -> Int? {
@@ -239,7 +256,7 @@ enum ActivityStory {
 }
 
 enum ActivityBlock: Identifiable {
-    case chapter(id: Int, events: [TaskEventSnapshot])
+    case chapter(id: Int, rows: [ChapterRow])
     case reasoning(ActivityStory.ReasoningPulse)
     case signal(TaskEventSnapshot)
     case receipt(TaskEventSnapshot, thinkingTokens: Int)
@@ -251,6 +268,25 @@ enum ActivityBlock: Identifiable {
         case .signal(let event): event.id
         case .receipt(let event, _): event.id
         }
+    }
+}
+
+/// What a chapter is made of: the work, and the thinking that happened between
+/// it. A pulse is a line inside the run, not a break in it.
+enum ChapterRow: Identifiable {
+    case work(TaskEventSnapshot)
+    case reasoning(ActivityStory.ReasoningPulse)
+
+    var id: Int {
+        switch self {
+        case .work(let event): event.id
+        case .reasoning(let pulse): pulse.id
+        }
+    }
+
+    var isWork: Bool {
+        if case .work = self { return true }
+        return false
     }
 }
 

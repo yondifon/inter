@@ -224,7 +224,7 @@ struct TaskDetail: View {
                     ActivityBlockView(block: block)
                 }
                 if showingTechnicalEvents, !story.technical.isEmpty {
-                    ActivityChapterCard(events: story.technical, muted: true)
+                    ActivityChapterCard(rows: story.technical.map(ChapterRow.work), muted: true)
                 }
                 if !story.technical.isEmpty {
                     Button(showingTechnicalEvents
@@ -361,10 +361,10 @@ private struct ActivityBlockView: View {
 
     var body: some View {
         switch block {
-        case .chapter(_, let events):
-            ActivityChapterCard(events: events, muted: false)
+        case .chapter(_, let rows):
+            ActivityChapterCard(rows: rows, muted: false)
         case .reasoning(let pulse):
-            ActivityReasoningRow(pulse: pulse)
+            ActivityReasoningRow(pulse: pulse).padding(.horizontal, 14)
         case .signal(let event):
             ActivitySignalCard(event: event)
         case .receipt(let event, let thinkingTokens):
@@ -373,17 +373,24 @@ private struct ActivityBlockView: View {
     }
 }
 
-/// A run of consecutive work events on one flat card: no rails, no dots. Each
-/// row leads with what happened; the clock stays out of the way on the right.
+/// A run of work on one flat card: no rails, no dots. Each row leads with what
+/// happened; the clock stays out of the way on the right. Thinking sits between
+/// the rows it happened between, and needs no rule around it — the line is quiet
+/// enough to separate the work on its own.
 struct ActivityChapterCard: View {
-    let events: [TaskEventSnapshot]
+    let rows: [ChapterRow]
     var muted = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            ForEach(Array(events.enumerated()), id: \.element.id) { index, event in
-                ActivityWorkRow(event: event, muted: muted)
-                if index < events.count - 1 {
+            ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+                switch row {
+                case .work(let event):
+                    ActivityWorkRow(event: event, muted: muted)
+                case .reasoning(let pulse):
+                    ActivityReasoningRow(pulse: pulse)
+                }
+                if row.isWork, rows.indices.contains(index + 1), rows[index + 1].isWork {
                     Divider().opacity(0.4)
                 }
             }
@@ -400,7 +407,6 @@ private struct ActivityWorkRow: View {
     let event: TaskEventSnapshot
     var muted = false
     @State private var showingRawDetails = false
-    @State private var showingRawEvent = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -418,7 +424,7 @@ private struct ActivityWorkRow: View {
                 if event.rawText != nil {
                     IconButton(
                         symbol: showingRawDetails ? "chevron.down" : "chevron.right",
-                        label: disclosureLabel,
+                        label: EventExpansion.label(for: event, expanded: showingRawDetails),
                         tint: AnyShapeStyle(.tertiary)
                     ) { showingRawDetails.toggle() }
                     .scaledFont(.caption2, weight: .semibold)
@@ -431,49 +437,17 @@ private struct ActivityWorkRow: View {
             if let presentation = blockPresentation {
                 TaskEventPresentationView(presentation: presentation)
             }
-            if showingRawDetails, let raw = event.rawText {
-                expansion(raw: raw).padding(.top, 3)
+            if showingRawDetails {
+                EventExpansionView(event: event).padding(.top, 3)
             }
         }
         .padding(.vertical, 8)
     }
 
-    /// A file call opens on the lines it changed, not on the payload that carried
-    /// them; the payload stays one click further in for the runs where the
-    /// argument shapes are what's in question.
-    @ViewBuilder private func expansion(raw: String) -> some View {
-        if let change = FileChange(rawEvent: raw) {
-            VStack(alignment: .leading, spacing: 6) {
-                FileChangeView(change: change)
-                Button(showingRawEvent ? "Hide raw event" : "Show raw event") {
-                    showingRawEvent.toggle()
-                }
-                .buttonStyle(.plain)
-                .scaledFont(.caption2)
-                .foregroundStyle(.tertiary)
-                if showingRawEvent {
-                    ReviewContentView(source: raw, initiallyExpandJSON: false)
-                }
-            }
-        } else {
-            ReviewContentView(source: raw, initiallyExpandJSON: false)
-        }
-    }
-
-    /// Naming the diff costs one substring scan per row — cheap enough to run
-    /// before the payload is parsed, which only expansion pays for.
-    private var disclosureLabel: String {
-        guard event.kind == "file", event.rawText.map(FileChange.mayContainEdit) == true else {
-            return showingRawDetails ? "Hide raw details" : "Show raw details"
-        }
-        return showingRawDetails ? "Hide changes" : "Show changes"
-    }
-
     /// Agent prose reads as a quotation, not as a titled row.
-    private var isQuote: Bool {
-        event.kind == "message" || (event.kind == "reasoning" && event.title != "Thinking")
-    }
+    private var isQuote: Bool { EventExpansion.isProse(event) }
 
+    /// Expanded, the quotation is only the stub above the text rendered whole.
     @ViewBuilder private var quoteContent: some View {
         HStack(alignment: .top, spacing: 9) {
             RoundedRectangle(cornerRadius: 1)
@@ -482,7 +456,7 @@ private struct ActivityWorkRow: View {
             Text(event.presentation?.text ?? event.detail ?? event.title)
                 .scaledFont(.callout)
                 .foregroundStyle(.secondary)
-                .lineLimit(6)
+                .lineLimit(showingRawDetails ? 1 : 6)
                 .textSelection(.enabled)
         }
     }
@@ -496,7 +470,7 @@ private struct ActivityWorkRow: View {
             return isQuote ? nil : fallbackDetail
         }
         switch presentation.type {
-        case "file":
+        case "file", "command":
             return nil
         case "usage", "signal":
             guard let detail = event.detail else { return nil }
@@ -511,14 +485,21 @@ private struct ActivityWorkRow: View {
         return TaskEventPresentationSnapshot(type: "message", text: detail)
     }
 
+    /// A path or a command, then what it came to. Both read as one line — the
+    /// command used to sit in a box of its own under the title, which spent
+    /// three lines and a second surface on what fits beside the name.
     @ViewBuilder private var inlineContent: some View {
-        if let presentation = event.presentation, presentation.type == "file" {
+        if let presentation = event.presentation, ["file", "command"].contains(presentation.type) {
             HStack(spacing: 8) {
-                if let path = presentation.path {
-                    Text(path).scaledFont(.caption, design: .monospaced).foregroundStyle(.secondary)
-                        .lineLimit(1).truncationMode(.middle)
+                // A path is identified by its ends, so it loses its middle. A
+                // command is read left to right — cutting its middle strands the
+                // reader between an env-var prefix and half a pipeline.
+                if let subject = presentation.type == "file" ? presentation.path : presentation.command {
+                    Text(subject).scaledFont(.caption, design: .monospaced).foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(presentation.type == "file" ? .middle : .tail)
                 }
-                ForEach([presentation.change, presentation.outcome].compactMap { $0 }, id: \.self) { chip in
+                ForEach(chips, id: \.self) { chip in
                     Text(chip).scaledFont(.caption, weight: .medium, design: .monospaced)
                         .lineLimit(1)
                         .padding(.horizontal, 6).padding(.vertical, 2)
@@ -527,6 +508,21 @@ private struct ActivityWorkRow: View {
             }
             .textSelection(.enabled)
         }
+    }
+
+    /// What the call came to. A command that ended the ordinary way says so by
+    /// not saying anything: `completed · exit 0` next to every green row is three
+    /// words for "nothing happened".
+    private var chips: [String] {
+        guard let presentation = event.presentation else { return [] }
+        if presentation.type == "file" {
+            return [presentation.change, presentation.outcome].compactMap { $0 }
+        }
+        return [
+            presentation.status.flatMap { ["completed", "success"].contains($0) ? nil : $0 },
+            presentation.exitCode.flatMap { $0 == 0 ? nil : "exit \($0)" },
+            presentation.outcome,
+        ].compactMap { $0 }
     }
 }
 
@@ -541,8 +537,7 @@ private struct ActivityReasoningRow: View {
                 .accessibilityHidden(true)
             Text(label).scaledFont(.caption, design: .monospaced).foregroundStyle(.secondary)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 2)
+        .padding(.vertical, 3)
     }
 
     private var label: String {

@@ -21,6 +21,15 @@ final class ActivityStoryTests: XCTestCase {
         )
     }
 
+    /// The work rows of a chapter. Thinking pulses share the list but carry no
+    /// event of their own.
+    private func work(_ block: ActivityBlock?) -> [TaskEventSnapshot] {
+        guard case .chapter(_, let rows)? = block else { return [] }
+        return rows.compactMap { row in
+            if case .work(let event) = row { event } else { nil }
+        }
+    }
+
     /// The echo and the hooks of one call interleave with another call's, so
     /// only the shared id can pair them.
     func testInterleavedEventsOfTwoActionsFoldToOneRowEach() {
@@ -36,9 +45,7 @@ final class ActivityStoryTests: XCTestCase {
             event(6, kind: "file", title: "Read file", detail: "b.rs · denied",
                   phase: "failed", actionId: "toolu_b"),
         ])
-        guard case .chapter(_, let rows) = story.blocks.first else {
-            return XCTFail("expected one chapter, got \(story.blocks)")
-        }
+        let rows = work(story.blocks.first)
         XCTAssertEqual(rows.map(\.id), [1, 3])
         XCTAssertEqual(rows.map(\.phase), ["completed", "failed"])
         XCTAssertEqual(rows[1].detail, "b.rs · denied")
@@ -59,9 +66,7 @@ final class ActivityStoryTests: XCTestCase {
             event(3, kind: "file", title: "Read file", phase: "completed",
                   presentation: call, actionId: "toolu_1"),
         ])
-        guard case .chapter(_, let rows) = story.blocks.first else {
-            return XCTFail("expected one chapter, got \(story.blocks)")
-        }
+        let rows = work(story.blocks.first)
         XCTAssertEqual(rows.map(\.id), [1])
         XCTAssertEqual(rows[0].phase, "completed")
         XCTAssertEqual(rows[0].presentation?.outcome, "298 lines read")
@@ -84,9 +89,7 @@ final class ActivityStoryTests: XCTestCase {
                   presentation: TaskEventPresentationSnapshot(type: "tool", outcome: "Error: \(error)"),
                   minor: true, actionId: "toolu_1"),
         ])
-        guard case .chapter(_, let rows) = story.blocks.first else {
-            return XCTFail("expected one chapter, got \(story.blocks)")
-        }
+        let rows = work(story.blocks.first)
         XCTAssertEqual(rows.count, 1)
         XCTAssertEqual(rows[0].phase, "failed")
         XCTAssertNil(rows[0].presentation?.outcome)
@@ -127,13 +130,33 @@ final class ActivityStoryTests: XCTestCase {
                   createdAt: "2026-07-30T15:00:56.000Z"),
             event(4, kind: "command", title: "Bash"),
         ])
-        XCTAssertEqual(story.blocks.count, 3)
-        guard case .reasoning(let pulse) = story.blocks[1] else {
-            return XCTFail("expected reasoning pulse, got \(story.blocks[1])")
+        // One card holding the read, the thinking, and the command that followed.
+        XCTAssertEqual(story.blocks.count, 1)
+        guard case .chapter(_, let rows) = story.blocks[0], case .reasoning(let pulse) = rows[1] else {
+            return XCTFail("expected a pulse inside the chapter, got \(story.blocks)")
         }
+        XCTAssertEqual(rows.map(\.id), [1, 2, 4])
         XCTAssertEqual(pulse.detail, "~5.3k tokens")
         XCTAssertEqual(pulse.updates, 2)
         XCTAssertEqual(pulse.seconds, 46)
+    }
+
+    /// Hidden events sit between the ticks of one think all the time — a
+    /// heartbeat, a tool result, a hook. Breaking the pulse on them turned one
+    /// line into a stack of near-identical ones.
+    func testHiddenEventsDoNotSplitAThinkingRun() {
+        let story = ActivityStory.compose([
+            event(1, kind: "reasoning", title: "Thinking", detail: "~1.0k tokens so far"),
+            event(2, kind: "lifecycle", title: "Heartbeat", detail: "Running for 30s"),
+            event(3, kind: "reasoning", title: "Thinking", detail: "~2.5k tokens so far",
+                  createdAt: "2026-07-30T15:00:12.000Z"),
+        ])
+        XCTAssertEqual(story.technical.map(\.id), [2])
+        guard case .reasoning(let pulse) = story.blocks.first, story.blocks.count == 1 else {
+            return XCTFail("expected one pulse line, got \(story.blocks)")
+        }
+        XCTAssertEqual(pulse.detail, "~2.5k tokens")
+        XCTAssertEqual(pulse.updates, 2)
     }
 
     func testCollapsesHookAndEchoRowsOfOneAction() {
@@ -144,9 +167,7 @@ final class ActivityStoryTests: XCTestCase {
             event(3, kind: "command", title: "Bash", detail: "bun test", phase: "completed", presentation: done),
             event(4, kind: "file", title: "Read file", detail: "src/a.ts"),
         ])
-        guard case .chapter(_, let rows) = story.blocks[0] else {
-            return XCTFail("expected chapter, got \(story.blocks[0])")
-        }
+        let rows = work(story.blocks[0])
         XCTAssertEqual(rows.map(\.id), [3, 4])
         XCTAssertEqual(rows[0].presentation?.exitCode, 0)
     }
@@ -255,10 +276,31 @@ final class ActivityStoryTests: XCTestCase {
             event(5, kind: "lifecycle", title: "Task completed"),
         ])
         XCTAssertEqual(story.technical.map(\.id), [1, 2, 4, 5])
-        guard case .chapter(_, let events) = story.blocks.first else {
-            return XCTFail("expected chapter, got \(String(describing: story.blocks.first))")
-        }
-        XCTAssertEqual(events.map(\.id), [3])
+        XCTAssertEqual(work(story.blocks.first).map(\.id), [3])
+    }
+
+    /// Spawn, session capture and archiving are bookkeeping: the header names the
+    /// worker, and archiving is something the reader did.
+    func testRunBookkeepingStaysTechnical() {
+        let story = ActivityStory.compose([
+            event(1, kind: "lifecycle", title: "Worker spawned", detail: "claude"),
+            event(2, kind: "lifecycle", title: "Session Captured", detail: "Root provider session mapped"),
+            event(3, kind: "command", title: "Bash", detail: "swift test"),
+            event(4, kind: "lifecycle", title: "Archived"),
+        ])
+        XCTAssertEqual(story.technical.map(\.id), [1, 2, 4])
+        XCTAssertEqual(work(story.blocks.first).map(\.id), [3])
+    }
+
+    /// A progress ping from a run recorded before the broker marked them arrives
+    /// as a tool row with nothing on it.
+    func testToolRowCarryingNothingStaysTechnical() {
+        let story = ActivityStory.compose([
+            event(1, kind: "tool", title: "Tool call", actionId: "toolu_a-heartbeat-0"),
+            event(2, kind: "tool", title: "Grep", detail: "Pattern: needle"),
+        ])
+        XCTAssertEqual(story.technical.map(\.id), [1])
+        XCTAssertEqual(work(story.blocks.first).map(\.id), [2])
     }
 
     func testBrokerFailureIsASignal() {
@@ -276,9 +318,6 @@ final class ActivityStoryTests: XCTestCase {
             event(2, kind: "error", title: "bash failed", detail: "exit 127", phase: "failed"),
         ])
         XCTAssertEqual(story.blocks.count, 1)
-        guard case .chapter(_, let events) = story.blocks[0] else {
-            return XCTFail("expected one chapter, got \(story.blocks)")
-        }
-        XCTAssertEqual(events.map(\.id), [1, 2])
+        XCTAssertEqual(work(story.blocks[0]).map(\.id), [1, 2])
     }
 }

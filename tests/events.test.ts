@@ -152,6 +152,27 @@ describe("task event views", () => {
     expect(view.rawText).toContain("\"stalled\": true");
   });
 
+  test("folds a tool progress ping away from the trace", () => {
+    const view = taskEventView({
+      id: 12,
+      taskId: "task",
+      type: "agent.tool_progress",
+      state: "running",
+      payload: {
+        type: "tool_progress",
+        tool_use_id: "toolu_a-heartbeat-0",
+        tool_name: "Bash",
+        heartbeat: true,
+        elapsed_time_seconds: 30,
+      },
+      createdAt: "now",
+    }, "claude");
+
+    expect(view.minor).toBe(true);
+    expect(view.title).toBe("Tool progress");
+    expect(view.detail).toBe("Bash · running 30s");
+  });
+
   test("keeps the todo presentation and a readable name for a tool call", () => {
     const view = taskEventView({
       id: 11,
