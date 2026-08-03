@@ -265,12 +265,15 @@ extension FileChange {
 struct FileChangeView: View {
     let change: FileChange
 
+    /// The file names the language; a call that lost its path is left plain.
+    private var language: CodeLanguage { CodeLanguage(path: change.path) }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(Array(change.blocks.enumerated()), id: \.offset) { _, block in
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(block.enumerated()), id: \.offset) { _, line in
-                        DiffLineRow(line: line)
+                        DiffLineRow(line: line, language: language)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -283,6 +286,7 @@ struct FileChangeView: View {
 
 private struct DiffLineRow: View {
     let line: DiffLine
+    var language: CodeLanguage = .none
 
     @Environment(\.uiScale) private var uiScale
 
@@ -300,9 +304,13 @@ private struct DiffLineRow: View {
                     .scaledFont(.caption, weight: .semibold, design: .monospaced)
                     .foregroundStyle(tint)
                     .frame(width: 8 * uiScale, alignment: .leading)
-                Text(line.text.isEmpty ? " " : line.text)
+                Text(CodeStyle.highlighted(line.text.isEmpty ? " " : line.text, language: language))
                     .scaledFont(.caption, design: .monospaced)
                     .foregroundStyle(line.kind == .context ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
+                    // A syntax tint is set on the run, so `.secondary` no longer
+                    // reaches it. Dimming the whole line is what keeps context
+                    // behind the lines that moved.
+                    .opacity(line.kind == .context ? 0.7 : 1)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
             }

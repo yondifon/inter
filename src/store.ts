@@ -429,7 +429,10 @@ export class StateStore {
     return cancelled ? this.getTask(id) : undefined;
   }
 
-  answerTask(id: string): Task {
+  answerTask(
+    id: string,
+    updates: { answer?: string; scope?: TaskScope; grantId?: string } = {},
+  ): Task {
     const now = new Date().toISOString();
     let answered = false;
     this.transaction(() => {
@@ -437,11 +440,26 @@ export class StateStore {
       const changed = this.database.query(`
         UPDATE tasks
         SET state = 'queued', output = '', error = NULL, question = NULL,
-            completion_json = NULL, attempts_json = ?, updated_at = ?
+            completion_json = NULL, attempts_json = ?,
+            scope_json = COALESCE(?, scope_json),
+            grant_id = COALESCE(?, grant_id),
+            updated_at = ?
         WHERE id = ? AND state = 'needs_input'
-      `).run(JSON.stringify(attempts), now, id);
+      `).run(
+        JSON.stringify(attempts),
+        updates.scope ? JSON.stringify(updates.scope) : null,
+        updates.grantId ?? null,
+        now,
+        id,
+      );
       if (changed.changes !== 1) throw new Error(`task does not need input: ${id}`);
-      this.addTaskEvent(id, "answered", "queued", { attempt: attempts.length });
+      // The answer lives on the event, not the row: a task answered repeatedly
+      // carries one `answered` event per attempt, each with its own answer.
+      this.addTaskEvent(id, "answered", "queued", {
+        attempt: attempts.length,
+        ...(updates.answer ? { answer: updates.answer } : {}),
+        ...(updates.scope ? { scopeUpdated: true } : {}),
+      });
       answered = true;
     });
     const task = answered ? this.getTask(id) : undefined;

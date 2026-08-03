@@ -35,10 +35,10 @@ import { loadRoutingPolicy } from "./routing-policy";
 
 const port = Number(Bun.env.INTER_PORT ?? 7331);
 const VERSION = "0.6.0";
-const MCP_CONTRACT_VERSION = 16;
-// A foreground MCP call owns the caller's agent turn. Keep status checks short
-// so delegated work cannot stop that caller from chatting or dispatching more
-// work. The HTTP events endpoint remains available for UI-side long polling.
+const MCP_CONTRACT_VERSION = 18;
+// A foreground MCP call still owns the caller's agent turn, which is why
+// `until: "attention"` matters: it returns the instant the task needs the
+// caller rather than burning the full block.
 const scopeSchema = z.object({
   read: z.array(z.string()).max(200),
   write: z.array(z.string()).max(200),
@@ -339,12 +339,12 @@ async function createMcpServer(): Promise<McpServer> {
     return result(publicTask(task));
   });
   server.registerTool("wait", {
-    description: "Check one to eight delegated tasks for new progress, a question, or completion. A quick foreground poll capped at 250ms so the caller stays free to chat or dispatch other work. Returns a prompt preview rather than the prompt, and full output only once a task has settled; use inspect for everything else. Heartbeats do not count as progress. Do not loop; the worker continues independently.",
+    description: "Check one to eight delegated tasks for new progress, a question, or completion. Blocks for real — up to 30s — and until: \"attention\" is the way to follow a task: it returns the moment the task asks a question or reaches a terminal state. Calling it again after it returns empty is the correct way to keep following, not a mistake. Returns a prompt preview rather than the prompt, and full output only once a task has settled; use inspect for everything else. Heartbeats do not count as progress.",
     inputSchema: z.object({
       taskIds: z.array(z.string()).min(1).max(8)
         .describe("Inter task ids to check together."),
       timeoutMs: z.number().int().min(0).max(300_000).default(0)
-        .describe("Requested block, clamped to 250ms. Leave at 0 for an immediate read."),
+        .describe("Requested block, clamped to 30s. Leave at 0 for an immediate read."),
       afterCursor: z.number().int().min(0).optional()
         .describe(
           "Cursor from an earlier wait on this same set of taskIds. A cursor belongs to the set that produced it — reusing one across a different set replays or skips events.",
@@ -398,9 +398,13 @@ async function createMcpServer(): Promise<McpServer> {
     return result({ removed: deleteMemory(cwd, key, expectedVersion) });
   });
   server.registerTool("reply", {
-    description: "Answer a question from a task in needs_input state. Pass only its Inter task ID; Inter maps it to the private provider session and returns the same task ID.",
-    inputSchema: z.object({ taskId: z.string(), answer: z.string().min(1) }),
-  }, async ({ taskId, answer }) => result(startedTask(await reply(taskId, answer))));
+    description: "Answer a question from a task in needs_input state. Pass only its Inter task ID; Inter maps it to the private provider session and returns the same task ID. Optional scope is granted with the answer, replacing the task's scope and becoming the cwd's grant.",
+    inputSchema: z.object({
+      taskId: z.string(),
+      answer: z.string().min(1),
+      scope: scopeSchema.optional(),
+    }),
+  }, async ({ taskId, answer, scope }) => result(startedTask(await reply(taskId, answer, { scope }))));
   server.registerTool("resume", {
     description: "Retry a failed, cancelled, or blocked task. Pass only its Inter task ID; Inter maps it to the private root provider session and returns the same task ID. Optional scope and allowQuestions replace those task settings before continuation; get explicit approval before expanding scope. Use reply instead when the task needs input.",
     inputSchema: z.object({

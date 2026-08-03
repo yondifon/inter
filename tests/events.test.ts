@@ -534,6 +534,36 @@ describe("task event views", () => {
     expect(stalled.detail).toBe("No agent event for 109s");
   });
 
+  test("shows the question a needs_input event parks on", () => {
+    const view = taskEventView({
+      id: 36, taskId: "task", type: "needs_input", state: "needs_input",
+      payload: { question: "Expand the write scope to api/internal/cron/builder.go?", completion: { blocked: true } },
+      createdAt: "now",
+    }, "claude");
+    expect(view.title).toBe("Worker needs input");
+    expect(view.detail).toBe("Expand the write scope to api/internal/cron/builder.go?");
+  });
+
+  test("shows the answer an answered event carried", () => {
+    const view = taskEventView({
+      id: 37, taskId: "task", type: "answered", state: "queued",
+      payload: { attempt: 1, answer: "Yes, expand it." },
+      createdAt: "now",
+    }, "claude");
+    expect(view.title).toBe("Question answered");
+    expect(view.detail).toBe("Yes, expand it.");
+  });
+
+  test("renders an answered event with no answer key as a plain row", () => {
+    const view = taskEventView({
+      id: 38, taskId: "task", type: "answered", state: "queued",
+      payload: { attempt: 2 },
+      createdAt: "now",
+    }, "claude");
+    expect(view.title).toBe("Question answered");
+    expect(view.detail).toBeUndefined();
+  });
+
   test("reduces each tool result shape to the figure worth showing", () => {
     const outcome = (toolUseResult: unknown, isError = false) => taskEventView({
       id: 42, taskId: "task", type: "agent.user", state: "running",

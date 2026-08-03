@@ -42,7 +42,20 @@ struct TaskDetail: View {
     @State private var loadFailed = false
     @State private var showingTechnicalEvents = false
     @State private var showingRunFacts = false
+    /// Whether activity opens on its newest event. Fixed when the task opens: a
+    /// run that lands while it is being read would otherwise yank the trace back
+    /// to the top under the reader.
+    @State private var followsTail: Bool
     @Environment(\.uiScale) private var uiScale
+
+    init(task: TaskSnapshot, store: ProfileStore, setArchived: @escaping (TaskSnapshot, Bool) -> Void) {
+        self.task = task
+        self.store = store
+        self.setArchived = setArchived
+        // A finished run is read from the beginning; only a live one is read from
+        // the end, where the next event will land.
+        _followsTail = State(initialValue: !TaskState(task.state).isTerminal)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -62,19 +75,20 @@ struct TaskDetail: View {
             .padding(.bottom, 16)
             .frame(maxWidth: .infinity)
 
-            ScrollViewReader { proxy in
-                ScrollView {
-                    sectionContent
-                        .frame(maxWidth: 980 * uiScale)
-                        .padding(24)
-                        .frame(maxWidth: .infinity)
-                }
-                .scrollIndicators(.never)
-                .id("\(task.id)-\(section.rawValue)")
-                .onAppear { scrollActivityToBottom(proxy) }
-                .onChange(of: section) { _, _ in scrollActivityToBottom(proxy) }
-                .onChange(of: events.last?.id) { _, _ in scrollActivityToBottom(proxy) }
+            ScrollView {
+                sectionContent
+                    .frame(maxWidth: 980 * uiScale)
+                    .padding(24)
+                    .frame(maxWidth: .infinity)
             }
+            .scrollIndicators(.never)
+            .id("\(task.id)-\(section.rawValue)")
+            // Scrolling to a sentinel at the end of the list put the view past the
+            // content whenever the rows under it had not been measured yet — the
+            // panel opened blank, and nothing re-clamped it. The anchor asks for
+            // the same thing against the real content size, so it cannot overshoot,
+            // and it keeps holding the tail as events stream in.
+            .defaultScrollAnchor(followsTail && section == .activity ? .bottom : .top)
         }
         .background(Surface.content)
         .task(id: task.id) {
@@ -237,9 +251,6 @@ struct TaskDetail: View {
                     .foregroundStyle(.secondary)
                     .padding(.top, 2)
                 }
-                Color.clear
-                    .frame(height: 1)
-                    .id(activityBottomID)
             }
         }
     }
@@ -253,16 +264,6 @@ struct TaskDetail: View {
     }
 
     private var state: TaskState { TaskState(task.state) }
-
-    private var activityBottomID: String { "\(task.id)-activity-bottom" }
-
-    private func scrollActivityToBottom(_ proxy: ScrollViewProxy) {
-        guard section == .activity else { return }
-        Task { @MainActor in
-            await Task.yield()
-            proxy.scrollTo(activityBottomID, anchor: .bottom)
-        }
-    }
 
     private func loadEvents() async {
         do {

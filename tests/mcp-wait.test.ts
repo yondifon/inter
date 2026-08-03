@@ -6,8 +6,12 @@ describe("MCP wait budget", () => {
     expect(mcpWaitBlockMs(0)).toBe(0);
   });
 
-  test("caps legacy long waits so they cannot own the caller turn", () => {
-    expect(mcpWaitBlockMs(30_000)).toBe(250);
-    expect(mcpWaitBlockMs(300_000)).toBe(250);
+  test("lets requests under the cap block for real", () => {
+    expect(mcpWaitBlockMs(5_000)).toBe(5_000);
+    expect(mcpWaitBlockMs(30_000)).toBe(30_000);
+  });
+
+  test("clamps requests over the cap to the 30s ceiling", () => {
+    expect(mcpWaitBlockMs(300_000)).toBe(30_000);
   });
 });

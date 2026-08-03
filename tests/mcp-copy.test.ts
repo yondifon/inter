@@ -6,7 +6,14 @@ describe("MCP consent copy", () => {
     expect(MCP_INSTRUCTIONS).toContain("saved memories");
     expect(MCP_INSTRUCTIONS).toContain("whatever the worker reads");
     expect(MCP_INSTRUCTIONS).toContain("approval for the destination");
-    expect(DELEGATE_DESCRIPTION).toContain("explicitly approved");
+    expect(DELEGATE_DESCRIPTION).toContain("approves a destination and data scope");
+  });
+
+  test("treats destination approval as durable rather than per-dispatch", () => {
+    // The old copy demanded fresh consent before every delegate, which cost a
+    // user round-trip per hand-off and taught callers to do the work themselves.
+    expect(MCP_INSTRUCTIONS).toContain("do not re-ask per dispatch");
+    expect(DELEGATE_DESCRIPTION).toContain("stands for later dispatches");
   });
 
   test("describes scope as a durable grant rather than a per-call default", () => {
@@ -35,10 +42,10 @@ describe("MCP consent copy", () => {
     expect(DELEGATE_DESCRIPTION).toContain("provider session IDs are private");
   });
 
-  test("tells callers to dispatch and return control instead of looping", () => {
+  test("tells callers to follow with wait rather than forget a task", () => {
     expect(MCP_INSTRUCTIONS).toContain("Dispatch returns immediately");
+    expect(MCP_INSTRUCTIONS).toContain('until: "attention"');
     expect(MCP_INSTRUCTIONS).toContain("return control");
-    expect(MCP_INSTRUCTIONS).toContain("instead of looping");
     expect(DELEGATE_DESCRIPTION).toContain("Dispatch returns immediately");
   });
 
@@ -47,6 +54,13 @@ describe("MCP consent copy", () => {
     expect(MCP_INSTRUCTIONS).toContain("policy will not take");
     expect(MCP_INSTRUCTIONS).toContain("not limited to coding");
     expect(DELEGATE_DESCRIPTION).toContain("usage limit");
+  });
+
+  test("leads with routine execution rather than the exception cases", () => {
+    // Framing every use as a fallback — second opinion, out of capacity,
+    // refused work — is why callers did the work themselves instead.
+    expect(MCP_INSTRUCTIONS).toContain("Route execution here by default");
+    expect(DELEGATE_DESCRIPTION).toContain("a normal way to get work done");
   });
 
   test("stays short enough to be read rather than skimmed", () => {

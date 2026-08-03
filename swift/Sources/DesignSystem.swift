@@ -89,6 +89,23 @@ private enum TextStyleSize {
     }
 }
 
+extension Font {
+    /// The same size ladder `scaledFont` uses, for the places a font has to be set
+    /// on an attributed run instead of on a view — inline code inside prose.
+    static func scaled(
+        _ style: Font.TextStyle,
+        scale: CGFloat,
+        weight: Font.Weight? = nil,
+        design: Font.Design = .default
+    ) -> Font {
+        .system(
+            size: TextStyleSize.base(style) * scale,
+            weight: weight ?? TextStyleSize.weight(style),
+            design: Typeface.design(design)
+        )
+    }
+}
+
 private struct ScaledFont: ViewModifier {
     @Environment(\.uiScale) private var uiScale
 
@@ -98,11 +115,7 @@ private struct ScaledFont: ViewModifier {
     let monospacedDigit: Bool
 
     func body(content: Content) -> some View {
-        var font = Font.system(
-            size: TextStyleSize.base(style) * uiScale,
-            weight: weight ?? TextStyleSize.weight(style),
-            design: Typeface.design(design)
-        )
+        var font = Font.scaled(style, scale: uiScale, weight: weight, design: design)
         if monospacedDigit { font = font.monospacedDigit() }
         return content.font(font)
     }

@@ -196,6 +196,63 @@ describe("task lifecycle integration", () => {
     expect(log.indexOf("--resume")).toBe(log.lastIndexOf("--resume"));
   });
 
+  integrationTest("reply with a scope replaces the task scope and becomes the grant", async () => {
+    const { cwd, profile } = setupClaudeBin([
+      "#!/bin/sh",
+      `printf '%s\\n' "$*" >> "$(dirname "$0")/../argv.log"`,
+      'case "$*" in',
+      "  *--resume*)",
+      `    printf '%s\\n' '{"type":"system","session_id":"sess-1"}'`,
+      `    printf '%s\\n' '{"type":"result","result":"Finished.\\nINTER_RESULT: completed"}'`,
+      "    ;;",
+      "  *)",
+      `    printf '%s\\n' '{"type":"system","session_id":"sess-1"}'`,
+      `    printf '%s\\n' '{"type":"result","result":"INTER_NEEDS_INPUT: Expand the write scope?"}'`,
+      "    ;;",
+      "esac",
+      "",
+    ].join("\n"));
+    const parent = await delegate(profile.id, "Do the work.", cwd);
+    await waitForAttention(parent.id);
+
+    const continued = await reply(parent.id, "docs/**", {
+      scope: { read: ["docs/**"], write: ["docs/**"] },
+    });
+    expect(continued.scope).toEqual({ read: ["docs/**"], write: ["docs/**"] });
+    expect(continued.grantId).toBeDefined();
+    expect(stateStore().latestScopeGrant(cwd, profile.id)?.id).toBe(continued.grantId);
+
+    const result = await waitForAttention(parent.id);
+    expect(result.tasks[0]).toMatchObject({ state: "completed" });
+  });
+
+  integrationTest("reply without a scope leaves the existing task scope untouched", async () => {
+    const { cwd, profile } = setupClaudeBin([
+      "#!/bin/sh",
+      'case "$*" in',
+      "  *--resume*)",
+      `    printf '%s\\n' '{"type":"system","session_id":"sess-1"}'`,
+      `    printf '%s\\n' '{"type":"result","result":"Finished.\\nINTER_RESULT: completed"}'`,
+      "    ;;",
+      "  *)",
+      `    printf '%s\\n' '{"type":"system","session_id":"sess-1"}'`,
+      `    printf '%s\\n' '{"type":"result","result":"INTER_NEEDS_INPUT: Continue?"}'`,
+      "    ;;",
+      "esac",
+      "",
+    ].join("\n"));
+    const parent = await delegate(profile.id, "Do the work.", cwd);
+    await waitForAttention(parent.id);
+
+    await reply(parent.id, "yes");
+    const kept = getTask(parent.id);
+    expect(kept?.scope).toEqual({ read: ["**"], write: ["**"] });
+    expect(kept?.grantId).toBeUndefined();
+
+    const result = await waitForAttention(parent.id);
+    expect(result.tasks[0]).toMatchObject({ state: "completed" });
+  });
+
   integrationTest("fails if a provider forks instead of reusing the captured session", async () => {
     const { cwd, profile } = setupClaudeBin([
       "#!/bin/sh",

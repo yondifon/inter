@@ -263,7 +263,7 @@ private struct MarkdownBlockView: View {
     @ViewBuilder var body: some View {
         switch block {
         case .heading(let level, let text):
-            inline(text)
+            inline(text, headingStyle(level))
                 .scaledFont(headingStyle(level), weight: level == 1 ? .bold : .semibold)
                 .padding(.top, level <= 2 ? 4 : 0)
         case .paragraph(let text):
@@ -285,7 +285,7 @@ private struct MarkdownBlockView: View {
                         .foregroundStyle(.tertiary)
                 }
                 ScrollView(.horizontal) {
-                    Text(text)
+                    Text(CodeStyle.highlighted(text, language: CodeLanguage(fence: language)))
                         .scaledFont(.callout, design: .monospaced)
                         .fixedSize(horizontal: true, vertical: false)
                 }
@@ -300,11 +300,22 @@ private struct MarkdownBlockView: View {
         }
     }
 
-    private func inline(_ source: String) -> Text {
+    /// Emphasis, links, and code spans, at the size of whatever block holds them.
+    /// SwiftUI reads the markdown but leaves a code span in the prose face, so the
+    /// run gets the monospaced font here — otherwise a backticked path is styled
+    /// only by the backticks that were already stripped from it.
+    private func inline(_ source: String, _ style: Font.TextStyle = .body) -> Text {
         let options = AttributedString.MarkdownParsingOptions(
             interpretedSyntax: .inlineOnlyPreservingWhitespace
         )
-        return Text((try? AttributedString(markdown: source, options: options)) ?? AttributedString(source))
+        guard var attributed = try? AttributedString(markdown: source, options: options) else {
+            return Text(source)
+        }
+        for run in attributed.runs where run.inlinePresentationIntent?.contains(.code) == true {
+            attributed[run.range].font = .scaled(style, scale: uiScale, design: .monospaced)
+            attributed[run.range].backgroundColor = Surface.sunken
+        }
+        return Text(attributed)
     }
 
     private func headingStyle(_ level: Int) -> Font.TextStyle {

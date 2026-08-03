@@ -45,6 +45,10 @@ export interface ResumeOptions {
   timeoutMs?: number;
 }
 
+export interface ReplyOptions {
+  scope?: TaskScope;
+}
+
 /**
  * Reads a run's own report of what it spent. Providers put it either at the top
  * of the result event or one level down under `result`.
@@ -697,7 +701,11 @@ function tail(value: string, limit: number): string {
   return value.length <= limit ? value : value.slice(-limit);
 }
 
-export async function reply(id: string, answer: string): Promise<Task> {
+export async function reply(
+  id: string,
+  answer: string,
+  options: ReplyOptions = {},
+): Promise<Task> {
   const old = stateStore().getTask(id);
   if (!old) throw new Error(unknownTaskMessage(id));
   if (old.state !== "needs_input") {
@@ -716,7 +724,14 @@ export async function reply(id: string, answer: string): Promise<Task> {
     old.question ?? "What input is required?",
     answer,
   );
-  const task = stateStore().answerTask(id);
+  // A replacement scope is a fresh statement of what this cwd may touch, so it
+  // becomes the grant later delegations inherit.
+  const replacement = options.scope ? resolveScope(old.cwd, old.profileId, options.scope) : undefined;
+  const task = stateStore().answerTask(id, {
+    answer,
+    ...(replacement ? { scope: replacement.scope } : {}),
+    ...(replacement?.grantId ? { grantId: replacement.grantId } : {}),
+  });
   taskWaiter.notify(id);
   launchTask(task, profile, old.sessionId, prompt);
   return task;

@@ -66,7 +66,11 @@ export function taskEventView(event: TaskEvent, provider: Profile["provider"]): 
         ? `No agent event for ${Math.round(Number(event.payload.silentMs ?? 0) / 1_000)}s`
         : event.type === "heartbeat"
           ? `Running for ${Math.round(Number(event.payload.elapsedMs ?? 0) / 1_000)}s`
-          : firstString(event.payload.provider, event.payload.model));
+          : event.type === "needs_input"
+            ? truncate((firstString(event.payload.question) ?? "").replace(/\s+/g, " "), 160)
+            : event.type === "answered"
+              ? truncate((firstString(event.payload.answer) ?? "").replace(/\s+/g, " "), 160)
+              : firstString(event.payload.provider, event.payload.model));
     return {
       ...base,
       kind: event.type === "failed" || event.type === "scope_refusal" ? "error" : "lifecycle",

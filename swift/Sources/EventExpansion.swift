@@ -63,7 +63,7 @@ struct EventExpansionView: View {
                 FileChangeView(change: change)
             case .command(let command, let output):
                 if let command {
-                    Text(command)
+                    Text(CodeStyle.highlighted(command, language: .hashFamily))
                         .scaledFont(.caption, design: .monospaced)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)

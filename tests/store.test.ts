@@ -95,6 +95,58 @@ describe("SQLite state store", () => {
     store.close();
   });
 
+  test("records the caller's answer on the answered event, not the row", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const asking = task("needs_input");
+    asking.question = "Expand the write scope to api/internal/cron/builder.go?";
+    store.createTask(asking);
+
+    store.answerTask(asking.id, { answer: "Yes, expand it." });
+
+    const answered = store.listTaskEvents(asking.id).find(({ type }) => type === "answered");
+    expect(answered?.payload).toMatchObject({ attempt: 1, answer: "Yes, expand it." });
+    // The decision lives on the event so an exchange stays recoverable after the
+    // row's question is cleared for the next attempt.
+    expect(store.getTask(asking.id)?.question).toBeUndefined();
+    store.close();
+  });
+
+  test("a reply scope replaces the task scope and is recorded as the grant", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const asking = task("needs_input");
+    asking.scope = { read: ["src/**"], write: ["src/**"] };
+    store.createTask(asking);
+    const replacement = { read: ["api/**"], write: ["api/**"] };
+
+    const answered = store.answerTask(asking.id, {
+      answer: "Granted.",
+      scope: replacement,
+      grantId: "grant-1",
+    });
+
+    expect(answered.scope).toEqual(replacement);
+    expect(store.getTask(asking.id)?.scope).toEqual(replacement);
+    expect(store.getTask(asking.id)?.grantId).toBe("grant-1");
+    store.close();
+  });
+
+  test("an answer without a scope leaves the task scope untouched", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const asking = task("needs_input");
+    asking.scope = { read: ["src/**"], write: ["src/**"] };
+    asking.grantId = "grant-0";
+    store.createTask(asking);
+
+    store.answerTask(asking.id, { answer: "Ok." });
+
+    expect(store.getTask(asking.id)?.scope).toEqual({ read: ["src/**"], write: ["src/**"] });
+    expect(store.getTask(asking.id)?.grantId).toBe("grant-0");
+    store.close();
+  });
+
   test("keeps every earlier attempt when resume retries a failed task", () => {
     const { db } = paths();
     const store = new StateStore({ path: db, seedProfiles: [profile] });
