@@ -7,6 +7,7 @@ import { sessionIdFrom } from "./adapters";
 import type {
   Profile,
   MemoryEntry,
+  MemoryProject,
   ScopeGrant,
   Task,
   TaskAttempt,
@@ -251,6 +252,21 @@ export class StateStore {
 
   revokeScopeGrant(id: string): boolean {
     return this.database.query("DELETE FROM scope_grants WHERE id = ?").run(id).changes === 1;
+  }
+
+  /** Sizes every cwd holding memories in one grouped read, values left behind. */
+  listMemoryProjects(): MemoryProject[] {
+    return this.database.query<{
+      cwd: string; count: number; chars: number; updated_at: string;
+    }, []>(`
+      SELECT cwd, COUNT(*) AS count, SUM(LENGTH(value)) AS chars, MAX(updated_at) AS updated_at
+      FROM memories GROUP BY cwd ORDER BY cwd
+    `).all().map((row) => ({
+      cwd: row.cwd,
+      count: row.count,
+      chars: row.chars,
+      updatedAt: row.updated_at,
+    }));
   }
 
   listMemories(cwd: string): MemoryEntry[] {

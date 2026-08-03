@@ -79,7 +79,21 @@ Bun.serve({
         // touch — both cheap reads, both previously invisible in the app.
         profileFailures: stateStore().listProfileFailures(),
         grants: stateStore().listScopeGrants(),
+        // One grouped count per cwd, cheap enough to ride the poll; the values
+        // behind it are read only when a project is opened.
+        memoryProjects: stateStore().listMemoryProjects(),
       });
+    }
+    // One project's memories, on demand: a value runs to 16k characters, far
+    // too much to repeat on the two-second state poll.
+    if (url.pathname === "/api/memories" && request.method === "GET") {
+      const cwd = url.searchParams.get("cwd");
+      if (!cwd) return Response.json({ error: "cwd is required" }, { status: 400 });
+      try {
+        return Response.json({ memories: listMemories(cwd) });
+      } catch (error) {
+        return Response.json({ error: String(error) }, { status: 400 });
+      }
     }
     // Quota lives on its own route: it shells out to provider CLIs and must not
     // slow the state poll that drives the whole UI.

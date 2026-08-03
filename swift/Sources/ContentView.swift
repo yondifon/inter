@@ -3,6 +3,8 @@ import SwiftUI
 private enum SidebarSelection: Hashable {
     case profile(String)
     case task(String)
+    /// Identified by cwd, which is what a project's memories are keyed to.
+    case project(String)
 }
 
 struct ContentView: View {
@@ -71,6 +73,18 @@ struct ContentView: View {
                         if !store.tasks.isEmpty { projectMenu }
                     }
                 }
+                Section {
+                    if store.memoryProjects.isEmpty {
+                        Text("No project memories yet")
+                            .scaledFont(.callout).foregroundStyle(.tertiary)
+                    } else {
+                        ForEach(store.memoryProjects) { project in
+                            ProjectRow(project: project).tag(SidebarSelection.project(project.cwd))
+                        }
+                    }
+                } header: {
+                    SectionLabel(text: "Projects")
+                }
             }
             .listStyle(.sidebar)
             .scrollIndicators(.never)
@@ -106,8 +120,12 @@ struct ContentView: View {
                       let task = store.tasks.first(where: { $0.id == id }) {
                 TaskDetail(task: task, store: store, setArchived: setArchived)
                     .id(task.id)
+            } else if case let .project(cwd) = selection,
+                      let project = store.memoryProjects.first(where: { $0.cwd == cwd }) {
+                ProjectMemoryView(project: project, store: store)
+                    .id(project.cwd)
             } else {
-                ContentUnavailableView("Choose a worker or task", systemImage: "point.3.connected.trianglepath.dotted")
+                ContentUnavailableView("Choose a worker, task, or project", systemImage: "point.3.connected.trianglepath.dotted")
             }
         }
         .sheet(isPresented: $adding) { ProfileFormView(store: store) }
@@ -386,6 +404,29 @@ private struct WorkerRow: View {
         }
         .padding(.vertical, 3)
         .opacity(profile.enabled ? 1 : 0.5)
+    }
+}
+
+private struct ProjectRow: View {
+    let project: MemoryProjectSnapshot
+    @Environment(\.uiScale) private var uiScale
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "folder")
+                .scaledFont(.callout)
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+                .frame(width: 18 * uiScale, alignment: .center)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(project.name).scaledFont(.body).lineLimit(1)
+                Text("\(project.count) memor\(project.count == 1 ? "y" : "ies")")
+                    .scaledFont(.caption, design: .monospaced)
+                    .foregroundStyle(.secondary).lineLimit(1)
+            }
+        }
+        .padding(.vertical, 3)
+        .help(project.cwd)
     }
 }
 

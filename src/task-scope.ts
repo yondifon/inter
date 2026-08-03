@@ -1,6 +1,6 @@
-import { existsSync, realpathSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { existsSync, lstatSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { Profile, TaskScope } from "./types";
 
 export const FULL_WORKSPACE_SCOPE: TaskScope = { read: ["**"], write: ["**"] };
@@ -67,6 +67,13 @@ export function sandboxProfile(
   const metadataRules = ancestorsForRules(workspace, [...scope.read, ...scope.write]).map((path) =>
     `(allow file-read-metadata (literal ${quote(path)}))(allow file-read-data (literal ${quote(path)}))`
   );
+  // Workers get TMPDIR=scratchDir, but platform shims like xcrun resolve the
+  // user temp dir via confstr and EPERM writing their cache there. Grant the
+  // cache names only — opening all of user temp would silently make every
+  // task cwd that lives under tmpdir writable.
+  const tempCacheRules = [
+    `(allow file-write* (regex #"^${escapeRegExp(realpathIfPresent(tmpdir()))}/xcrun_db[^/]*$"))`,
+  ];
   return [
     "(version 1)",
     "(deny default)",
@@ -80,6 +87,7 @@ export function sandboxProfile(
     ...metadataRules,
     ...runtimeReads,
     ...runtimeWrites,
+    ...tempCacheRules,
     ...providerRules,
     ...readRules,
     ...writeRules,
@@ -142,7 +150,7 @@ function within(base: string, target: string): boolean {
 
 function normalizeRules(rules: string[], cwd: string, kind: string): string[] {
   if (!Array.isArray(rules)) throw new Error(`scope.${kind} must be an array`);
-  return unique(rules.map((raw) => {
+  return unique(rules.flatMap((raw) => {
     const rule = raw.trim().replaceAll("\\", "/").replace(/^\.\//, "");
     if (!rule) throw new Error(`scope.${kind} contains an empty path`);
     if (isAbsolute(rule) || rule === ".." || rule.startsWith("../") || rule.includes("/../")) {
@@ -157,8 +165,22 @@ function normalizeRules(rules: string[], cwd: string, kind: string): string[] {
       throw new Error(`scope.${kind} must stay inside cwd: ${raw}`);
     }
     assertNoSymlinkEscape(base, cwd, kind);
-    return rule.replace(/\/+$/, "");
+    return expandDirectoryRule(rule.replace(/\/+$/, ""), base);
   }));
+}
+
+// Seatbelt's literal rule on a directory grants the directory itself and
+// nothing under it, so a bare `pwa` rule EPERMs on every child read — and
+// callers almost always mean the subtree. Existing directories expand to
+// their recursive form; files and paths that do not exist yet keep literal
+// semantics.
+function expandDirectoryRule(rule: string, base: string): string[] {
+  if (rule === "**" || rule.endsWith("/**")) return [rule];
+  if (rule === ".") return ["**"];
+  try {
+    if (statSync(base).isDirectory()) return [rule, `${rule}/**`];
+  } catch {}
+  return [rule];
 }
 
 function assertNoSymlinkEscape(target: string, cwd: string, kind: string): void {
@@ -202,8 +224,41 @@ function runtimeReadPaths(profile: Profile, command: string[], scratchDir: strin
     const name = `claude-${process.getuid()}`;
     paths.push(resolve("/tmp", name), resolve("/private/tmp", name));
   }
-  for (const path of profileDataPaths(profile)) paths.push(path);
+  if (profile.provider === "codex") {
+    // Codex walks a global skills root ahead of any task file; without the
+    // grant its loader logs an EPERM before the first turn.
+    paths.push(resolve(userHome, ".agents"));
+  }
+  const dataPaths = profileDataPaths(profile);
+  for (const path of dataPaths) paths.push(path);
+  paths.push(...symlinkTargetReadPaths(dataPaths, userHome));
   return unique(paths.flatMap((path) => [path, realpathIfPresent(path)]));
+}
+
+// Profile config dirs are often dotfile-managed: ~/.codex/AGENTS.md may be a
+// symlink into ~/.dotfiles, and seatbelt checks the link's target, not the
+// link. Grant read on immediate symlink targets that stay inside the user's
+// own home or temp — anything further is the CLI's data, not user bootstrap.
+function symlinkTargetReadPaths(dataPaths: string[], userHome: string): string[] {
+  const targets: string[] = [];
+  const tempRoot = realpathIfPresent(tmpdir());
+  for (const dir of dataPaths) {
+    let entries: string[] = [];
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      try {
+        const child = join(dir, entry);
+        if (!lstatSync(child).isSymbolicLink()) continue;
+        const target = realpathSync(child);
+        if (within(userHome, target) || within(tempRoot, target)) targets.push(target);
+      } catch {}
+    }
+  }
+  return targets;
 }
 
 function runtimeWritePaths(profile: Profile, scratchDir: string): string[] {
@@ -342,4 +397,8 @@ function unique(values: string[]): string[] {
 
 function quote(value: string): string {
   return JSON.stringify(value);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

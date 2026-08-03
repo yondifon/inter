@@ -8,6 +8,7 @@ final class ProfileStore {
     var tasks: [TaskSnapshot] = []
     var profileFailures: [ProfileFailureSnapshot] = []
     var grants: [ScopeGrantSnapshot] = []
+    var memoryProjects: [MemoryProjectSnapshot] = []
     var error: String?
     private var polling: Task<Void, Never>?
 
@@ -32,6 +33,7 @@ final class ProfileStore {
             tasks = state.tasks
             profileFailures = state.profileFailures
             grants = state.grants
+            memoryProjects = state.memoryProjects ?? []
             error = nil
         } catch {
             self.error = "Broker unavailable"
@@ -78,6 +80,25 @@ final class ProfileStore {
         } catch {
             self.error = "Couldn’t update task archive"
             return false
+        }
+    }
+
+    /// One project's memories in full. Off the poll: values run to 16k characters
+    /// each, so they are read only when a project is on screen.
+    func memories(cwd: String) async -> [MemorySnapshot] {
+        var components = URLComponents(url: InterServer.api("memories"), resolvingAgainstBaseURL: false)!
+        components.queryItems = [URLQueryItem(name: "cwd", value: cwd)]
+        guard let url = components.url else { return [] }
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+                self.error = "Couldn’t load project memories"
+                return []
+            }
+            return try JSONDecoder().decode(MemoryList.self, from: data).memories
+        } catch {
+            self.error = "Couldn’t load project memories"
+            return []
         }
     }
 

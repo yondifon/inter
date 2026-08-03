@@ -142,6 +142,36 @@ struct BrokerState: Codable {
     var profileFailures: [ProfileFailureSnapshot]
     /// What each working directory has been approved to expose.
     var grants: [ScopeGrantSnapshot]
+    /// How much memory each project holds. Optional so a broker predating the
+    /// field still decodes instead of blanking the whole window.
+    var memoryProjects: [MemoryProjectSnapshot]?
+}
+
+/// One project's memory footprint. The values themselves stay on the broker
+/// until the project is opened.
+struct MemoryProjectSnapshot: Codable, Identifiable, Hashable {
+    var id: String { cwd }
+    var cwd: String
+    var count: Int
+    var chars: Int
+    var updatedAt: String
+
+    var name: String { (cwd as NSString).lastPathComponent }
+}
+
+struct MemorySnapshot: Codable, Identifiable, Hashable {
+    /// Keys are unique within a cwd, and a list only ever covers one.
+    var id: String { key }
+    var cwd: String
+    var key: String
+    var value: String
+    var version: Int
+    var createdAt: String
+    var updatedAt: String
+}
+
+struct MemoryList: Codable {
+    var memories: [MemorySnapshot]
 }
 
 struct ProfileFailureSnapshot: Codable, Identifiable, Hashable {

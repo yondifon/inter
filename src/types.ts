@@ -78,6 +78,14 @@ export interface MemoryEntry {
   updatedAt: string;
 }
 
+/** One cwd's memory footprint, sized without loading the values themselves. */
+export interface MemoryProject {
+  cwd: string;
+  count: number;
+  chars: number;
+  updatedAt: string;
+}
+
 export interface Task {
   id: string;
   profileId: string;

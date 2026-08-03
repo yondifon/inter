@@ -213,6 +213,32 @@ describe("SQLite state store", () => {
     reopened.close();
   });
 
+  test("groups memories by project and forgets a project with none left", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [] });
+    expect(store.listMemoryProjects()).toEqual([]);
+
+    store.setMemory("/tmp/project-a", "architecture/db", "Use SQLite");
+    store.setMemory("/tmp/project-a", "style/tests", "Bun test");
+    store.setMemory("/tmp/project-b", "owner", "Malico");
+
+    const [first, second] = store.listMemoryProjects();
+    expect(first).toMatchObject({ cwd: "/tmp/project-a", count: 2, chars: 18 });
+    expect(second).toMatchObject({ cwd: "/tmp/project-b", count: 1, chars: 6 });
+
+    // The newest write dates the whole project.
+    const rewritten = store.setMemory("/tmp/project-a", "style/tests", "Bun test, no mocks");
+    expect(store.listMemoryProjects()[0]).toMatchObject({
+      count: 2,
+      chars: 28,
+      updatedAt: rewritten.updatedAt,
+    });
+
+    expect(store.deleteMemory("/tmp/project-b", "owner")).toBe(true);
+    expect(store.listMemoryProjects().map(({ cwd }) => cwd)).toEqual(["/tmp/project-a"]);
+    store.close();
+  });
+
   test("starts without default profiles and preserves user deletion", () => {
     const { db } = paths();
     const first = new StateStore({ path: db, seedProfiles: [] });

@@ -135,9 +135,9 @@ extension FileChange {
 // MARK: - Diff
 
 extension FileChange {
-    /// Past this many lines on either side the table below costs more than the
-    /// reading it buys, and a block that long is read as a block anyway.
-    private static let pairLimit = 400
+    /// Past this many lines on a side, matching costs more than it buys: a
+    /// replacement that long reads as one block swapped for another anyway.
+    private static let alignLimit = 400
     /// Untouched lines kept on each side of a change.
     private static let margin = 3
     /// Longest block rendered whole; the rest is counted, not printed.
@@ -146,7 +146,7 @@ extension FileChange {
     static func diff(old: String, new: String) -> [DiffLine] {
         let before = lines(old)
         let after = lines(new)
-        guard before.count <= pairLimit, after.count <= pairLimit else {
+        guard before.count <= alignLimit, after.count <= alignLimit else {
             return collapse(before.map { DiffLine(kind: .removed, text: $0) }
                 + after.map { DiffLine(kind: .added, text: $0) })
         }
@@ -235,9 +235,10 @@ extension FileChange {
             let start = index
             while index < lines.count, !keep[index] { index += 1 }
             let skipped = index - start
-            // One elided line costs as much room as the line itself.
-            guard skipped > 1 else {
-                result.append(lines[start])
+            // Eliding a line or three saves no room worth the loss of context —
+            // the marker takes a row of its own.
+            guard skipped > 3 else {
+                result.append(contentsOf: lines[start..<index])
                 continue
             }
             result.append(DiffLine(kind: .skipped, text: "\(skipped) unchanged lines"))

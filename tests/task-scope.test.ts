@@ -48,6 +48,23 @@ describe("task scope", () => {
     });
   });
 
+  test("expands a bare directory rule to cover its subtree", () => {
+    const cwd = workspace();
+    // Seatbelt's literal dir grant covers no children; callers mean the tree.
+    expect(normalizeTaskScope({ read: ["docs"], write: ["docs"] }, cwd)).toEqual({
+      read: ["docs", "docs/**"],
+      write: ["docs", "docs/**"],
+    });
+    // Files, explicit recursive rules, and paths that do not exist yet stay as stated.
+    expect(normalizeTaskScope({
+      read: ["README.md", "docs/**", "missing", "**", "."],
+      write: [],
+    }, cwd)).toEqual({
+      read: ["README.md", "docs/**", "missing", "**"],
+      write: [],
+    });
+  });
+
   test("rejects traversal, unsupported globs, and symlink escapes", () => {
     const cwd = workspace();
     const outside = mkdtempSync(join(tmpdir(), "inter-outside-"));
@@ -163,6 +180,35 @@ describe("task scope", () => {
     expect(policy).toContain(`(allow file-read* (subpath "${configDir}"))`);
   });
 
+  test("reads through symlinked profile config files", () => {
+    const cwd = workspace();
+    // Dotfile-managed homes symlink config entries elsewhere; seatbelt checks
+    // the target, so the grant must follow the link.
+    const configDir = mkdtempSync(join(tmpdir(), "inter-cfg-"));
+    const dotfiles = mkdtempSync(join(tmpdir(), "inter-dotfiles-"));
+    roots.push(configDir, dotfiles);
+    writeFileSync(join(dotfiles, "AGENTS.md"), "instructions");
+    symlinkSync(join(dotfiles, "AGENTS.md"), join(configDir, "AGENTS.md"));
+    const worker = { ...profile, env: { CLAUDE_CONFIG_DIR: configDir } };
+    const policy = sandboxProfile(cwd, { read: [], write: [] }, worker, ["/bin/sh"]);
+    expect(policy).toContain(`(allow file-read* (literal "${realpathSync(join(dotfiles, "AGENTS.md"))}"))`);
+  });
+
+  test("lets codex read the global skills root and all workers write user temp", () => {
+    const cwd = workspace();
+    const codexPolicy = sandboxProfile(cwd, { read: [], write: [] }, { ...profile, provider: "codex" }, ["/bin/sh"]);
+    expect(codexPolicy).toContain(`(allow file-read* (subpath "${process.env.HOME}/.agents"))`);
+    // No write: the skills library is bootstrap data, not worker output.
+    expect(codexPolicy).not.toContain(`(allow file-write* (subpath "${process.env.HOME}/.agents"))`);
+    for (const provider of ["claude", "codex", "opencode", "antigravity"] as const) {
+      const policy = sandboxProfile(cwd, { read: [], write: [] }, { ...profile, provider }, ["/bin/sh"]);
+      // xcrun's cache bypasses TMPDIR; user temp itself stays closed so a
+      // task cwd inside tmpdir keeps its write enforcement.
+      expect(policy).toContain(`xcrun_db`);
+      expect(policy).not.toContain(`(allow file-write* (subpath "${realpathSync(tmpdir())}"))`);
+    }
+  });
+
   const integrationTest = process.env.INTER_SANDBOX_INTEGRATION === "1" ? test : test.skip;
   integrationTest("macOS sandbox blocks reads and writes outside declared paths", async () => {
     const cwd = workspace();
@@ -175,6 +221,27 @@ describe("task scope", () => {
       "test \"$(cat README.md)\" = read",
       "test ! -r secret.txt",
       "printf allowed > docs/result.txt",
+      "! printf denied > forbidden.txt",
+    ].join("; ");
+    const child = Bun.spawn(
+      sandboxedCommand(["/bin/sh", "-c", script], cwd, scope, profile, scratch),
+      { cwd, stdout: "pipe", stderr: "pipe" },
+    );
+    const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+    if (exitCode !== 0) throw new Error(`sandbox probe exited ${exitCode}: ${stderr}`);
+  });
+
+  integrationTest("a bare directory scope rule reaches children inside the sandbox", async () => {
+    const cwd = workspace();
+    const scratch = mkdtempSync(join(tmpdir(), "inter-scratch-"));
+    roots.push(scratch);
+    mkdirSync(join(cwd, "docs", "deep"));
+    writeFileSync(join(cwd, "docs", "deep", "leaf.txt"), "leaf");
+    const scope = normalizeTaskScope({ read: ["docs"], write: ["docs"] }, cwd);
+    const script = [
+      "set -e",
+      "test \"$(cat docs/deep/leaf.txt)\" = leaf",
+      "printf ok > docs/deep/out.txt",
       "! printf denied > forbidden.txt",
     ].join("; ");
     const child = Bun.spawn(
@@ -287,6 +354,16 @@ describe("scopeRefusedWrite", () => {
     expect(scopeRefusedWrite("out/report.md", cwd, { read: ["**"], write: ["**"] })).toBeUndefined();
     expect(scopeRefusedWrite("docs/a.md", cwd, { read: ["**"], write: ["docs/**"] })).toBeUndefined();
     expect(scopeRefusedWrite("api.ts", cwd, { read: ["**"], write: ["api.ts"] })).toBeUndefined();
+  });
+
+  test("honors the bare-directory expansion for write rules", () => {
+    // Needs a real directory for the expansion to stat, outside the always-
+    // writable temp locations: the repo's own docs/ serves as the fixture.
+    const root = realpathSync(join(import.meta.dir, ".."));
+    const scope = normalizeTaskScope({ read: ["**"], write: ["docs"] }, root);
+    expect(scope.write).toEqual(["docs", "docs/**"]);
+    expect(scopeRefusedWrite("docs/a.md", root, scope)).toBeUndefined();
+    expect(scopeRefusedWrite("src/api.ts", root, scope)).toBe(join(root, "src/api.ts"));
   });
 
   test("flags writes outside the granted write scope", () => {
