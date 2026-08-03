@@ -1,7 +1,7 @@
 import Foundation
 
 enum Provider: String, Codable, CaseIterable, Identifiable {
-    case claude, codex, opencode, antigravity
+    case claude, codex, opencode, antigravity, pi
     var id: String { rawValue }
     var label: String { rawValue == "opencode" ? "OpenCode" : rawValue.capitalized }
     var defaultModel: String {
@@ -10,6 +10,9 @@ enum Provider: String, Codable, CaseIterable, Identifiable {
         case .codex: "gpt-5"
         case .opencode: "opencode/big-pickle"
         case .antigravity: "gemini-3.6-flash-medium"
+        // pi resolves a bare id against the first catalog entry that matches it,
+        // so the provider-qualified form is the only unambiguous spelling.
+        case .pi: "opencode-go/deepseek-v4-flash"
         }
     }
     var symbol: String {
@@ -18,6 +21,7 @@ enum Provider: String, Codable, CaseIterable, Identifiable {
         case .codex: "terminal"
         case .opencode: "chevron.left.forwardslash.chevron.right"
         case .antigravity: "arrow.up.right"
+        case .pi: "pi"
         }
     }
 
@@ -30,6 +34,9 @@ enum Provider: String, Codable, CaseIterable, Identifiable {
         case .codex: "codex resume \(session)"
         case .opencode: "opencode --session \(session)"
         case .antigravity: nil
+        // Exact id, no picker and no fork prompt — but pi looks sessions up per
+        // directory, so this only reopens it from the task's own cwd.
+        case .pi: "pi --session-id \(session)"
         }
     }
 }

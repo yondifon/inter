@@ -76,15 +76,26 @@ final class BrokerManager {
             .first { FileManager.default.fileExists(atPath: $0) }
     }
 
+    // Sentinels, not the raw output: rc files print banners, and a banner
+    // concatenated into PATH breaks every lookup the broker makes. The broker
+    // re-reads the login PATH itself when a worker CLI fails to resolve, so this
+    // only spares it that cost in the common case.
     private func loginShellPath() -> String? {
+        let start = "__INTER_PATH__"
+        let end = "__INTER_END__"
         let process = Process()
         process.executableURL = URL(fileURLWithPath: ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh")
-        process.arguments = ["-lic", "printf %s \"$PATH\""]
+        process.arguments = ["-lic", "printf '\(start)%s\(end)' \"$PATH\""]
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
         try? process.run()
         process.waitUntilExit()
-        return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)
+        guard let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8),
+              let opening = output.range(of: start),
+              let closing = output.range(of: end, range: opening.upperBound..<output.endIndex)
+        else { return nil }
+        let value = String(output[opening.upperBound..<closing.lowerBound])
+        return value.isEmpty ? nil : value
     }
 }

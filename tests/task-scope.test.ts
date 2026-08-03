@@ -288,6 +288,34 @@ describe("task scope", () => {
     }
   });
 
+  test("grants the interpreter a script CLI is launched through", () => {
+    // pi is `#!/usr/bin/env node`, and a Node under the user's home sits in no
+    // already-granted root: without this the run dies before its first line.
+    const root = mkdtempSync(join(tmpdir(), "inter-shebang-"));
+    roots.push(root);
+    const runtime = join(root, "runtime", "bin");
+    mkdirSync(runtime, { recursive: true });
+    const interpreter = join(runtime, "fakenode");
+    writeFileSync(interpreter, "#!/bin/sh\nexit 0\n");
+    const cli = join(root, "fake-cli");
+    writeFileSync(cli, `#!${interpreter}\n`);
+
+    const policy = sandboxProfile(workspace(), { read: [], write: [] }, profile, [cli]);
+    expect(policy).toContain(`(subpath "${realpathSync(runtime)}")`);
+    // The install prefix too: Node stats it while building its module search path.
+    expect(policy).toContain(`(subpath "${realpathSync(join(root, "runtime"))}")`);
+  });
+
+  test("reads the interpreter out of a /usr/bin/env shebang", () => {
+    const root = mkdtempSync(join(tmpdir(), "inter-shebang-env-"));
+    roots.push(root);
+    const cli = join(root, "env-cli");
+    // `env` names the real interpreter in the second field, not the first.
+    writeFileSync(cli, "#!/usr/bin/env sh\n");
+    const policy = sandboxProfile(workspace(), { read: [], write: [] }, profile, [cli]);
+    expect(policy).not.toContain('(subpath "/usr/bin/env")');
+  });
+
   integrationTest("installed Rust tools can run inside an OpenCode sandbox", async () => {
     const cargo = Bun.which("cargo", { PATH: Bun.env.PATH });
     if (!cargo) return;

@@ -9,6 +9,7 @@ import {
 } from "../src/task-protocol";
 import {
   antigravityBootstrapRetryReason,
+  compactPayload,
   delegate,
   getTask,
   needsInputQuestion,
@@ -367,5 +368,37 @@ describe("Antigravity bootstrap retry", () => {
       1,
       networkFailure.replace('"conversation_id":""', '"missing_conversation_id":""'),
     )).toBeUndefined();
+  });
+});
+
+describe("compactPayload", () => {
+  test("drops the running copy pi repeats inside every streamed delta", () => {
+    // Measured on a real run: keeping these made one 9-second task cost 827 KB,
+    // 91% of it the same message written out again per token.
+    const delta = {
+      type: "message_update",
+      assistantMessageEvent: {
+        type: "text_delta",
+        contentIndex: 0,
+        delta: "world",
+        partial: { role: "assistant", content: [{ type: "text", text: "hello world" }] },
+      },
+      message: { role: "assistant", content: [{ type: "text", text: "hello world" }] },
+    };
+    expect(compactPayload(delta)).toEqual({
+      type: "message_update",
+      assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "world" },
+    });
+  });
+
+  test("leaves every other event untouched", () => {
+    // message_end is where the assembled reply legitimately lives.
+    const end = {
+      type: "message_end",
+      message: { role: "assistant", content: [{ type: "text", text: "hello world" }] },
+    };
+    expect(compactPayload(end)).toEqual(end);
+    const tool = { type: "tool_execution_start", toolName: "write", args: { path: "a.ts" } };
+    expect(compactPayload(tool)).toEqual(tool);
   });
 });

@@ -3,7 +3,7 @@ import type { Profile, Provider } from "./types";
 
 export function normalizeProfile(input: unknown): Profile {
   const raw = input as Partial<Profile>;
-  const providers: Provider[] = ["claude", "codex", "opencode", "antigravity"];
+  const providers: Provider[] = ["claude", "codex", "opencode", "antigravity", "pi"];
   if (!raw || typeof raw !== "object") throw new Error("profile must be an object");
   if (!providers.includes(raw.provider as Provider)) throw new Error("invalid provider");
   const label = String(raw.label ?? "").trim();

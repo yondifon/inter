@@ -176,7 +176,7 @@ Bun.serve({
       const patch = await request.json() as Partial<Profile>;
       if (typeof patch.enabled === "boolean") profile.enabled = patch.enabled;
       if (typeof patch.label === "string" && patch.label.trim()) profile.label = patch.label.trim();
-      if (patch.provider && ["claude", "codex", "opencode", "antigravity"].includes(patch.provider)) {
+      if (patch.provider && ["claude", "codex", "opencode", "antigravity", "pi"].includes(patch.provider)) {
         profile.provider = patch.provider;
       }
       if (Object.hasOwn(patch, "model")) {
@@ -290,7 +290,7 @@ async function createMcpServer(): Promise<McpServer> {
         .describe("Whether the worker may pause in needs_input to ask. False makes it guess or stop."),
       effort: z.enum(["minimal", "low", "medium", "high", "xhigh", "max"]).optional()
         .describe(
-          "Reasoning effort for this run. Honoured by claude, codex, and opencode; antigravity " +
+          "Reasoning effort for this run. Honoured by claude, codex, opencode, and pi; antigravity " +
           "ignores it because its level is baked into the model id. Ladders differ per provider, " +
           "so call profiles with include: [\"models\"] and read the model's efforts before choosing.",
         ),
@@ -442,7 +442,7 @@ async function createMcpServer(): Promise<McpServer> {
     description: "Everything needed to pick a destination: configured provider profiles with their capabilities and default models, plus — on request — their model catalogs, availability, and rate-limit headroom. This is the one capacity read; use route to have Inter choose for you.",
     inputSchema: z.object({
       profile: z.string().optional().describe("Restrict to one profile id."),
-      provider: z.enum(["claude", "codex", "opencode", "antigravity"]).optional()
+      provider: z.enum(["claude", "codex", "opencode", "antigravity", "pi"]).optional()
         .describe("Restrict to one provider."),
       include: z.array(z.enum(["models", "status", "usage"])).optional()
         .describe(

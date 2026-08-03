@@ -71,6 +71,46 @@ describe("SQLite state store", () => {
     }
   });
 
+  test("widens the provider check so a pi profile saves on a pre-pi database", () => {
+    const { db } = paths();
+    // A database built before pi carries the old CHECK, and SQLite cannot alter
+    // one in place — without the rebuild the insert below fails outright.
+    const legacy = new Database(db);
+    legacy.exec(`
+      CREATE TABLE profiles (
+        id TEXT PRIMARY KEY,
+        label TEXT NOT NULL,
+        provider TEXT NOT NULL CHECK(provider IN ('claude','codex','opencode','antigravity')),
+        default_model TEXT NOT NULL,
+        enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
+        env_json TEXT NOT NULL CHECK(json_valid(env_json)),
+        capabilities_json TEXT NOT NULL CHECK(json_valid(capabilities_json)),
+        command_json TEXT CHECK(command_json IS NULL OR json_valid(command_json)),
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        deleted_at TEXT
+      );
+      INSERT INTO profiles(id, label, provider, default_model, enabled, env_json, capabilities_json)
+      VALUES ('kept', 'Kept', 'claude', 'sonnet', 1, '{}', '[]');
+    `);
+    legacy.close();
+
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    store.saveProfiles([{
+      id: "pi", label: "Pi", provider: "pi", model: "opencode-go/deepseek-v4-flash",
+      enabled: true, env: {}, capabilities: ["build"],
+    }]);
+    expect(store.listProfiles().map(({ id }) => id)).toContain("pi");
+    store.close();
+
+    // saveProfiles replaces the set, so the legacy row is soft-deleted rather
+    // than listed — the rebuild still has to have carried it across.
+    const reopened = new Database(db);
+    const rows = reopened.query<{ id: string }, []>("SELECT id FROM profiles").all();
+    expect(rows.map(({ id }) => id)).toContain("kept");
+    reopened.close();
+  });
+
   test("keeps a run's result as an attempt when reply starts the next one", () => {
     const { db } = paths();
     const store = new StateStore({ path: db, seedProfiles: [profile] });

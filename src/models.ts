@@ -7,6 +7,9 @@ const CLAUDE_ALIASES = ["sonnet", "opus", "haiku", "fable"];
 // `claude --effort <level>` is a session flag, so the ladder is the same for
 // every model the CLI accepts rather than published per model.
 const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+// `pi --thinking <level>` is likewise a session flag. Its own ladder also has
+// `off`, which Inter has no effort for and therefore never sends.
+const PI_EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max"];
 
 export interface ModelQuery {
   profile?: string;
@@ -48,6 +51,8 @@ async function discover(profile: Profile): Promise<ModelInfo[]> {
     ? ["codex", "debug", "models"]
     : profile.provider === "antigravity"
     ? ["agy", "models"]
+    : profile.provider === "pi"
+    ? ["pi", "--list-models"]
     : ["opencode", "models", "--verbose"];
   try {
     const output = await run(command, profile);
@@ -55,6 +60,8 @@ async function discover(profile: Profile): Promise<ModelInfo[]> {
       ? parseCodexModels(output, profile)
       : profile.provider === "antigravity"
       ? parseAntigravityModels(output, profile)
+      : profile.provider === "pi"
+      ? parsePiModels(output, profile)
       : parseOpenCodeModels(output, profile);
     if (discovered.length > 0) return discovered;
   } catch {}
@@ -141,6 +148,34 @@ export function parseAntigravityModels(raw: string, profile: Profile): ModelInfo
     .map((id) => id.trim())
     .filter((id) => /^[a-z0-9][a-z0-9._-]*$/i.test(id))
     .map((id) => model(profile, id, id, "discovered"));
+}
+
+// `pi --list-models` prints a padded table — a header row, then one row per
+// model with columns joined by at least two spaces. Widths are recomputed per
+// invocation, so the split has to be on the gap, never on an offset. Rows are
+// keyed off the header rather than assumed: the two failure outputs (no auth
+// anywhere, or a search that matched nothing) are prose, and matching no header
+// drops them to the caller's configured-model fallback.
+export function parsePiModels(raw: string, profile: Profile): ModelInfo[] {
+  const rows = raw.replace(/\x1b\[[0-9;]*m/g, "").split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.split(/\s{2,}/));
+  const header = rows.findIndex(([first, second]) => first === "provider" && second === "model");
+  if (header === -1) return [];
+  const thinking = rows[header]!.indexOf("thinking");
+  return rows.slice(header + 1)
+    .filter((columns) => columns.length >= 2 && columns[0] && columns[1])
+    .map((columns) => {
+      const id = `${columns[0]}/${columns[1]}`;
+      // pi takes --thinking as a session flag rather than publishing a ladder
+      // per model, so a reasoning model gets the whole ladder, like Claude's.
+      const reasoning = thinking !== -1 && columns[thinking] === "yes";
+      return model(profile, id, id, "discovered", {
+        reasoning,
+        ...(reasoning ? { efforts: [...PI_EFFORTS] } : {}),
+      });
+    });
 }
 
 function parseMetadata(raw: string): Partial<ModelInfo> {

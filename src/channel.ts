@@ -5,7 +5,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 // The channel is a Claude Code-only accelerator on top of Inter's portable
 // follow-along (a blocking `wait` call with until: "attention"), not a
 // replacement for it. `notifications/claude/channel` is an Anthropic
-// extension, so codex, opencode, and antigravity cannot receive these
+// extension, so codex, opencode, antigravity, and pi cannot receive these
 // events; those clients follow tasks with `wait`.
 export const CHANNEL_INSTRUCTIONS = [
   "You receive delegated Inter task events as <channel source=\"inter\" ...> tags; a task reaching your attention here is also reachable any time with Inter's wait tool (until: \"attention\" works in every client). Handle by state:",

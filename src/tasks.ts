@@ -7,6 +7,7 @@ import { loadConfig, profileEnv } from "./config";
 import { taskEventView } from "./events";
 import { continuationPrompt, interpretWorkerOutcome, needsInputQuestion, workerPrompt } from "./task-protocol";
 import { normalizeTaskScope, sandboxedCommand, scopeCoversPath, scopeRefusedWrite } from "./task-scope";
+import { workerPath } from "./worker-path";
 import { deniedScopePaths, promptReadPaths } from "./prompt-paths";
 import { stateStore, type StateStore, type TaskListQuery } from "./store";
 import { promptWithMemories } from "./memories";
@@ -121,6 +122,20 @@ export async function waitForTasks(
     progress: stateStore().latestTaskProgress(taskIds),
     hasMore: rows.length > 100,
   };
+}
+
+/// pi repeats the whole message so far inside every streamed token delta, so a
+/// reply of n tokens costs O(n²) to store — a 9-second run measured 827 KB, 91%
+/// of it those repeats, and a long one would burn through MAX_EVENTS. The delta
+/// itself is what the trace renders, and the assembled message arrives on
+/// `message_end`, so the running copy is dropped before the row is written.
+export function compactPayload(payload: Record<string, unknown>): Record<string, unknown> {
+  if (payload.type !== "message_update") return payload;
+  const { message: _running, ...rest } = payload;
+  const event = rest.assistantMessageEvent;
+  if (!event || typeof event !== "object" || Array.isArray(event)) return rest;
+  const { partial: _partial, ...delta } = event as Record<string, unknown>;
+  return { ...rest, assistantMessageEvent: delta };
 }
 
 export function appendTaskEvent(
@@ -347,6 +362,11 @@ async function runTask(
     task.shippedPrompt = prompt;
     const env = {
       ...Bun.env,
+      // The CLI runs on the same PATH the broker used to find it, so its own
+      // subprocesses (git, version shims) see the directories the user's shell
+      // has rather than the broker's startup snapshot. Placed ahead of the
+      // profile so an explicitly configured PATH still wins.
+      PATH: workerPath(),
       ...profileEnv(profile),
       // Bun.spawn sets the real working directory but leaves PWD inherited from
       // whatever shell launched the broker. Workers that trust PWD over getcwd
@@ -441,7 +461,7 @@ async function runTask(
               ? parsed as Record<string, unknown>
               : { value: parsed };
             const kind = typeof payload.type === "string" ? payload.type : "event";
-            appendTaskEvent(task.id, `agent.${kind}`, task.state, payload);
+            appendTaskEvent(task.id, `agent.${kind}`, task.state, compactPayload(payload));
             // The run reports its own spend once, near the end; a retry inside
             // this same run replaces it rather than adding to it.
             const reported = runCostFrom(payload);

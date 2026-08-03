@@ -836,4 +836,98 @@ describe("task event views", () => {
     expect(prompt.title).toBe("Prompt received");
     expect(prompt.minor).toBe(true);
   });
+
+  test("presents pi's own event vocabulary", () => {
+    const view = (payload: Record<string, unknown>) =>
+      taskEventView({ id: 1, taskId: "task", type: "agent.event", state: "running", payload, createdAt: "now" }, "pi");
+
+    expect(view({ type: "session", version: 3, id: "019fc931", cwd: "/repo" }).title)
+      .toBe("Session started");
+
+    const thinking = view({
+      type: "message_update",
+      assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "weighing options" },
+    });
+    expect(thinking.kind).toBe("reasoning");
+    expect(thinking.minor).toBe(true);
+
+    const message = view({
+      type: "message_update",
+      assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Hello" },
+    });
+    expect(message.kind).toBe("message");
+    expect(message.detail).toBe("Hello");
+
+    const tool = view({
+      type: "tool_execution_start", toolCallId: "call_abc123", toolName: "bash",
+      args: { command: "ls -la" },
+    });
+    expect(tool.kind).toBe("command");
+    expect(tool.phase).toBe("started");
+    expect(tool.actionId).toBe("call_abc123");
+
+    const settled = view({ type: "agent_settled" });
+    expect(settled.title).toBe("Run finished");
+    expect(settled.phase).toBe("completed");
+  });
+
+  test("reads a pi edit off its result once the arguments are gone", () => {
+    // Verbatim from a real run: tool_execution_end carries `args: null`, so the
+    // path and the change have to come out of the result or the row degrades to
+    // a raw JSON dump.
+    const view = taskEventView({
+      id: 1, taskId: "task", type: "agent.tool_execution_end", state: "running",
+      payload: {
+        type: "tool_execution_end",
+        toolCallId: "call_00_ET_jwxrRxDVTa5pHrBuS0x97638",
+        toolName: "edit",
+        result: {
+          content: [{ type: "text", text: "Successfully replaced 1 block(s) in .inter-test/pi-tools.txt." }],
+          details: {
+            diff: "-1 state: one\n+1 state: two",
+            patch: "--- .inter-test/pi-tools.txt\n+++ .inter-test/pi-tools.txt\n@@ -1,1 +1,1 @@\n-state: one\n+state: two\n",
+            firstChangedLine: 1,
+          },
+        },
+        isError: false,
+      },
+      createdAt: "now",
+    }, "pi");
+    expect(view.kind).toBe("file");
+    expect(view.title).toBe("Edit file");
+    expect(view.presentation?.type).toBe("file");
+    expect(view.presentation?.path).toBe(".inter-test/pi-tools.txt");
+    expect(view.presentation?.change).toBe("one → two");
+    expect(view.presentation?.outcome).toContain("replaced 1 block");
+  });
+
+  test("does not present pi's echoed prompt as an agent message", () => {
+    const view = (payload: Record<string, unknown>) =>
+      taskEventView({ id: 1, taskId: "task", type: "agent.event", state: "running", payload, createdAt: "now" }, "pi");
+    const prompt = { role: "user", content: [{ type: "text", text: "Reply with exactly: ok" }] };
+
+    expect(view({ type: "message_start", message: prompt }).title).toBe("Prompt received");
+    expect(view({ type: "message_end", message: prompt }).kind).toBe("lifecycle");
+    // The assistant's opening message is empty; the text arrives as deltas.
+    expect(view({ type: "message_start", message: { role: "assistant", content: [] } }).minor).toBe(true);
+  });
+
+  test("reads a pi failure from stopReason, since json mode still exits 0", () => {
+    const view = taskEventView({
+      id: 2, taskId: "task", type: "agent.event", state: "running",
+      payload: {
+        type: "message_end",
+        message: {
+          role: "assistant", content: [], stopReason: "error",
+          errorMessage: "invalid x-api-key",
+          usage: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0 },
+        },
+      },
+      createdAt: "now",
+    }, "pi");
+    expect(view.kind).toBe("error");
+    expect(view.phase).toBe("failed");
+    expect(view.detail).toContain("invalid x-api-key");
+    expect(view.presentation?.tokensIn).toBe(100);
+  });
 });

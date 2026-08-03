@@ -213,6 +213,9 @@ function knownAgentEvent(
   const antigravity = antigravityEvent(base, payload, raw);
   if (antigravity) return antigravity;
 
+  const pi = piEvent(base, payload, raw);
+  if (pi) return pi;
+
   if (payloadType === "system") {
     const subtype = string(payload.subtype);
     if (subtype === "thinking_tokens") {
@@ -377,6 +380,146 @@ function knownAgentEvent(
   }
 
   return undefined;
+}
+
+/// pi writes one flat JSON line per session event in its own vocabulary: a
+/// `session` header, `message_update` deltas carrying the text a block at a
+/// time, `tool_execution_*` pairs, and `agent_settled` in place of a result
+/// envelope. Nothing above matches, so every row would land as raw JSON.
+function piEvent(
+  base: EventBase,
+  payload: Record<string, any>,
+  raw: { rawText?: string },
+): TaskEventView | undefined {
+  const type = string(payload.type);
+
+  if (type === "session") {
+    return { ...base, kind: "lifecycle", phase: "info", title: "Session started",
+      detail: joinDetail(string(payload.cwd)), ...raw };
+  }
+
+  if (type === "message_update") {
+    const delta = object(payload.assistantMessageEvent);
+    const deltaType = string(delta.type) ?? "message update";
+    const text = string(delta.delta);
+    // Deltas, not snapshots: the cumulative message was removed from this event.
+    // pi streams a token at a time, so an unfolded row per delta buries the run
+    // in one-word lines. Every kind stays minor and the closing message_end
+    // carries the assembled reply — which pi, unlike Antigravity, does send.
+    if (deltaType === "thinking_delta" && text) {
+      return { ...base, kind: "reasoning", phase: "started", title: "Thinking", detail: text,
+        minor: true, ...raw };
+    }
+    if (deltaType === "text_delta" && text) {
+      return { ...base, kind: "message", phase: "info", title: "Agent message", detail: text,
+        presentation: { type: "message", text }, minor: true, ...raw };
+    }
+    // Block boundaries and the tokens of a streamed tool argument have no row
+    // worth reading, but they still need an arm here: left to fall through, the
+    // generic shapes below title them "Agent message" with an empty body.
+    return { ...base, kind: "lifecycle", phase: "info", title: humanize(deltaType),
+      minor: true, ...raw };
+  }
+
+  if (type === "tool_execution_start" || type === "tool_execution_update" ||
+      type === "tool_execution_end") {
+    const tool = string(payload.toolName);
+    const result = object(payload.result);
+    const outcome = Array.isArray(result.content)
+      ? firstString(...result.content.map((block: unknown) => object(block).text))
+      : undefined;
+    // pi sends `args: null` on tool_execution_end, so the closing row of an edit
+    // has no path to present and would fall back to a raw JSON dump. The edit is
+    // still fully described — the patch header names the file and the diff holds
+    // the change — so the result is read directly when the arguments are gone.
+    const presentation = toolPresentation(tool, object(payload.args))
+      ?? piEditPresentation(object(result.details));
+    const settled = outcome
+      ? { ...(presentation ?? { type: "tool" as const }), outcome }
+      : presentation;
+    return { ...base,
+      kind: settled?.type === "file" ? "file" : settled?.type === "command" ? "command" : "tool",
+      phase: type === "tool_execution_end" ? (payload.isError ? "failed" : "completed")
+        : type === "tool_execution_update" ? "info" : "started",
+      title: tool ? toolTitle(tool) : "Tool call",
+      detail: presentationDetail(presentation), presentation: settled,
+      ...(string(payload.toolCallId) ? { actionId: string(payload.toolCallId)! } : {}),
+      ...raw };
+  }
+
+  // pi echoes the prompt back as a user message and opens every assistant reply
+  // with an empty one. Neither is the agent talking, and without a branch here
+  // both render as "Agent message".
+  if (type === "message_start" || type === "message_end") {
+    const role = string(object(payload.message).role);
+    if (role === "user") {
+      return { ...base, kind: "lifecycle", phase: "info", title: "Prompt received",
+        minor: true, ...raw };
+    }
+    if (type === "message_start") {
+      return { ...base, kind: "lifecycle", phase: "started", title: "Reply started",
+        minor: true, ...raw };
+    }
+  }
+
+  if (type === "message_end") {
+    const message = object(payload.message);
+    if (message.role !== "assistant") return undefined;
+    const usage = object(message.usage);
+    const error = string(message.errorMessage);
+    // json mode exits 0 whatever happened, so the stop reason is the only place
+    // a refusal or an abort is reported.
+    const failed = error !== undefined ||
+      ["error", "aborted"].includes(string(message.stopReason) ?? "");
+    const presentation: TaskEventPresentation = {
+      type: "usage",
+      ...(typeof usage.input === "number" ? { tokensIn: usage.input } : {}),
+      ...(typeof usage.output === "number" ? { tokensOut: usage.output } : {}),
+      ...(usage.cacheRead ? { tokensCached: Number(usage.cacheRead) } : {}),
+      ...(error ? { level: "error" as const, text: error } : {}),
+    };
+    return { ...base, kind: failed ? "error" : "usage", phase: failed ? "failed" : "completed",
+      title: failed ? "Turn failed" : "Turn summary",
+      detail: joinDetail(string(message.model), error), presentation, ...raw };
+  }
+
+  if (type === "agent_settled") {
+    return { ...base, kind: "lifecycle", phase: "completed", title: "Run finished", ...raw };
+  }
+
+  // Turn and run boundaries carry nothing the trace shows on its own.
+  if (["agent_start", "turn_start", "turn_end", "agent_end"].includes(type ?? "")) {
+    return { ...base, kind: "lifecycle", phase: type === "agent_start" || type === "turn_start"
+      ? "started" : "completed", title: humanize(type!), minor: true, ...raw };
+  }
+
+  if (type === "auto_retry_start" || type === "compaction_start") {
+    const title = type === "auto_retry_start" ? "API retry" : "Compacting context";
+    const detail = joinDetail(string(payload.reason));
+    return { ...base, kind: "lifecycle", phase: "info", title,
+      ...(detail ? { detail } : {}),
+      presentation: { type: "signal", level: "warning", text: detail ?? title }, ...raw };
+  }
+
+  return undefined;
+}
+
+/// The file and the change an `edit` result carries once its arguments are
+/// gone: the patch header names the target, and pi's diff lines are a marker,
+/// the line number, then the text — `-1 state: one`.
+function piEditPresentation(details: Record<string, any>): TaskEventPresentation | undefined {
+  const path = shortPath(string(/^---[ \t]+(\S+)/m.exec(string(details.patch) ?? "")?.[1]));
+  const removed: string[] = [];
+  const added: string[] = [];
+  for (const line of (string(details.diff) ?? "").split(/\r?\n/)) {
+    const match = /^([+-])\d*[ \t]?(.*)$/.exec(line);
+    if (match) (match[1] === "-" ? removed : added).push(match[2] ?? "");
+  }
+  const change = removed.length || added.length
+    ? compactChange(removed.join("\n"), added.join("\n"))
+    : undefined;
+  if (!path && !change) return undefined;
+  return { type: "file", ...(path ? { path } : {}), ...(change ? { change } : {}) };
 }
 
 /// Antigravity wraps every stream-json line in an `event` envelope whose body

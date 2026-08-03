@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseAntigravityModels, parseCodexModels, parseOpenCodeModels } from "../src/models";
+import { parseAntigravityModels, parseCodexModels, parseOpenCodeModels, parsePiModels } from "../src/models";
 import type { Profile } from "../src/types";
 
 const codex: Profile = {
@@ -90,5 +90,27 @@ describe("model catalogs", () => {
       "gemini-3.6-flash-low\nclaude-sonnet-4-6\nAvailable agents:\n",
       profile,
     ).map(({ id }) => id)).toEqual(["gemini-3.6-flash-low", "claude-sonnet-4-6"]);
+  });
+
+  test("parses pi's padded model table and attaches the ladder to reasoning models", () => {
+    const profile = { ...codex, provider: "pi" as const };
+    const models = parsePiModels(
+      [
+        "provider  model            context  max-out  thinking  images",
+        "anthropic  claude-sonnet-4-6  200K     64K      yes       yes",
+        "opencode   nemotron-3-super-free  1M   32K      no        no",
+      ].join("\n"),
+      profile,
+    );
+    expect(models.map(({ id }) => id))
+      .toEqual(["anthropic/claude-sonnet-4-6", "opencode/nemotron-3-super-free"]);
+    expect(models[0]!.efforts).toEqual(["minimal", "low", "medium", "high", "xhigh", "max"]);
+    expect(models[1]!.efforts).toBeUndefined();
+    expect(models[1]!.reasoning).toBe(false);
+  });
+
+  test("drops pi's prose outputs so the configured model stands in", () => {
+    const profile = { ...codex, provider: "pi" as const };
+    expect(parsePiModels("No models matching \"sonnet\"\n", profile)).toEqual([]);
   });
 });

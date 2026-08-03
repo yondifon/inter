@@ -175,6 +175,31 @@ describe("CLI adapters", () => {
       conversation_id: "child",
     })).toBeUndefined();
     expect(sessionIdFrom("antigravity", { session_id: "x" })).toBeUndefined();
+    expect(sessionIdFrom("pi", { type: "session", version: 3, id: "019fc931", cwd: "/repo" }))
+      .toBe("019fc931");
+    expect(sessionIdFrom("pi", { type: "message_end", id: "child" })).toBeUndefined();
+  });
+
+  test("builds a headless pi json command", () => {
+    expect(commandFor({ ...base, provider: "pi" }, "review", "/repo", "opencode/kimi-k3"))
+      .toEqual([
+        "pi", "--mode", "json", "--model", "opencode/kimi-k3", "--no-approve", "review",
+      ]);
+  });
+
+  test("passes pi reasoning effort through unchanged", () => {
+    const command = commandFor({ ...base, provider: "pi" }, "review", "/repo", "opencode/kimi-k3", undefined, "xhigh");
+    expect(command[command.indexOf("--thinking") + 1]).toBe("xhigh");
+  });
+
+  test("resumes pi by exact session id", () => {
+    expect(canResumeSession({ ...base, provider: "pi" })).toBe(true);
+    const command = resumeCommandFor(
+      { ...base, provider: "pi" }, "continue", "/repo", "019fc931", "opencode/kimi-k3",
+    );
+    expect(command[command.indexOf("--session-id") + 1]).toBe("019fc931");
+    expect(command).not.toContain("--session");
+    expect(command.at(-1)).toBe("continue");
   });
 });
 
@@ -196,5 +221,64 @@ describe("writeTargetsFrom", () => {
       part: { type: "tool", tool: "read", state: { input: { filePath: "/repo/in.txt" } } },
     })).toEqual([]);
     expect(writeTargetsFrom({ type: "message", text: "hello" })).toEqual([]);
+  });
+
+  test("finds pi write targets under args and arguments", () => {
+    expect(writeTargetsFrom({
+      type: "tool_execution_start", toolCallId: "call_1", toolName: "write",
+      args: { path: "src/app.ts", content: "x" },
+    })).toEqual(["src/app.ts"]);
+    expect(writeTargetsFrom({
+      message: { content: [{ type: "toolCall", id: "call_1", name: "edit", arguments: { path: "notes.md" } }] },
+    })).toEqual(["notes.md"]);
+    expect(writeTargetsFrom({
+      type: "tool_execution_start", toolName: "read", args: { path: "src/app.ts" },
+    })).toEqual([]);
+  });
+
+  test("ignores pi's streamed tool arguments, which carry truncated paths", () => {
+    // Observed on pi 0.82.1: every toolcall_delta repeats the message so far,
+    // so a write to probe.txt streams through as `pro`, `probe`, `probe.txt`.
+    expect(writeTargetsFrom({
+      type: "message_update",
+      assistantMessageEvent: { type: "toolcall_delta", contentIndex: 1, delta: "be" },
+      message: {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "call_1", name: "write", arguments: { path: "probe" } }],
+      },
+    })).toEqual([]);
+  });
+});
+
+describe("finalText", () => {
+  const pi: Profile = { ...base, provider: "pi" };
+
+  test("joins only the text blocks of pi's last assistant message", () => {
+    const raw = [
+      JSON.stringify({ type: "session", id: "019fc931", cwd: "/repo" }),
+      JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", content: [{ type: "text", text: "first pass" }] },
+      }),
+      JSON.stringify({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "weighing options" },
+            { type: "text", text: "Done: " },
+            { type: "toolCall", id: "call_1", name: "write", arguments: { path: "a.ts" } },
+            { type: "text", text: "two files changed." },
+          ],
+          stopReason: "stop",
+        },
+      }),
+      JSON.stringify({ type: "agent_settled" }),
+    ].join("\n");
+    expect(finalText(pi, raw)).toBe("Done: two files changed.");
+  });
+
+  test("falls back to raw when pi emitted no assistant text", () => {
+    expect(finalText(pi, "not json at all")).toBe("not json at all");
   });
 });

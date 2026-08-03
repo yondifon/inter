@@ -1,7 +1,8 @@
-import { existsSync, lstatSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, openSync, readdirSync, readSync, realpathSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { Profile, TaskScope } from "./types";
+import { resolveWorkerExecutable } from "./worker-path";
 
 export const FULL_WORKSPACE_SCOPE: TaskScope = { read: ["**"], write: ["**"] };
 
@@ -23,9 +24,7 @@ export function sandboxedCommand(
   if (process.platform !== "darwin" || !existsSync("/usr/bin/sandbox-exec")) {
     throw new Error("per-task scope enforcement requires macOS sandbox-exec");
   }
-  // Bun.which defaults to the PATH snapshot taken at process start; pass the
-  // live value so runtime PATH changes (tests, launchd relaunches) are honored.
-  const executable = Bun.which(command[0]!, { PATH: Bun.env.PATH }) ?? command[0]!;
+  const executable = resolveWorkerExecutable(command[0]!);
   const resolvedCommand = [executable, ...command.slice(1)];
   return [
     "/usr/bin/sandbox-exec",
@@ -48,9 +47,18 @@ export function sandboxProfile(
     fileRule("file-read*", workspace, rule)
   );
   const writeRules = scope.write.map((rule) => fileRule("file-write*", workspace, rule));
-  const runtimeReads = runtimeReadPaths(profile, command, scratch).map((path) =>
+  const runtimeReadTargets = runtimeReadPaths(profile, command, scratch);
+  const runtimeReads = runtimeReadTargets.map((path) =>
     `(allow file-read* (literal ${quote(path)}))(allow file-read* (subpath ${quote(path)}))`
   );
+  // Launching a CLI stats every component of its path. A binary under a granted
+  // root like /opt/homebrew inherits that grant, but one installed in the user's
+  // home does not: nothing covers /Users or /Users/<name>, and a script CLI dies
+  // resolving its own entry point. Metadata only, the same treatment the
+  // workspace's strict ancestors already get.
+  const runtimeAncestorRules = unique(
+    runtimeReadTargets.flatMap((path) => ancestorPaths(dirname(path))),
+  ).map((path) => `(allow file-read-metadata (literal ${quote(path)}))`);
   const runtimeWrites = runtimeWritePaths(profile, scratch).map((path) =>
     `(allow file-write* (literal ${quote(path)}))(allow file-write* (subpath ${quote(path)}))`
   );
@@ -98,6 +106,7 @@ export function sandboxProfile(
     "(allow ipc-posix-shm)",
     ...metadataRules,
     ...tempAncestorRules,
+    ...runtimeAncestorRules,
     ...runtimeReads,
     ...runtimeWrites,
     ...tempCacheRules,
@@ -225,7 +234,7 @@ function fileRule(operation: string, cwd: string, rule: string): string {
 
 function runtimeReadPaths(profile: Profile, command: string[], scratchDir: string): string[] {
   const userHome = homedir();
-  const executable = Bun.which(command[0]!, { PATH: Bun.env.PATH }) ?? command[0]!;
+  const executable = resolveWorkerExecutable(command[0]!);
   const paths = [
     "/System", "/usr", "/bin", "/sbin", "/Library", "/dev",
     "/opt/homebrew",
@@ -236,6 +245,7 @@ function runtimeReadPaths(profile: Profile, command: string[], scratchDir: strin
     resolve(userHome, ".local/bin"),
     resolve(userHome, ".local/share/claude"),
     resolve(userHome, ".bun"),
+    ...interpreterReadPaths(executable),
     ...rustRuntimeReadPaths(userHome),
     ...goRuntimeReadPaths(userHome),
     ...gitRuntimeReadPaths(userHome),
@@ -255,6 +265,41 @@ function runtimeReadPaths(profile: Profile, command: string[], scratchDir: strin
   for (const path of dataPaths) paths.push(path);
   paths.push(...symlinkTargetReadPaths(dataPaths, userHome));
   return unique(paths.flatMap((path) => [path, realpathIfPresent(path)]));
+}
+
+// A CLI shipped as a script needs its interpreter as well as itself. pi is
+// `#!/usr/bin/env node`, and a Node installed under the user's home — nvm, Herd,
+// a version manager — sits in no already-granted root, so the run dies before
+// the first line. The install prefix comes along because Node stats it while
+// building its module search path.
+function interpreterReadPaths(executable: string): string[] {
+  const interpreter = shebangInterpreter(executable);
+  if (!interpreter) return [];
+  const resolved = realpathIfPresent(resolveWorkerExecutable(interpreter));
+  if (!isAbsolute(resolved)) return [];
+  const bin = dirname(resolved);
+  return [bin, dirname(bin)];
+}
+
+// Only the first line matters, and the target may be a multi-megabyte binary,
+// so this reads a header rather than the file.
+function shebangInterpreter(executable: string): string | undefined {
+  let header = "";
+  try {
+    const handle = openSync(realpathIfPresent(executable), "r");
+    try {
+      const buffer = Buffer.alloc(256);
+      header = buffer.subarray(0, readSync(handle, buffer, 0, buffer.length, 0)).toString("utf8");
+    } finally {
+      closeSync(handle);
+    }
+  } catch {
+    return undefined;
+  }
+  const match = /^#!\s*(\S+)(?:[ \t]+(\S+))?/.exec(header);
+  if (!match) return undefined;
+  // `#!/usr/bin/env node` names the real interpreter in the second field.
+  return match[1]!.endsWith("/env") ? match[2] : match[1];
 }
 
 // Profile config dirs are often dotfile-managed: ~/.codex/AGENTS.md may be a
@@ -390,6 +435,7 @@ function profileDataPaths(profile: Profile): string[] {
   const allowedKeys = profile.provider === "claude" ? new Set(["CLAUDE_CONFIG_DIR"])
     : profile.provider === "codex" ? new Set(["CODEX_HOME"])
     : profile.provider === "opencode" ? new Set(["OPENCODE_CONFIG_DIR"])
+    : profile.provider === "pi" ? new Set(["PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR"])
     : new Set(["GEMINI_CLI_HOME"]);
   const configured = Object.entries(profile.env)
     .filter(([key]) => allowedKeys.has(key))
@@ -404,6 +450,13 @@ function profileDataPaths(profile: Profile): string[] {
       resolve(userHome, ".local/state/opencode"),
       resolve(userHome, ".cache/opencode"),
     ]
+    // pi writes its transcript to ~/.pi/agent/sessions/<encoded-cwd> as the run
+    // goes, and refreshes auth.json and the model catalog in place. Without the
+    // tree the run still works but leaves no session behind, so resume silently
+    // starts from empty. `agent` is listed as well as its parent because it is
+    // the directory pi actually keeps config in, and the symlink scan below only
+    // looks one level down — AGENTS.md there is commonly a dotfiles link.
+    : profile.provider === "pi" ? [resolve(userHome, ".pi"), resolve(userHome, ".pi/agent")]
     : [resolve(userHome, ".gemini")];
   return unique([...configured, ...defaults]);
 }

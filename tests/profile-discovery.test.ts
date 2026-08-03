@@ -25,6 +25,21 @@ describe("profile discovery", () => {
     expect(discoverProfiles({ home, path: bin })).toEqual([]);
   });
 
+  test("discovers pi only from its executable, never from ~/.pi alone", () => {
+    const { home, bin } = fixture();
+    // The config directory outlives an uninstall, so matching on it would mint
+    // a profile that dies at spawn.
+    mkdirSync(join(home, ".pi"));
+    expect(discoverProfiles({ home, path: bin })).toEqual([]);
+
+    const executable = join(bin, "pi");
+    writeFileSync(executable, "");
+    chmodSync(executable, 0o700);
+    expect(discoverProfiles({ home, path: bin })).toEqual([
+      expect.objectContaining({ id: "pi", provider: "pi", model: "opencode-go/deepseek-v4-flash" }),
+    ]);
+  });
+
   test("finds installed CLIs and separate Claude accounts", () => {
     const { home, bin } = fixture();
     for (const command of ["claude", "codex", "opencode", "agy"]) {

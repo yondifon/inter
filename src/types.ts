@@ -1,4 +1,4 @@
-export type Provider = "claude" | "codex" | "opencode" | "antigravity";
+export type Provider = "claude" | "codex" | "opencode" | "antigravity" | "pi";
 export type TaskState =
   | "queued"
   | "running"

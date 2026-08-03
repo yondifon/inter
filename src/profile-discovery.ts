@@ -2,6 +2,7 @@ import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import type { Profile, Provider } from "./types";
 import { defaultModelFor } from "./provider-defaults";
+import { findWorkerExecutable } from "./worker-path";
 
 interface DiscoveryOptions {
   home?: string;
@@ -32,7 +33,7 @@ const providers: Array<{
 export function discoverProfiles(options: DiscoveryOptions = {}): Profile[] {
   const home = options.home ?? Bun.env.HOME;
   if (!home) return [];
-  const path = options.path ?? Bun.env.PATH ?? "";
+  const path = options.path;
   const profiles = discoverClaude(home, path);
 
   for (const item of providers) {
@@ -41,10 +42,17 @@ export function discoverProfiles(options: DiscoveryOptions = {}): Profile[] {
         !item.configPaths.some((configPath) => hasPath(home, configPath))) continue;
     profiles.push(profile(item.provider, item.label, item.model));
   }
+
+  // pi is the one provider discovered by executable alone. Its own trust rules
+  // treat a bare `~/.pi` as no signal, and the directory outlives an uninstall,
+  // so matching on config would mint a profile that dies at spawn.
+  if (hasExecutable("pi", path)) {
+    profiles.push(profile("pi", "Pi", defaultModelFor("pi")));
+  }
   return profiles;
 }
 
-function discoverClaude(home: string, path: string): Profile[] {
+function discoverClaude(home: string, path: string | undefined): Profile[] {
   const profiles: Profile[] = [];
   if (hasExecutable("claude", path) ||
       hasPath(home, ".claude") ||
@@ -90,8 +98,14 @@ function profile(
   };
 }
 
-function hasExecutable(command: string, path: string): boolean {
-  return Bun.which(command, { PATH: path }) !== null;
+// Discovery runs once, when the profile table is seeded, so a provider missed
+// here stays missing. Without an explicit PATH it uses the resolver the worker
+// spawn uses, so a CLI the broker's snapshot cannot see is either found here or
+// enabled by its config directory alone and left to fail at spawn time.
+function hasExecutable(command: string, path: string | undefined): boolean {
+  return path === undefined
+    ? findWorkerExecutable(command) !== null
+    : Bun.which(command, { PATH: path }) !== null;
 }
 
 // A literal path needs one stat, not a directory scan. Scanning asked the OS

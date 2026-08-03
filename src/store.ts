@@ -805,7 +805,7 @@ export class StateStore {
       CREATE TABLE IF NOT EXISTS profiles (
         id TEXT PRIMARY KEY,
         label TEXT NOT NULL,
-        provider TEXT NOT NULL CHECK(provider IN ('claude','codex','opencode','antigravity')),
+        provider TEXT NOT NULL CHECK(provider IN ('claude','codex','opencode','antigravity','pi')),
         default_model TEXT NOT NULL,
         enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
         env_json TEXT NOT NULL CHECK(json_valid(env_json)),
@@ -959,6 +959,7 @@ export class StateStore {
       INSERT OR IGNORE INTO schema_migrations(version, name)
       VALUES (8, 'scope grants, shipped prompts, attempts and cost')
     `).run();
+    this.widenProviderCheck();
     const backfilled = this.database.query<{ version: number }, []>(
       "SELECT version FROM schema_migrations WHERE version = 5",
     ).get();
@@ -995,6 +996,50 @@ export class StateStore {
           repaired.add(row.task_id);
         }
       } catch {}
+    }
+  }
+
+  // A CHECK cannot be altered in place, so a database created before pi rejects
+  // a pi profile the moment one is saved and the only fix is a table copy. The
+  // schema text is the guard: a database already carrying pi does nothing.
+  private widenProviderCheck(): void {
+    const existing = this.database.query<{ sql: string }, []>(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'profiles'",
+    ).get();
+    if (!existing || existing.sql.includes("'pi'")) return;
+    this.database.exec("PRAGMA foreign_keys = OFF");
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.exec(`
+        CREATE TABLE profiles_v2 (
+          id TEXT PRIMARY KEY,
+          label TEXT NOT NULL,
+          provider TEXT NOT NULL CHECK(provider IN ('claude','codex','opencode','antigravity','pi')),
+          default_model TEXT NOT NULL,
+          enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
+          env_json TEXT NOT NULL CHECK(json_valid(env_json)),
+          capabilities_json TEXT NOT NULL CHECK(json_valid(capabilities_json)),
+          command_json TEXT CHECK(command_json IS NULL OR json_valid(command_json)),
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+          updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+          deleted_at TEXT
+        );
+        INSERT INTO profiles_v2(
+          id, label, provider, default_model, enabled, env_json, capabilities_json,
+          command_json, created_at, updated_at, deleted_at
+        )
+        SELECT id, label, provider, default_model, enabled, env_json, capabilities_json,
+          command_json, created_at, updated_at, deleted_at
+        FROM profiles;
+        DROP TABLE profiles;
+        ALTER TABLE profiles_v2 RENAME TO profiles;
+      `);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    } finally {
+      this.database.exec("PRAGMA foreign_keys = ON");
     }
   }
 

@@ -51,13 +51,30 @@ export function commandFor(
         "--new-project", "--add-dir", cwd, "--mode", "accept-edits",
         "--dangerously-skip-permissions",
       ];
+    case "pi":
+      // pi ships no permission gate and no sandbox, so there is nothing to
+      // bypass and nothing that can stall on approval. --no-approve is about
+      // project trust, not tools: it keeps the delegated repo's .pi/ settings
+      // and extensions from loading, and pi extensions run with full system
+      // access. pi has no cwd flag either — it reads process.cwd(), so the
+      // spawn's cwd is what scopes the run.
+      return [
+        "pi", "--mode", "json", "--model", model,
+        ...(effort ? ["--thinking", effort] : []),
+        "--no-approve",
+        // Trailing positional, and pi honours no `--` separator: a prompt
+        // opening with `-` parses as an unknown flag, one opening with `@` as
+        // a file argument.
+        prompt,
+      ];
   }
 }
 
 export function canResumeSession(profile: Profile): boolean {
   if (profile.command) return false;
   return profile.provider === "claude" || profile.provider === "codex" ||
-    profile.provider === "opencode" || profile.provider === "antigravity";
+    profile.provider === "opencode" || profile.provider === "antigravity" ||
+    profile.provider === "pi";
 }
 
 export function resumeCommandFor(
@@ -99,6 +116,17 @@ export function resumeCommandFor(
           "--conversation", sessionId, "--add-dir", cwd, "--mode", "accept-edits",
           "--dangerously-skip-permissions",
         ];
+      case "pi":
+        // --session-id reopens an exact id with no picker and no confirmation,
+        // but it only searches sessions recorded for this cwd. A miss is not an
+        // error: pi warns on stderr, starts a fresh session under that id, and
+        // still exits 0 — so resume has to run in the original cwd.
+        return [
+          "pi", "--mode", "json", "--model", model,
+          ...(effort ? ["--thinking", effort] : []),
+          "--no-approve", "--session-id", sessionId,
+          prompt,
+        ];
     }
   }
   throw new Error(`profile cannot resume sessions: ${profile.id}`);
@@ -113,6 +141,10 @@ export function sessionIdFrom(provider: Provider, event: Record<string, unknown>
     ? event.sessionID
     : provider === "antigravity" && (event.event === "init" || event.event === "result")
     ? event.conversation_id ?? object(event.result).conversation_id
+    // pi writes the session header as the very first line and never repeats the
+    // id on a later event.
+    : provider === "pi" && event.type === "session"
+    ? event.id
     : undefined;
   if (typeof value !== "string") return undefined;
   const sessionId = value.trim();
@@ -125,6 +157,11 @@ const WRITE_TOOLS = new Set(["write", "write_file", "edit", "multiedit", "create
 /// Claude assistant tool_use blocks, OpenCode tool parts, and flat hook-style
 /// payloads. Used to flag writes the sandbox is about to refuse.
 export function writeTargetsFrom(payload: Record<string, unknown>): string[] {
+  // pi streams tool arguments a token at a time, and up to 0.82.x each delta
+  // also carried the message so far. Reading those yields truncated paths —
+  // `probe` for a write to `probe.txt` — so the deltas are skipped and the call
+  // is taken from tool_execution_start and the final message instead.
+  if (payload.type === "message_update") return [];
   const targets: string[] = [];
   const visit = (node: unknown) => {
     const subject = object(node);
@@ -135,6 +172,10 @@ export function writeTargetsFrom(payload: Record<string, unknown>): string[] {
       ...object(object(subject.state).input),
       ...object(subject.tool_input),
       ...object(subject.toolInput),
+      // pi names it `args` on tool_execution_* events and `arguments` on the
+      // toolCall blocks inside an assistant message.
+      ...object(subject.args),
+      ...object(subject.arguments),
     };
     const path = str(input.file_path) ?? str(input.filePath) ?? str(input.path);
     if (path) targets.push(path);
@@ -176,6 +217,33 @@ export function finalText(profile: Profile, raw: string): string {
       } catch {}
     }
     return raw;
+  }
+
+  if (profile.provider === "pi") {
+    // pi's assistant content is a block array — text, thinking, toolCall — so
+    // the answer is the text blocks of the last assistant message, and the
+    // generic string check below would never match it.
+    const lines = raw.trim().split("\n");
+    for (let index = lines.length - 1; index >= 0; index--) {
+      try {
+        const event = JSON.parse(lines[index]!) as Record<string, unknown>;
+        if (event.type !== "message_end") continue;
+        const message = object(event.message);
+        if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
+        const text = message.content
+          .map((block) => object(block))
+          .filter((block) => block.type === "text" && typeof block.text === "string")
+          .map((block) => block.text as string)
+          .join("");
+        if (text.trim()) return text;
+        // A refused or aborted turn ends with empty content, and json mode still
+        // exits 0. The error is the only answer there is; without it the caller
+        // gets the whole transcript back as the result.
+        const error = message.errorMessage;
+        if (typeof error === "string" && error.trim()) return error;
+      } catch {}
+    }
+    return raw.trim();
   }
 
   const lines = raw.trim().split("\n");

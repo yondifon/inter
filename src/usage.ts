@@ -129,6 +129,10 @@ async function collect(profile: Profile): Promise<ProfileUsage> {
       return unsupported(profile, "usage tracking is not supported for opencode");
     case "antigravity":
       return unsupported(profile, "no usage source known for antigravity");
+    case "pi":
+      // pi bills through whichever upstream account it is authenticated to, so
+      // there is no quota of its own to report.
+      return unsupported(profile, "usage tracking is not supported for pi");
   }
 }
 
