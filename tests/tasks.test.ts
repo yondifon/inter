@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -114,6 +114,36 @@ describe("delegate workspace roots", () => {
     expect(stateStore().listTaskEvents(ungranted.id).map(({ type }) => type))
       .toContain("scope_ungranted");
     await settled(ungranted.id);
+  });
+
+  test("adds prompt-named paths a stated read scope forgot", async () => {
+    const root = mkdtempSync(join(tmpdir(), "inter-grants-"));
+    scratch.push(root);
+    process.env.INTER_DB = join(root, "inter.db");
+    process.env.INTER_ROOTS = root;
+    stateStore().saveProfiles([noopProfile]);
+    mkdirSync(join(root, "docs"));
+    writeFileSync(join(root, "notes.md"), "n");
+
+    // The prompt names notes.md but the stated scope covers only docs/**.
+    const task = await delegate(noopProfile.id, "review notes.md against docs/", root, undefined, undefined, {
+      scope: { read: ["docs/**"], write: [] },
+    });
+    expect(task.scope.read).toContain("notes.md");
+    expect(task.scope.read).toContain("docs/**");
+    const completed = stateStore().listTaskEvents(task.id)
+      .find(({ type }) => type === "scope_auto_completed");
+    expect(completed?.payload.added).toEqual(["notes.md"]);
+    await settled(task.id);
+
+    // Nothing to add when the stated scope already covers the prompt's paths.
+    const covered = await delegate(noopProfile.id, "review notes.md", root, undefined, undefined, {
+      scope: { read: ["**"], write: [] },
+    });
+    expect(covered.scope.read).toEqual(["**"]);
+    expect(stateStore().listTaskEvents(covered.id).map(({ type }) => type))
+      .not.toContain("scope_auto_completed");
+    await settled(covered.id);
   });
 });
 

@@ -31,6 +31,8 @@ export interface TaskCompletion {
   blocked: boolean;
   code: CompletionCode;
   reason?: string;
+  /** Scope that would have survived the run's sandbox denials; approve on resume. */
+  suggestedScope?: TaskScope;
 }
 
 export interface Profile {

@@ -6,7 +6,8 @@ import { canResumeSession, commandFor, finalText, resumeCommandFor, sessionIdFro
 import { loadConfig, profileEnv } from "./config";
 import { taskEventView } from "./events";
 import { continuationPrompt, interpretWorkerOutcome, needsInputQuestion, workerPrompt } from "./task-protocol";
-import { normalizeTaskScope, sandboxedCommand, scopeRefusedWrite } from "./task-scope";
+import { normalizeTaskScope, sandboxedCommand, scopeCoversPath, scopeRefusedWrite } from "./task-scope";
+import { deniedScopePaths, promptReadPaths } from "./prompt-paths";
 import { stateStore, type StateStore, type TaskListQuery } from "./store";
 import { promptWithMemories } from "./memories";
 import { TaskWaiter, type TaskWaitResult, type WaitUntil } from "./task-waiter";
@@ -136,7 +137,7 @@ export async function delegate(
   parentTaskId?: string,
   options: DelegateOptions = {},
 ): Promise<Task> {
-  const { task, profile, inheritedFrom } = await prepareTask(
+  const { task, profile, inheritedFrom, autoReads } = await prepareTask(
     profileId,
     prompt,
     cwd,
@@ -145,6 +146,12 @@ export async function delegate(
     options,
   );
   stateStore().createTask(task);
+  if (autoReads?.length) {
+    appendTaskEvent(task.id, "scope_auto_completed", task.state, {
+      added: autoReads,
+      reason: "paths named in the prompt were missing from the stated read scope",
+    });
+  }
   // Record and flag, never block: the caller stated no scope and this cwd has
   // none on file, so the run gets whole-tree access and says so out loud.
   if (!task.grantId) {
@@ -179,7 +186,7 @@ async function prepareTask(
   requestedModel?: string,
   parentTaskId?: string,
   options: DelegateOptions = {},
-): Promise<{ task: Task; profile: Profile; inheritedFrom?: string }> {
+): Promise<{ task: Task; profile: Profile; inheritedFrom?: string; autoReads?: string[] }> {
   const workspace = await validateWorkspace(cwd);
   const config = await loadConfig();
   const profile = config.profiles.find((item) => item.id === profileId);
@@ -196,7 +203,7 @@ async function prepareTask(
   validateTimeoutMs(timeoutMs);
 
   const now = new Date().toISOString();
-  const granted = resolveScope(workspace, profileId, options.scope);
+  const granted = resolveScope(workspace, profileId, options.scope, prompt);
   const task: Task = {
     id: crypto.randomUUID(),
     profileId,
@@ -214,7 +221,12 @@ async function prepareTask(
     ...(timeoutMs ? { timeoutMs } : {}),
     ...(options.effort ? { effort: options.effort } : {}),
   };
-  return { task, profile, ...(granted.inheritedFrom ? { inheritedFrom: granted.inheritedFrom } : {}) };
+  return {
+    task,
+    profile,
+    ...(granted.inheritedFrom ? { inheritedFrom: granted.inheritedFrom } : {}),
+    ...(granted.autoReads?.length ? { autoReads: granted.autoReads } : {}),
+  };
 }
 
 /**
@@ -227,11 +239,20 @@ function resolveScope(
   workspace: string,
   profileId: string,
   requested?: TaskScope,
-): { scope: TaskScope; grantId?: string; inheritedFrom?: string } {
+  prompt?: string,
+): { scope: TaskScope; grantId?: string; inheritedFrom?: string; autoReads?: string[] } {
   const store = stateStore();
   if (requested) {
-    const scope = normalizeTaskScope(requested, workspace);
-    return { scope, grantId: store.recordScopeGrant(workspace, profileId, scope).id };
+    // Callers forget paths their own prompt names; a worker that EPERMs on one
+    // of those reads burns the run working around a grant the caller clearly
+    // meant. Reads only — "never touch secrets.env" must not grant its write.
+    const stated = normalizeTaskScope(requested, workspace);
+    const autoReads = promptReadPaths(prompt ?? "", workspace)
+      .filter((path) => !scopeCoversPath(stated.read, workspace, path));
+    const scope = autoReads.length
+      ? normalizeTaskScope({ read: [...stated.read, ...autoReads], write: stated.write }, workspace)
+      : stated;
+    return { scope, grantId: store.recordScopeGrant(workspace, profileId, scope).id, ...(autoReads.length ? { autoReads } : {}) };
   }
   const existing = store.latestScopeGrant(workspace, profileId);
   if (existing) {
@@ -533,7 +554,7 @@ async function runTask(
       output: outcome.output,
       ...(outcome.question ? { question: outcome.question } : {}),
       ...(outcome.error ? { error: outcome.error } : {}),
-      completion: outcome.completion,
+      completion: withScopeSuggestion(task, outcome.completion),
     }, ["running"]);
     if (!persisted) return;
     recordProfileTaskOutcome(stateStore(), task.profileId, outcome);
@@ -591,11 +612,29 @@ export function antigravityBootstrapRetryReason(
   return undefined;
 }
 
+// A permission_denied task knows exactly which paths killed it: the events
+// recorded them. Hand the caller a scope that would have survived so resume
+// is an approval, not a log-reading exercise.
+function withScopeSuggestion(task: Task, completion: Task["completion"]): Task["completion"] {
+  if (!completion || completion.code !== "permission_denied") return completion;
+  const payloads = stateStore().listTaskEvents(task.id)
+    .map((event) => JSON.stringify(event.payload));
+  const { reads, writes } = deniedScopePaths(payloads, task.cwd);
+  const read = [...task.scope.read, ...reads.filter((path) => !scopeCoversPath(task.scope.read, task.cwd, path))];
+  const write = [...task.scope.write, ...writes.filter((path) => !scopeCoversPath(task.scope.write, task.cwd, path))];
+  const suggestedScope = normalizeTaskScope({
+    read: reads.length ? read : [...read, "**"],
+    write,
+  }, task.cwd);
+  const changed = suggestedScope.read.length !== task.scope.read.length ||
+    suggestedScope.write.length !== task.scope.write.length;
+  return changed ? { ...completion, suggestedScope } : completion;
+}
+
 function lastWorkerErrorDetail(
   taskId: string,
   provider: Profile["provider"],
-): { error?: string; last?: string } {
-  const events = stateStore().listTaskEvents(taskId);
+): { error?: string; last?: string } {  const events = stateStore().listTaskEvents(taskId);
   let last: string | undefined;
   for (let index = events.length - 1; index >= 0; index--) {
     const event = events[index]!;

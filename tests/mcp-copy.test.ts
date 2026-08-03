@@ -17,6 +17,9 @@ describe("MCP consent copy", () => {
     expect(MCP_INSTRUCTIONS).toContain("approved for a different profile");
     expect(MCP_INSTRUCTIONS).toContain("approval names a destination");
     expect(DELEGATE_DESCRIPTION).toContain("directory/** is recursive");
+    expect(DELEGATE_DESCRIPTION).toContain("bare directory path grants its whole subtree");
+    expect(DELEGATE_DESCRIPTION).toContain("join the read grant automatically");
+    expect(DELEGATE_DESCRIPTION).toContain("suggestedScope");
     expect(DELEGATE_DESCRIPTION).toContain("newest grant for that cwd");
     expect(DELEGATE_DESCRIPTION).toContain("generated build paths");
   });

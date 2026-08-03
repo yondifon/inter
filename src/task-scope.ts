@@ -68,11 +68,23 @@ export function sandboxProfile(
     `(allow file-read-metadata (literal ${quote(path)}))(allow file-read-data (literal ${quote(path)}))`
   );
   // Workers get TMPDIR=scratchDir, but platform shims like xcrun resolve the
-  // user temp dir via confstr and EPERM writing their cache there. Grant the
-  // cache names only — opening all of user temp would silently make every
-  // task cwd that lives under tmpdir writable.
-  const tempCacheRules = [
-    `(allow file-write* (regex #"^${escapeRegExp(realpathIfPresent(tmpdir()))}/xcrun_db[^/]*$"))`,
+  // user temp dir via confstr and EPERM writing their cache there. Creating a
+  // file checks the parent's write vnode and the child path separately, so a
+  // literal grant on the temp dir plus a regex on the cache names opens the
+  // cache without making every task cwd inside tmpdir writable.
+  const tempRoots = unique([tmpdir().replace(/\/+$/, ""), realpathIfPresent(tmpdir())]);
+  const tempCacheRules = tempRoots.flatMap((root) => [
+    `(allow file-write* (literal ${quote(root)}))`,
+    `(allow file-write* (regex #"^${escapeRegExp(root)}/xcrun_db[^/]*$"))`,
+  ]);
+  // Path resolution stats every component including the final target, so the
+  // temp root needs subpath metadata (a literal covers the dir itself but not
+  // the cache file inside it); strict ancestors need only literal metadata.
+  const tempAncestorRules = [
+    ...tempRoots.map((root) => `(allow file-read-metadata (subpath ${quote(root)}))`),
+    ...unique(tempRoots.flatMap((root) => ancestorPaths(dirname(root)))).map((path) =>
+      `(allow file-read-metadata (literal ${quote(path)}))`
+    ),
   ];
   return [
     "(version 1)",
@@ -85,6 +97,7 @@ export function sandboxProfile(
     "(allow mach-lookup)",
     "(allow ipc-posix-shm)",
     ...metadataRules,
+    ...tempAncestorRules,
     ...runtimeReads,
     ...runtimeWrites,
     ...tempCacheRules,
@@ -141,6 +154,15 @@ export function scopeRefusedWrite(
     return rule.endsWith("/**") ? resolved === base || within(base, resolved) : resolved === base;
   });
   return allowed ? undefined : resolved;
+}
+
+export function scopeCoversPath(rules: string[], cwd: string, target: string): boolean {
+  const resolved = resolve(cwd, target);
+  return rules.some((rule) => {
+    if (rule === "**") return resolved === cwd || within(cwd, resolved);
+    const base = resolve(cwd, rule.replace(/\/\*\*$/, ""));
+    return rule.endsWith("/**") ? resolved === base || within(base, resolved) : resolved === base;
+  });
 }
 
 function within(base: string, target: string): boolean {
@@ -346,14 +368,21 @@ function runtimeHome(value: string | undefined, fallback: string, userHome: stri
 function ancestorsForRules(cwd: string, rules: string[]): string[] {
   const paths = new Set<string>();
   for (const rule of ["", ...rules]) {
-    let path = rule === "**" ? cwd : resolve(cwd, rule.replace(/\/\*\*$/, ""));
-    while (true) {
-      paths.add(path);
-      if (path === "/") break;
-      path = dirname(path);
-    }
+    const path = rule === "**" ? cwd : resolve(cwd, rule.replace(/\/\*\*$/, ""));
+    for (const ancestor of ancestorPaths(path)) paths.add(ancestor);
   }
   return [...paths];
+}
+
+function ancestorPaths(path: string): string[] {
+  const paths: string[] = [];
+  let current = path;
+  while (true) {
+    paths.push(current);
+    if (current === "/") break;
+    current = dirname(current);
+  }
+  return paths;
 }
 
 function profileDataPaths(profile: Profile): string[] {
