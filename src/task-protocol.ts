@@ -101,11 +101,21 @@ export function interpretWorkerOutcome(exitCode: number, output: string, stderr:
   if (exitCode !== 0) {
     const error = stderr.trim() || output.trim() || `exit ${exitCode}`;
     const code = classifyFailure(`${stderr}\n${output}`);
+    // A rate-limited session is not dead, only paused. The reset time is the
+    // difference between "it died" and "it becomes resumable at 12:40am", and
+    // it is the input to choosing between waiting and handing off.
+    const resetsAt = code === "rate_limit" ? rateLimitResetAt(`${stderr}\n${output}`) : undefined;
     return {
       state: "failed",
       output,
       error,
-      completion: { exitCode, blocked: true, code, reason: compact(error) },
+      completion: {
+        exitCode,
+        blocked: true,
+        code,
+        reason: compact(error),
+        ...(resetsAt ? { resetsAt } : {}),
+      },
     };
   }
   const block = output.match(BLOCKED);
@@ -161,12 +171,84 @@ export function interpretWorkerOutcome(exitCode: number, output: string, stderr:
   };
 }
 
+// Providers announce the window three ways: an epoch stamp piped onto the
+// message (`Claude AI usage limit reached|1754308800`), a countdown ("resets in
+// 48m 15s"), or a wall clock with the zone it was printed in ("resets 12:40am
+// (Africa/Douala)"). All three were on screen during the 2026-08-03 incident and
+// none of them was read.
+const RESET_EPOCH = /limit reached\s*\|\s*(\d{9,13})\b/i;
+const RESET_IN = /resets?\s+in\s+((?:\d+\s*(?:hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b\s*)+)/i;
+const RESET_AT =
+  /resets?(?:\s+at)?\s+(\d{1,2}):(\d{2})\s*([ap]\.?m\.?)?(?:\s*\(([A-Za-z][\w+-]*(?:\/[\w+-]+)*)\))?/i;
+const DURATION_PART = /(\d+)\s*(hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b/gi;
+
+/**
+ * When the provider says the rate-limit window clears, as ISO, or undefined
+ * when the text names no time. Deterministic and clock-relative, so `now` is
+ * injectable for tests.
+ */
+export function rateLimitResetAt(text: string, now = new Date()): string | undefined {
+  const epoch = text.match(RESET_EPOCH)?.[1];
+  if (epoch) {
+    // Seconds or milliseconds, whichever the provider printed.
+    const value = Number(epoch);
+    const at = new Date(epoch.length > 10 ? value : value * 1_000);
+    return Number.isFinite(at.getTime()) ? at.toISOString() : undefined;
+  }
+  const countdown = text.match(RESET_IN)?.[1];
+  if (countdown) {
+    let ms = 0;
+    for (const [, amount, unit] of countdown.matchAll(DURATION_PART)) {
+      const scale = /^h/i.test(unit!) ? 3_600_000 : /^m/i.test(unit!) ? 60_000 : 1_000;
+      ms += Number(amount) * scale;
+    }
+    if (ms > 0) return new Date(now.getTime() + ms).toISOString();
+  }
+  const clock = text.match(RESET_AT);
+  if (!clock) return undefined;
+  const meridiem = clock[3]?.toLowerCase().replace(/\./g, "");
+  const rawHour = Number(clock[1]);
+  const minute = Number(clock[2]);
+  if (rawHour > 23 || minute > 59 || (meridiem && rawHour > 12)) return undefined;
+  const hour = meridiem === "am" ? rawHour % 12 : meridiem === "pm" ? (rawHour % 12) + 12 : rawHour;
+  // The zone in parentheses is the one the provider formatted the time in; only
+  // without it does the broker's own zone apply.
+  const offset = (clock[4] ? zoneOffsetMinutes(clock[4], now) : undefined) ?? -now.getTimezoneOffset();
+  const local = new Date(now.getTime() + offset * 60_000);
+  let target = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate(), hour, minute)
+    - offset * 60_000;
+  // A limit that resets at 12:40am, read at 11:50pm, resets tomorrow.
+  if (target <= now.getTime()) target += 86_400_000;
+  return new Date(target).toISOString();
+}
+
+function zoneOffsetMinutes(zone: string, at: Date): number | undefined {
+  try {
+    const name = new Intl.DateTimeFormat("en-US", { timeZone: zone, timeZoneName: "longOffset" })
+      .formatToParts(at).find((part) => part.type === "timeZoneName")?.value ?? "";
+    const offset = /GMT([+-])(\d{1,2}):(\d{2})/.exec(name);
+    if (offset) {
+      return (offset[1] === "-" ? -1 : 1) * (Number(offset[2]) * 60 + Number(offset[3]));
+    }
+    return name.includes("GMT") ? 0 : undefined;
+  } catch {
+    // An unknown zone name is not a reason to lose the time; fall back to local.
+    return undefined;
+  }
+}
+
 export function classifyFailure(value: string): CompletionCode {
   if (/\b(?:insufficient balance|credits?error|billing|payment required)\b/i.test(value)) return "billing";
   if (/\b(?:unauthorized|invalid api key|authentication|not logged in)\b|statusCode["': ]+401/i.test(value)) {
     return "auth";
   }
-  if (/\b(?:rate limit|too many requests)\b|statusCode["': ]+429/i.test(value)) return "rate_limit";
+  // A session or usage limit is a rate limit by another name; the 2026-08-03
+  // incident died on "You've hit your session limit" and classified as a plain
+  // worker_error, which is why nothing knew the task became resumable later.
+  if (
+    /\b(?:rate.?limit|too many requests|session limit|usage limit(?: reached)?)\b|statusCode["': ]+429/i
+      .test(value)
+  ) return "rate_limit";
   if (/\b(?:permission denied|operation not permitted|sandbox)\b/i.test(value)) return "permission_denied";
   return "worker_error";
 }

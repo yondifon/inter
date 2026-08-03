@@ -2,7 +2,15 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { cancelTask, delegate, getTask, reply, resumeTask, waitForTasks } from "../src/tasks";
+import {
+  cancelTask,
+  delegate,
+  getTask,
+  handoffTask,
+  reply,
+  resumeTask,
+  waitForTasks,
+} from "../src/tasks";
 import { closeStateStore, stateStore } from "../src/store";
 import type { Profile } from "../src/types";
 
@@ -345,6 +353,67 @@ describe("task lifecycle integration", () => {
     const events = stateStore().listTaskEvents(failed.id);
     expect(events.filter(({ type }) => type === "worker_spawned")).toHaveLength(2);
     expect(events.filter(({ type }) => type === "session_reused")).toHaveLength(1);
+  });
+
+  // The whole point of a handoff, end to end: a run dies on one account's rate
+  // limit, and a worker on another account picks the task up knowing what the
+  // first one read and concluded — without a hand-written prompt.
+  integrationTest("hands a rate-limited task to another profile with its work rebuilt", async () => {
+    const { cwd, profile } = setupClaudeBin([
+      "#!/bin/sh",
+      'case "$*" in',
+      // The seed prompt names the profile the task is leaving; only the second
+      // worker ever sees it.
+      "  *'# Handoff:'*)",
+      `    printf '%s\\n' '{"type":"system","session_id":"sess-beta"}'`,
+      `    printf '%s\\n' "$*" > handoff-brief.txt`,
+      `    printf '%s\\n' '{"type":"result","result":"Finished the review.\\nINTER_RESULT: completed"}'`,
+      "    ;;",
+      "  *)",
+      `    printf '%s\\n' '{"type":"system","session_id":"sess-alpha"}'`,
+      `    printf '%s\\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Finding: listTaskEvents drops the last row."}]}}'`,
+      `    printf '%s\\n' "You've hit your session limit · resets 12:40am (Africa/Douala)" >&2`,
+      "    exit 1",
+      "    ;;",
+      "esac",
+      "",
+    ].join("\n"));
+    const spare: Profile = { ...profile, id: "fake-claude-spare", label: "Spare", model: "haiku" };
+    stateStore().saveProfiles([profile, spare]);
+
+    const task = await delegate(profile.id, "Review the store.", cwd);
+    await waitForAttention(task.id);
+    const dead = getTask(task.id)!;
+    expect(dead).toMatchObject({ state: "failed", sessionId: "sess-alpha" });
+    expect(dead.completion?.code).toBe("rate_limit");
+    // The caller can now choose: wait for this, or hand off and pay for it.
+    expect(Date.parse(dead.completion!.resetsAt!)).toBeGreaterThan(Date.now());
+
+    const moved = await handoffTask(task.id, spare.id);
+    expect(moved.profileId).toBe(spare.id);
+    expect(moved.model).toBe("haiku");
+    await waitForAttention(task.id);
+
+    const rescued = getTask(task.id)!;
+    expect(rescued.state).toBe("completed");
+    // A fresh session on the second account, and the first one preserved where
+    // it belongs rather than overwritten.
+    expect(rescued.sessionId).toBe("sess-beta");
+    expect(rescued.attempts?.[0]).toMatchObject({
+      profileId: profile.id,
+      sessionId: "sess-alpha",
+      completion: { code: "rate_limit" },
+    });
+    const brief = readFileSync(join(cwd, "handoff-brief.txt"), "utf8");
+    expect(brief).toContain("Review the store.");
+    expect(brief).toContain("Finding: listTaskEvents drops the last row.");
+    expect(brief).toContain("rate_limit");
+    // No --resume: a session belongs to one account and cannot be reopened here.
+    expect(brief).not.toContain("--resume");
+    const spawns = stateStore().listTaskEvents(task.id)
+      .filter(({ type }) => type === "worker_spawned");
+    expect(spawns).toHaveLength(2);
+    expect(spawns[1]?.payload.resumedSession).toBeUndefined();
   });
 
   // The broker inherits PWD from whatever shell launched the app. A worker that

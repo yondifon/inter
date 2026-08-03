@@ -61,6 +61,14 @@ export function taskEventView(event: TaskEvent, provider: Profile["provider"]): 
       : undefined;
     const detail = event.type === "session_captured"
       ? "Root provider session mapped"
+      : event.type === "handed_off"
+      ? `${string(event.payload.fromProfile) ?? "?"} → ${string(event.payload.toProfile) ?? "?"}`
+      : event.type === "handoff_brief"
+      ? joinDetail(
+        `${string(event.payload.tier) ?? "brief"} carry-over`,
+        `${Number(event.payload.chars ?? 0)} chars`,
+        event.payload.omittedMessages ? `${Number(event.payload.omittedMessages)} messages omitted` : undefined,
+      )
       : dropped
       ?? (event.payload.stalled === true
         ? `No agent event for ${Math.round(Number(event.payload.silentMs ?? 0) / 1_000)}s`
@@ -713,6 +721,8 @@ function lifecycleTitle(type: string): string {
     blocked: "Task blocked", cancelled: "Task cancelled", worker_spawned: "Worker spawned",
     events_truncated: "Event capture limit reached",
     event_dropped: "Large event skipped",
+    handed_off: "Handed off to another profile",
+    handoff_brief: "Handoff brief built",
     scope_refusal: "Write refused by scope" } as Record<string, string>)[type] ?? humanize(type);
 }
 

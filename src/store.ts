@@ -481,8 +481,11 @@ export class StateStore {
       question: string | null;
       completion_json: string | null;
       attempts_json: string | null;
+      profile_id: string;
+      session_id: string | null;
     }, [string]>(`
-      SELECT output, error, question, completion_json, attempts_json FROM tasks WHERE id = ?
+      SELECT output, error, question, completion_json, attempts_json, profile_id, session_id
+      FROM tasks WHERE id = ?
     `).get(id);
     if (!row) return [];
     const attempts = row.attempts_json ? JSON.parse(row.attempts_json) as TaskAttempt[] : [];
@@ -499,6 +502,10 @@ export class StateStore {
         ? { completion: JSON.parse(row.completion_json) as TaskCompletion }
         : {}),
       endedAt,
+      // Where this run ran. Handoff moves both off the row, and then the
+      // attempt is the only record of which account holds the earlier session.
+      profileId: row.profile_id,
+      ...(row.session_id ? { sessionId: row.session_id } : {}),
     });
     return attempts;
   }
@@ -551,6 +558,71 @@ export class StateStore {
       resumed = true;
     });
     const task = resumed ? this.getTask(id) : undefined;
+    if (!task) throw new Error(`unknown task: ${id}`);
+    return task;
+  }
+
+  /**
+   * Moves a dead task to another provider account: same row, same id, same
+   * lineage, fresh session. Resume's SQL cannot do this — it holds the profile
+   * and the session steady on purpose — so the two stay separate statements.
+   */
+  handoffTask(
+    id: string,
+    updates: {
+      profileId: string;
+      model: string;
+      effort?: string;
+      scope?: TaskScope;
+      grantId?: string;
+    },
+  ): Task {
+    const now = new Date().toISOString();
+    let handed = false;
+    this.transaction(() => {
+      const current = this.database.query<{
+        state: TaskState;
+        profile_id: string;
+        session_id: string | null;
+      }, [string]>(`
+        SELECT state, profile_id, session_id FROM tasks WHERE id = ?
+      `).get(id);
+      if (!current || !["failed", "cancelled", "blocked"].includes(current.state)) {
+        throw new Error(`task cannot be handed off: ${id}`);
+      }
+      const attempts = this.closeAttempt(id, now);
+      const changed = this.database.query(`
+        UPDATE tasks
+        SET state = 'queued', output = '', error = NULL, question = NULL,
+            completion_json = NULL, attempts_json = ?,
+            profile_id = ?, model = ?, effort = ?, session_id = NULL,
+            scope_json = COALESCE(?, scope_json),
+            grant_id = COALESCE(?, grant_id),
+            updated_at = ?
+        WHERE id = ?
+          AND state IN ('failed', 'cancelled', 'blocked')
+      `).run(
+        JSON.stringify(attempts),
+        updates.profileId,
+        updates.model,
+        updates.effort ?? null,
+        updates.scope ? JSON.stringify(updates.scope) : null,
+        updates.grantId ?? null,
+        now,
+        id,
+      );
+      if (changed.changes !== 1) throw new Error(`task cannot be handed off: ${id}`);
+      this.addTaskEvent(id, "handed_off", "queued", {
+        previousState: current.state,
+        fromProfile: current.profile_id,
+        toProfile: updates.profileId,
+        model: updates.model,
+        attempt: attempts.length,
+        ...(current.session_id ? { previousSessionId: current.session_id } : {}),
+      });
+      handed = true;
+    });
+    const task = handed ? this.getTask(id) : undefined;
     if (!task) throw new Error(`unknown task: ${id}`);
     return task;
   }

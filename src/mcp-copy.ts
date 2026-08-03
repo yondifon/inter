@@ -5,9 +5,25 @@ export const MCP_INSTRUCTIONS = [
   "Route execution here by default — implementation, research, review, writing, analysis — rather than only when this session is stuck, and keep goal-setting, architecture, integration, and final review here. It is also how to get a second opinion from another model, how to keep going when this provider is near its usage limit, and where to place work this provider's policy will not take.",
   "Delegation sends the prompt, the cwd's saved memories, and whatever the worker reads to an external account. Get the user's approval for the destination and the data once — it then stands for that cwd and profile, so do not re-ask per dispatch — and ask again only when either moves outside what they agreed to.",
   "Scope is what the worker may touch. State it on delegate and Inter records it as a grant on that cwd for that profile; omit it and Inter reuses the newest grant for the cwd. Reusing a scope approved for a different profile still runs, but returns a warning — approval names a destination, not only a folder. Only a cwd with no grant at all falls back to the whole tree, and that task is flagged too.",
-  "Callers hold only the Inter task ID; provider session IDs stay private. Reply answers a needs_input question, resume retries a failed, blocked, or cancelled task, and both continue the same task ID and provider session.",
+  "Callers hold only the Inter task ID; provider session IDs stay private. Reply answers a needs_input question and resume retries a failed, blocked, or cancelled task, both on the same provider session; handoff moves such a task to a different profile when that account itself is the problem, and all three keep the same task ID.",
   "Dispatch returns immediately; follow with wait and until: \"attention\" so it returns the moment the task needs you, and return control to the user when you have other work or the task will run long — forgetting the task until a human asks is not the pattern.",
   "Answer a worker's reversible in-scope questions yourself; bring product intent, secrets, destructive actions, and requests for new authority to the user.",
+].join(" ");
+
+// resume and handoff both continue a dead task, and picking the wrong one either
+// wastes another account's quota or waits on a session that will never answer.
+// The difference is stated in the first two sentences, not buried.
+export const HANDOFF_DESCRIPTION = [
+  "Move a failed, cancelled, or blocked task to a different profile, keeping the same Inter task ID.",
+  "Use resume, not this, whenever the original account can still answer: resume reopens the same provider session and loses nothing.",
+  "Use handoff when that account is the thing that failed — rate limit, auth, billing, or a provider that will not take the work — because a provider session belongs to one account and cannot be opened from another.",
+  "A rate-limited task is not dead: its completion carries resetsAt, the time the window clears. Waiting until then and calling resume is free and lossless; handoff spends a second account's quota instead, and buys back the wait.",
+  "The new run starts a fresh session seeded with a brief Inter rebuilds from its own stored record of the dead run: the original prompt verbatim, why the run ended, files it wrote, and its actual messages and tool calls — condensed only when the transcript exceeds the cap, and then the tail is what survives.",
+  "The task keeps its id, title, attempt history, and scope; the run that died becomes an attempt naming the profile it ran on, so inspect with fields: [\"attempts\"] shows both runs and where each one went.",
+  "Omit model to use the destination profile's default; the old model id names a model on the old account.",
+  "Scope behaves as everywhere else: state it to approve this destination and it becomes the cwd's grant, omit it and the task keeps the scope it already had — which was approved for the profile it is leaving, so the response carries a warning naming the new destination.",
+  "Handing back to the profile the task is already on is rejected; that is a resume.",
+  "Returns where the task landed (id, state, profile, model); pass `fields` for more.",
 ].join(" ");
 
 export const DELEGATE_DESCRIPTION = [

@@ -370,4 +370,10 @@ colon-separated list to narrow the fence.
 - `profiles`: list available accounts and models without exposing secret-like env
   values.
 
+Every task-returning tool accepts a `fields` selector to control the response
+payload. [Read the `fields` docs](docs/fields.md) for per-tool defaults, the
+group → field table, and worked examples. The short version: defaults are
+minimal — `cancel` returns just `id` and `state` — because the caller already
+has the data it sent. Pass `fields: ["all"]` for the full record.
+
 Research notes: [docs/research.md](docs/research.md).

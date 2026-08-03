@@ -213,6 +213,74 @@ describe("SQLite state store", () => {
     store.close();
   });
 
+  test("resume holds the profile and session steady where handoff moves them", () => {
+    const { db } = paths();
+    const spare: Profile = { ...profile, id: "claude-spare", model: "haiku" };
+    const store = new StateStore({ path: db, seedProfiles: [profile, spare] });
+    const failing = task("running");
+    store.createTask(failing);
+    store.captureTaskSessionId(failing.id, "claude", "sess-alpha");
+    failing.state = "failed";
+    failing.output = "partial findings";
+    failing.error = "session limit";
+    store.saveTask(failing);
+
+    // Resume's contract: same account, same provider session, every time.
+    const resumed = store.resumeTask(failing.id);
+    expect(resumed.profileId).toBe(profile.id);
+    expect(resumed.sessionId).toBe("sess-alpha");
+    expect(resumed.attempts?.[0]).toMatchObject({
+      profileId: profile.id,
+      sessionId: "sess-alpha",
+    });
+
+    resumed.state = "failed";
+    resumed.output = "still stuck";
+    store.saveTask(resumed);
+
+    const handed = store.handoffTask(failing.id, {
+      profileId: spare.id,
+      model: "haiku",
+      effort: "max",
+    });
+    expect(handed).toMatchObject({
+      profileId: spare.id,
+      model: "haiku",
+      effort: "max",
+      state: "queued",
+      // Same row, same lineage: only the destination changed.
+      prompt: failing.prompt,
+      cwd: failing.cwd,
+    });
+    // The new run has no session yet; the old account's survives on the attempt
+    // it belongs to rather than being overwritten on the row.
+    expect(handed.sessionId).toBeUndefined();
+    expect(handed.attempts?.map(({ profileId, sessionId }) => [profileId, sessionId])).toEqual([
+      [profile.id, "sess-alpha"],
+      [profile.id, "sess-alpha"],
+    ]);
+    expect(store.listTaskEvents(failing.id).at(-1)).toMatchObject({
+      type: "handed_off",
+      payload: { fromProfile: profile.id, toProfile: spare.id, previousSessionId: "sess-alpha" },
+    });
+    store.close();
+  });
+
+  test("refuses a handoff from a state that is not resumable", () => {
+    const { db } = paths();
+    const spare: Profile = { ...profile, id: "claude-spare" };
+    const store = new StateStore({ path: db, seedProfiles: [profile, spare] });
+    const done = task("running");
+    store.createTask(done);
+    done.state = "completed";
+    store.saveTask(done);
+
+    expect(() => store.handoffTask(done.id, { profileId: spare.id, model: "haiku" }))
+      .toThrow("task cannot be handed off");
+    expect(store.getTask(done.id)?.profileId).toBe(profile.id);
+    store.close();
+  });
+
   test("cancels a task parked on a question or blocked mid-run", () => {
     const { db } = paths();
     const store = new StateStore({ path: db, seedProfiles: [profile] });

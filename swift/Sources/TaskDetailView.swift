@@ -174,9 +174,16 @@ struct TaskDetail: View {
             TaskMetaChip(text: task.model, label: "Model") {
                 Image(systemName: "cpu").font(.system(size: 9 * uiScale, weight: .medium))
             }
+            // The reasoning level the run was dispatched with is part of its
+            // identity like the model, and absent when the caller set none.
+            if let effort = task.effort, !effort.isEmpty {
+                TaskMetaChip(text: effort, label: "Effort") {
+                    Image(systemName: "brain").font(.system(size: 9 * uiScale, weight: .medium))
+                }
+            }
             // Where a run touched files is part of its identity, not a detail: two
             // tasks with the same worker, model and prompt differ only by folder.
-            TaskMetaChip(text: task.displayPath, label: "Folder", full: task.cwd, maxWidth: 200 * uiScale) {
+            TaskMetaChip(text: task.displayPath, label: "Folder", full: task.cwd, maxChars: 28) {
                 Image(systemName: "folder").font(.system(size: 9 * uiScale, weight: .medium))
             }
             Spacer(minLength: 8)
@@ -872,6 +879,19 @@ private struct TaskStateChip: View {
     }
 }
 
+/// Shortens a string by removing its middle. The font is monospaced, so a
+/// character budget is a width budget: every glyph advances the same amount, and
+/// the ellipsis takes the slot of the characters it hides. The head and tail
+/// split the budget evenly, so the leading `~/` and the folder name — the two
+/// halves that identify a path — both survive.
+func middleTruncated(_ text: String, maxChars: Int) -> String {
+    guard maxChars > 2, text.count > maxChars else { return text }
+    let usable = maxChars - 1
+    let head = (usable + 1) / 2
+    let tail = usable / 2
+    return "\(text.prefix(head))…\(text.suffix(tail))"
+}
+
 /// Neutral companion to the state chip: same shape, no semantic color, because a
 /// worker or model name is an identifier and not a signal. The icon leads so the
 /// field is readable without a label, and the name survives as tooltip and
@@ -882,21 +902,29 @@ private struct TaskMetaChip<Icon: View>: View {
     /// Unshortened value, when `text` is an abbreviated form of it. The tooltip and
     /// VoiceOver read this one, so nothing is lost to truncation.
     var full: String? = nil
-    /// Cap for values that can run long, like a path. The middle goes first so the
-    /// leading `~/` and the folder name — the two halves that identify it — stay.
-    var maxWidth: CGFloat? = nil
+    /// Character budget for values that can run long, like a path. The text is
+    /// monospaced, so a character count is a faithful width budget — and unlike a
+    /// `frame(maxWidth:)`, it cannot stretch a short value to the full cap, which
+    /// left every chip sized to the maximum instead of its content. The middle
+    /// goes first so the leading `~/` and the folder name — the two halves that
+    /// identify it — stay.
+    var maxChars: Int? = nil
     @ViewBuilder let icon: Icon
 
     @Environment(\.uiScale) private var uiScale
 
+    /// The text as shown: truncated here when a budget is set, so layout never
+    /// has to shrink the string itself.
+    private var displayText: String {
+        maxChars.map { middleTruncated(text, maxChars: $0) } ?? text
+    }
+
     var body: some View {
         HStack(spacing: 4) {
             icon
-            Text(text)
+            Text(displayText)
                 .scaledFont(.caption2, design: .monospaced)
                 .lineLimit(1)
-                .truncationMode(.middle)
-                .frame(maxWidth: maxWidth, alignment: .leading)
         }
         .foregroundStyle(.secondary)
         .padding(.horizontal, 7 * uiScale)

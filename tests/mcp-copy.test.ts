@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { DELEGATE_DESCRIPTION, MCP_INSTRUCTIONS } from "../src/mcp-copy";
+import { DELEGATE_DESCRIPTION, HANDOFF_DESCRIPTION, MCP_INSTRUCTIONS } from "../src/mcp-copy";
 
 describe("MCP consent copy", () => {
   test("states what leaves the machine and who approves it", () => {
@@ -61,6 +61,20 @@ describe("MCP consent copy", () => {
     // refused work — is why callers did the work themselves instead.
     expect(MCP_INSTRUCTIONS).toContain("Route execution here by default");
     expect(DELEGATE_DESCRIPTION).toContain("a normal way to get work done");
+  });
+
+  test("lets a caller tell resume and handoff apart without reading the source", () => {
+    // Picking the wrong one either waits on a session that will never answer or
+    // spends a second account's quota for nothing.
+    expect(MCP_INSTRUCTIONS).toContain("handoff moves such a task to a different profile");
+    expect(HANDOFF_DESCRIPTION).toContain("Use resume, not this, whenever the original account can still answer");
+    expect(HANDOFF_DESCRIPTION).toContain("cannot be opened from another");
+    expect(HANDOFF_DESCRIPTION).toContain("resetsAt");
+    expect(HANDOFF_DESCRIPTION).toContain("fresh session seeded with a brief");
+    expect(HANDOFF_DESCRIPTION).toContain("same Inter task ID");
+    // The two ways a caller can get the scope question wrong.
+    expect(HANDOFF_DESCRIPTION).toContain("keeps the scope it already had");
+    expect(HANDOFF_DESCRIPTION).toContain("that is a resume");
   });
 
   test("stays short enough to be read rather than skimmed", () => {

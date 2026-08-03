@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   continuationPrompt,
   interpretWorkerOutcome,
+  rateLimitResetAt,
   workerPrompt,
 } from "../src/task-protocol";
 import {
@@ -294,6 +295,54 @@ describe("worker protocol", () => {
   test("classifies provider billing failures", () => {
     expect(interpretWorkerOutcome(1, "", "Insufficient balance. statusCode: 401, type: CreditsError"))
       .toMatchObject({ state: "failed", completion: { code: "billing" } });
+  });
+
+  test("reads a session limit as the rate limit it is, with its reset time", () => {
+    // The 2026-08-03 incident, verbatim. It used to classify as worker_error,
+    // so nothing recorded that the task became resumable an hour later.
+    const outcome = interpretWorkerOutcome(
+      1,
+      "",
+      "You've hit your session limit · resets 12:40am (Africa/Douala)",
+    );
+    expect(outcome.completion.code).toBe("rate_limit");
+    expect(Date.parse(outcome.completion.resetsAt!)).toBeGreaterThan(Date.now());
+  });
+
+  test("leaves resetsAt off failures that are not rate limits", () => {
+    expect(interpretWorkerOutcome(1, "", "worker crashed").completion.resetsAt).toBeUndefined();
+  });
+});
+
+describe("rate limit reset times", () => {
+  const now = new Date("2026-08-03T20:00:00.000Z");
+
+  test("resolves a wall clock in the zone the provider printed it in", () => {
+    // Africa/Douala is UTC+1 year round: 12:40am on the 4th local is 23:40Z on
+    // the 3rd — the next occurrence, not one that already passed today.
+    expect(rateLimitResetAt("You've hit your session limit · resets 12:40am (Africa/Douala)", now))
+      .toBe("2026-08-03T23:40:00.000Z");
+    // Same clock time, a zone eight hours behind: a different instant.
+    expect(rateLimitResetAt("resets 12:40am (America/Los_Angeles)", now))
+      .toBe("2026-08-04T07:40:00.000Z");
+  });
+
+  test("reads a countdown and an epoch stamp", () => {
+    expect(rateLimitResetAt("Rate limit: five hour · allowed · resets in 48m 15s", now))
+      .toBe("2026-08-03T20:48:15.000Z");
+    expect(rateLimitResetAt("resets in 2h 5m", now)).toBe("2026-08-03T22:05:00.000Z");
+    // Claude Code prints the window as an epoch on the message itself.
+    expect(rateLimitResetAt("Claude AI usage limit reached|1754308800", now))
+      .toBe(new Date(1_754_308_800_000).toISOString());
+  });
+
+  test("returns nothing rather than guessing", () => {
+    expect(rateLimitResetAt("You've hit your session limit", now)).toBeUndefined();
+    expect(rateLimitResetAt("resets 25:99", now)).toBeUndefined();
+    expect(rateLimitResetAt("", now)).toBeUndefined();
+    // An unknown zone name falls back to the broker's own clock instead of
+    // dropping a time the provider did state.
+    expect(rateLimitResetAt("resets 12:40am (Middle/Earth)", now)).toBeString();
   });
 
   test("makes the resolved answer explicitly supersede conflicts", () => {

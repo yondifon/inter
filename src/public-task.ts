@@ -1,4 +1,4 @@
-import type { Task, TaskState, TaskSummary } from "./types";
+import type { Task, TaskAttempt, TaskState, TaskSummary } from "./types";
 
 export const TASK_FIELD_GROUPS = {
   routing: ["profileId", "model", "effort"],
@@ -22,6 +22,16 @@ export function publicTask(task: Task): Omit<Task, "sessionId"> {
 
 export function publicTaskSummary(task: TaskSummary): Omit<TaskSummary, "sessionId"> {
   const { sessionId: _sessionId, ...value } = task;
+  return value;
+}
+
+/**
+ * A prior run's provider session is still a provider session. Handoff keeps it
+ * on the attempt so the row remembers which account holds that work, but the
+ * rule the whole surface runs on does not bend for a nested one.
+ */
+function publicAttempt(attempt: TaskAttempt): Omit<TaskAttempt, "sessionId"> {
+  const { sessionId: _sessionId, ...value } = attempt;
   return value;
 }
 
@@ -75,7 +85,9 @@ export function taskView(task: Task, fields: readonly TaskField[]): Record<strin
     ...(want.has("output") ? { output: task.output } : {}),
 
     // attempts (the full array, not just the count)
-    ...(want.has("attempts") && task.attempts?.length ? { attempts: task.attempts } : {}),
+    ...(want.has("attempts") && task.attempts?.length
+      ? { attempts: task.attempts.map(publicAttempt) }
+      : {}),
 
     // completion
     ...(want.has("completion") && task.completion ? { completion: task.completion } : {}),

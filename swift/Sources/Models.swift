@@ -63,6 +63,8 @@ struct TaskSnapshot: Codable, Identifiable, Hashable {
     var id: String
     var profileId: String
     var model: String
+    /// Reasoning level the run was dispatched with. Absent when no level was set.
+    var effort: String? = nil
     var prompt: String
     /// Short human label, max 60 chars. Absent on tasks predating the field.
     var title: String? = nil

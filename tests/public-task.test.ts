@@ -224,6 +224,25 @@ describe("taskView", () => {
       expect(taskView(full, fields)).not.toHaveProperty("sessionId");
     }
   });
+
+  test("keeps a prior run's profile on its attempt and its session off the wire", () => {
+    // Handoff stores the dead run's session on the attempt so the row remembers
+    // which account holds that work. It is still a provider session id.
+    const moved = pollingTask({
+      profileId: "default",
+      attempts: [{
+        output: "partial findings",
+        endedAt: new Date().toISOString(),
+        profileId: "claude-work",
+        sessionId: "provider-session",
+        completion: { blocked: true, code: "rate_limit" },
+      }],
+    });
+    const attempts = taskView(moved, ["attempts"]).attempts as Array<Record<string, unknown>>;
+    expect(attempts[0]).toHaveProperty("profileId", "claude-work");
+    expect(attempts[0]).not.toHaveProperty("sessionId");
+    expect(JSON.stringify(taskView(moved, ["all"]))).not.toContain("provider-session");
+  });
 });
 
 describe("run cost", () => {

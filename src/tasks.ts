@@ -5,7 +5,14 @@ import { isAbsolute, relative, resolve } from "node:path";
 import { canResumeSession, commandFor, finalText, resumeCommandFor, sessionIdFrom, writeTargetsFrom } from "./adapters";
 import { loadConfig, profileEnv } from "./config";
 import { taskEventView } from "./events";
-import { continuationPrompt, interpretWorkerOutcome, needsInputQuestion, workerPrompt } from "./task-protocol";
+import {
+  continuationPrompt,
+  interpretWorkerOutcome,
+  needsInputQuestion,
+  rateLimitResetAt,
+  workerPrompt,
+} from "./task-protocol";
+import { handoffBrief } from "./handoff-brief";
 import { normalizeTaskScope, sandboxedCommand, scopeCoversPath, scopeRefusedWrite } from "./task-scope";
 import { workerPath } from "./worker-path";
 import { deniedScopePaths, promptReadPaths } from "./prompt-paths";
@@ -51,6 +58,14 @@ export interface ResumeOptions {
 }
 
 export interface ReplyOptions {
+  scope?: TaskScope;
+}
+
+export interface HandoffOptions {
+  /** Model on the destination profile. Omit for that profile's default. */
+  model?: string;
+  effort?: string;
+  /** Fresh approval for the destination; omitted, the task keeps its own scope. */
   scope?: TaskScope;
 }
 
@@ -196,7 +211,9 @@ export async function delegate(
 
 /** Set when a task reused a scope the user approved for a different destination. */
 export function scopeInheritanceWarning(task: Task): string | undefined {
-  const event = stateStore().listTaskEvents(task.id)
+  // Newest wins: a handoff inherits again, onto a different destination than
+  // the one the first event named.
+  const event = [...stateStore().listTaskEvents(task.id)].reverse()
     .find(({ type }) => type === "scope_inherited");
   if (!event) return undefined;
   return `${task.profileId} inherited a scope approved for ${event.payload.approvedFor}; state scope explicitly to approve this destination`;
@@ -579,6 +596,15 @@ async function runTask(
         outcome.completion.reason = better.replace(/\s+/g, " ").trim().slice(0, 500);
       }
     }
+    // When the window clears is what tells the caller whether to wait and resume
+    // this session — free and lossless — or hand the task to another account
+    // now. The provider states it on the failing message, in the stream, or
+    // both; without it the choice cannot be made at all.
+    if (outcome.completion.code === "rate_limit" && !outcome.completion.resetsAt) {
+      const resetsAt = rateLimitResetAt(`${outcome.error ?? ""}\n${output}`)
+        ?? rateLimitResetFromEvents(task.id);
+      if (resetsAt) outcome.completion.resetsAt = resetsAt;
+    }
     const persisted = update(task, {
       state: outcome.state,
       output: outcome.output,
@@ -695,7 +721,30 @@ export function recordProfileTaskOutcome(
     profileId,
     code,
     outcome.completion.reason ?? outcome.error ?? "provider failure",
+    // The provider said when it will answer again; the ten-minute guess this
+    // otherwise falls back to is what made a five-hour window look retryable.
+    outcome.completion.resetsAt,
   );
+}
+
+/**
+ * Claude's stream states the window boundary outright — `rate_limit_event` with
+ * `resetsAt` in epoch seconds — often minutes before the limit actually bites.
+ * When the failing message names no time, that event is the only record left.
+ */
+function rateLimitResetFromEvents(taskId: string): string | undefined {
+  const events = stateStore().listTaskEvents(taskId);
+  for (let index = events.length - 1; index >= 0; index--) {
+    const event = events[index]!;
+    if (event.type !== "agent.rate_limit_event") continue;
+    const info = event.payload.rate_limit_info;
+    if (!info || typeof info !== "object" || Array.isArray(info)) continue;
+    const seconds = Number((info as Record<string, unknown>).resetsAt);
+    if (!Number.isFinite(seconds) || seconds <= 0) continue;
+    const at = new Date(seconds * 1_000);
+    return at.getTime() > Date.now() ? at.toISOString() : undefined;
+  }
+  return undefined;
 }
 
 async function readStream(
@@ -805,6 +854,79 @@ export async function resumeTask(
   });
   taskWaiter.notify(id);
   launchTask(task, profile, old.sessionId, prompt);
+  return task;
+}
+
+/**
+ * Continue a dead task on a different provider account.
+ *
+ * `resume` reopens the provider session, and a session belongs to one account:
+ * when the account is what failed, that session is unreachable and every turn
+ * it spent is stranded. Everything else about the run is Inter's own — the
+ * prompt, the attempts, the event trace — so a handoff rebuilds a brief from
+ * those rows and starts a fresh session with it. Same task id, same lineage,
+ * same attempt history; new profile, new session, no hand-written prompt.
+ */
+export async function handoffTask(
+  id: string,
+  profileId: string,
+  options: HandoffOptions = {},
+): Promise<Task> {
+  const old = stateStore().getTask(id);
+  if (!old) throw new Error(unknownTaskMessage(id));
+  if (!["failed", "cancelled", "blocked"].includes(old.state)) {
+    throw new Error(`task cannot be handed off from state ${old.state}: ${id}`);
+  }
+  if (profileId === old.profileId) {
+    throw new Error(
+      `handoff needs a different profile: task ${id} is already on ${profileId} — use resume to continue on the same account and provider session`,
+    );
+  }
+  const config = await loadConfig();
+  const profile = config.profiles.find((item) => item.id === profileId);
+  if (!profile) throw new Error(unknownProfileMessage(profileId, config.profiles));
+  if (!profile.enabled) throw new Error(`profile disabled: ${profileId}`);
+  // The old model id names a model on the old account; carrying it across would
+  // send a provider a name it has never heard of.
+  const model = options.model?.trim() || profile.model;
+  if (model.length > 200) throw new Error("model exceeds 200 characters");
+  const effort = options.effort?.trim() || old.effort;
+  // A stated scope is fresh approval for this destination and becomes its grant,
+  // exactly as on delegate and resume. Anything else keeps the task's own scope:
+  // a handoff must never widen what a task may touch on the way out.
+  const replacement = options.scope ? resolveScope(old.cwd, profileId, options.scope) : undefined;
+  const approvedHere = stateStore().latestScopeGrant(old.cwd, profileId)?.profileId === profileId;
+  // Built before the row moves: `old` still names the profile whose work this
+  // is, and still carries the failure the brief has to explain.
+  const brief = handoffBrief(
+    old,
+    stateStore().listTaskEvents(id),
+    config.profiles.find(({ id: item }) => item === old.profileId)?.provider ?? profile.provider,
+  );
+  const task = stateStore().handoffTask(id, {
+    profileId,
+    model,
+    ...(effort ? { effort } : {}),
+    ...(replacement ? { scope: replacement.scope } : {}),
+    ...(replacement?.grantId ? { grantId: replacement.grantId } : {}),
+  });
+  // Same warning path as delegate: approval names a destination, and this task's
+  // scope was approved for the profile it is leaving.
+  if (!replacement && !approvedHere) {
+    appendTaskEvent(task.id, "scope_inherited", task.state, {
+      scope: task.scope,
+      approvedFor: old.profileId,
+      usedBy: profileId,
+      reason: `scope was approved for profile ${old.profileId}, not ${profileId}`,
+    });
+  }
+  appendTaskEvent(task.id, "handoff_brief", task.state, {
+    tier: brief.tier,
+    chars: brief.chars,
+    ...(brief.omittedMessages ? { omittedMessages: brief.omittedMessages } : {}),
+  });
+  taskWaiter.notify(id);
+  launchTask(task, profile, undefined, brief.prompt);
   return task;
 }
 

@@ -8,6 +8,7 @@ import {
   cancelTask,
   delegate,
   getTask,
+  handoffTask,
   listTasks,
   listTaskSummaries,
   reply,
@@ -25,7 +26,7 @@ import { stateStore } from "./store";
 import type { Profile, Provider, Task } from "./types";
 import { finalText } from "./adapters";
 import { taskEventView } from "./events";
-import { DELEGATE_DESCRIPTION, MCP_INSTRUCTIONS } from "./mcp-copy";
+import { DELEGATE_DESCRIPTION, HANDOFF_DESCRIPTION, MCP_INSTRUCTIONS } from "./mcp-copy";
 import { defaultModelFor } from "./provider-defaults";
 import { normalizeProfile } from "./profile-input";
 import { deleteMemory, getMemory, listMemories, setMemory } from "./memories";
@@ -35,7 +36,7 @@ import { loadRoutingPolicy } from "./routing-policy";
 
 const port = Number(Bun.env.INTER_PORT ?? 7331);
 const VERSION = "0.6.0";
-const MCP_CONTRACT_VERSION = 20;
+const MCP_CONTRACT_VERSION = 21;
 // A foreground MCP call still owns the caller's agent turn, which is why
 // `until: "attention"` matters: it returns the instant the task needs the
 // caller rather than burning the full block.
@@ -57,6 +58,9 @@ const taskFieldSchema = z.array(z.enum(TASK_FIELD_KEYS)).optional()
 const DEFAULT_DELEGATE_FIELDS: TaskField[] = ["routing"];
 const DEFAULT_REPLY_FIELDS: TaskField[] = [];
 const DEFAULT_RESUME_FIELDS: TaskField[] = [];
+// Where the task landed is the one thing a handoff changed and the caller does
+// not already know, so routing rides the acknowledgement.
+const DEFAULT_HANDOFF_FIELDS: TaskField[] = ["routing"];
 const DEFAULT_CANCEL_FIELDS: TaskField[] = [];
 const DEFAULT_ARCHIVE_FIELDS: TaskField[] = [];
 const DEFAULT_INSPECT_FIELDS: TaskField[] = (() => {
@@ -473,7 +477,7 @@ async function createMcpServer(): Promise<McpServer> {
     }),
   }, async ({ taskId, answer, scope, fields }) => result(startedTask(await reply(taskId, answer, { scope }), fields ?? DEFAULT_REPLY_FIELDS)));
   server.registerTool("resume", {
-    description: "Retry a failed, cancelled, or blocked task. Pass only its Inter task ID; Inter maps it to the private root provider session and returns the same task ID. Optional scope and allowQuestions replace those task settings before continuation; get explicit approval before expanding scope. Use reply instead when the task needs input. By default a small acknowledgement; pass `fields` to get more.",
+    description: "Retry a failed, cancelled, or blocked task on the same profile and the same provider session. Pass only its Inter task ID; Inter maps it to the private root provider session and returns the same task ID. Optional scope and allowQuestions replace those task settings before continuation; get explicit approval before expanding scope. Use reply instead when the task needs input, and handoff when the account itself failed and cannot answer — a rate-limited task carries completion.resetsAt, the time this session becomes resumable again. By default a small acknowledgement; pass `fields` to get more.",
     inputSchema: z.object({
       taskId: z.string(),
       instruction: z.string().min(1).max(64_000).optional(),
@@ -484,6 +488,30 @@ async function createMcpServer(): Promise<McpServer> {
     }),
   }, async ({ taskId, instruction, timeoutMs, scope, allowQuestions, fields }) =>
     result(startedTask(await resumeTask(taskId, instruction, { timeoutMs, scope, allowQuestions }), fields ?? DEFAULT_RESUME_FIELDS)));
+  server.registerTool("handoff", {
+    description: HANDOFF_DESCRIPTION,
+    inputSchema: z.object({
+      taskId: z.string().describe("Inter task id of the failed, cancelled, or blocked task."),
+      profile: z.string().min(1)
+        .describe("Destination profile id. Must differ from the task's current profile; see profiles for capacity."),
+      model: z.string().min(1).max(200).optional()
+        .describe("Model on the destination profile. Omit for that profile's default."),
+      effort: z.enum(["minimal", "low", "medium", "high", "xhigh", "max"]).optional()
+        .describe("Reasoning effort for the new run. Omit to keep what the task already asked for."),
+      scope: scopeSchema.optional()
+        .describe(
+          "Fresh approval for the destination, which becomes this cwd's grant for it. " +
+          "Omit and the task keeps its own scope — never widened — and the response warns that it was approved for the profile being left.",
+        ),
+      fields: taskFieldSchema,
+    }),
+  }, async ({ taskId, profile, model, effort, scope, fields }) => {
+    const task = await handoffTask(taskId, profile, { model, effort, scope });
+    return result({
+      ...startedTask(task, fields ?? DEFAULT_HANDOFF_FIELDS),
+      ...(await warningsFor(task.cwd, task)),
+    });
+  });
   server.registerTool("cancel", {
     description: "Stop a delegated task and its worker process tree. Works on queued, running, needs_input, and blocked tasks, so a task parked on a question you do not want to answer is not a dead end. This does not delete the task record. By default a small acknowledgement; pass `fields` to get more.",
     inputSchema: z.object({

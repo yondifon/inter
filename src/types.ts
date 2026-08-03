@@ -33,6 +33,12 @@ export interface TaskCompletion {
   reason?: string;
   /** Scope that would have survived the run's sandbox denials; approve on resume. */
   suggestedScope?: TaskScope;
+  /**
+   * When the provider's rate-limit window clears, ISO. Only set on `rate_limit`.
+   * The session on that account stays valid, so this is the caller's choice:
+   * wait until then and `resume` for free, or `handoff` now to another profile.
+   */
+  resetsAt?: string;
 }
 
 export interface Profile {
@@ -69,6 +75,13 @@ export interface TaskAttempt {
   question?: string;
   completion?: TaskCompletion;
   endedAt: string;
+  /**
+   * Where this run actually ran. The task row carries the current profile and
+   * session, so after a handoff moves both, the attempt is the only record of
+   * which account did the earlier work and which session holds it.
+   */
+  profileId?: string;
+  sessionId?: string;
 }
 
 export interface MemoryEntry {
