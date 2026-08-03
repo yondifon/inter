@@ -17,6 +17,8 @@ export interface WaitTaskView {
   cwd: string;
   state: TaskState;
   promptPreview: string;
+  /** Caller's own one-line handle; a human scans the list by it, unlike the prompt text. */
+  tldr?: string;
   createdAt: string;
   updatedAt: string;
   error?: string;
@@ -46,6 +48,9 @@ export function waitTaskView(task: Task): WaitTaskView {
     cwd: task.cwd,
     state: task.state,
     promptPreview: preview(task.prompt),
+    // The caller's own tldr rides every poll: it is short, and it is the label
+    // the human scans for — unlike the prompt, which stays on inspect.
+    ...(task.tldr ? { tldr: task.tldr } : {}),
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
     ...(task.error ? { error: task.error } : {}),

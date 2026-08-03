@@ -318,6 +318,42 @@ describe("SQLite state store", () => {
     store.close();
   });
 
+  test("round-trips a caller tldr and leaves it undefined when absent", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const withTldr = { ...task(), tldr: "Add dark mode and run the tests" };
+    store.createTask(withTldr);
+    expect(store.getTask(withTldr.id)!.tldr).toBe("Add dark mode and run the tests");
+    // The app's task list reads summaries, so the handle has to ride them too.
+    expect(store.listTaskSummaries({}).find(({ id }) => id === withTldr.id)?.tldr)
+      .toBe("Add dark mode and run the tests");
+
+    // No tldr stays absent rather than surfacing as an empty string.
+    const withoutTldr = task();
+    store.createTask(withoutTldr);
+    expect(store.getTask(withoutTldr.id)!.tldr).toBeUndefined();
+    store.close();
+  });
+
+  test("migrates databases without the tldr column, leaving rows readable", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const saved = { ...task(), tldr: "Write a README for the auth package" };
+    store.createTask(saved);
+    expect(store.getTask(saved.id)?.tldr).toBe("Write a README for the auth package");
+    store.close();
+
+    // Simulate a database created before the tldr migration.
+    const raw = new Database(db);
+    raw.exec("ALTER TABLE tasks DROP COLUMN tldr");
+    raw.close();
+
+    const reopened = new StateStore({ path: db, seedProfiles: [profile] });
+    expect(reopened.getTask(saved.id)).toMatchObject({ id: saved.id, prompt: saved.prompt });
+    expect(reopened.getTask(saved.id)?.tldr).toBeUndefined();
+    reopened.close();
+  });
+
   test("persists terminal tasks and ordered lifecycle events", () => {
     const { db } = paths();
     const store = new StateStore({ path: db, seedProfiles: [profile] });

@@ -145,6 +145,24 @@ describe("delegate workspace roots", () => {
       .not.toContain("scope_auto_completed");
     await settled(covered.id);
   });
+
+  test("threads a caller tldr through delegate and leaves it absent when omitted", async () => {
+    const root = mkdtempSync(join(tmpdir(), "inter-tldr-"));
+    scratch.push(root);
+    process.env.INTER_DB = join(root, "inter.db");
+    process.env.INTER_ROOTS = root;
+    stateStore().saveProfiles([noopProfile]);
+
+    const withTldr = await delegate(noopProfile.id, "prompt", root, undefined, undefined, {
+      tldr: "Add dark mode and run the tests",
+    });
+    expect(withTldr.tldr).toBe("Add dark mode and run the tests");
+    await settled(withTldr.id);
+
+    const withoutTldr = await delegate(noopProfile.id, "prompt", root);
+    expect(withoutTldr.tldr).toBeUndefined();
+    await settled(withoutTldr.id);
+  });
 });
 
 describe("needsInputQuestion", () => {

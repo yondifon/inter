@@ -61,6 +61,12 @@ describe("wait payload", () => {
     expect(waitTaskView(pollingTask())).not.toHaveProperty("sessionId");
     expect(publicTask(pollingTask()).shippedPrompt).toBeDefined();
   });
+
+  test("rides the caller's tldr on every poll and omits it when absent", () => {
+    expect(waitTaskView(pollingTask({ tldr: "Add dark mode and run the tests" })).tldr)
+      .toBe("Add dark mode and run the tests");
+    expect(waitTaskView(pollingTask())).not.toHaveProperty("tldr");
+  });
 });
 
 describe("run cost", () => {

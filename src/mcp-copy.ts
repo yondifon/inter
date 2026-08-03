@@ -24,6 +24,7 @@ export const DELEGATE_DESCRIPTION = [
   "Write rules are also readable, but read rules do not permit writes; include generated build paths in write scope when checks need them.",
   "Reply and resume may each replace the task's scope after fresh approval, and a replacement becomes the cwd's grant.",
   "Send prompt as structured markdown (Goal, Context, Scope with exact paths, numbered Instructions, Guardrails, Output Format), never one flattened paragraph.",
+  "Always pass tldr: one plain sentence saying what the task will do and to what, because the user reads it on the task list, not the prompt.",
   "When fanning out several tasks for one goal, pass the first task's id as parent on the rest so the switchboard groups the batch.",
   "The returned Inter task ID is the only continuation handle; provider session IDs are private implementation data.",
   "Dispatch returns immediately. Follow the task with wait and until: \"attention\", which returns as soon as it asks a question or settles; return control to the user when you have other work or the run will be long.",

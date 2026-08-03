@@ -35,7 +35,7 @@ import { loadRoutingPolicy } from "./routing-policy";
 
 const port = Number(Bun.env.INTER_PORT ?? 7331);
 const VERSION = "0.6.0";
-const MCP_CONTRACT_VERSION = 18;
+const MCP_CONTRACT_VERSION = 19;
 // A foreground MCP call still owns the caller's agent turn, which is why
 // `until: "attention"` matters: it returns the instant the task needs the
 // caller rather than burning the full block.
@@ -294,10 +294,16 @@ async function createMcpServer(): Promise<McpServer> {
           "ignores it because its level is baked into the model id. Ladders differ per provider, " +
           "so call profiles with include: [\"models\"] and read the model's efforts before choosing.",
         ),
+      tldr: z.string().min(1).max(200).optional()
+        .describe(
+          "One plain sentence, in the user's terms, saying what the task will do and to what; the " +
+          "user reads it on the task list, not the prompt. No markdown, no file paths unless they " +
+          "are the point.",
+        ),
       timeoutMs: z.number().int().min(1).max(86_400_000).optional()
         .describe("Hard runtime limit. The task lands in failed with code timeout."),
     }),
-  }, async ({ profile, model, preference, prompt, cwd, parent, scope, allowQuestions, effort, timeoutMs }) => {
+  }, async ({ profile, model, preference, prompt, cwd, parent, scope, allowQuestions, effort, tldr, timeoutMs }) => {
     if (profile) {
       // The caller named the account but not the model. Let the project policy
       // pick that profile's best model for this task class instead of falling
@@ -305,7 +311,7 @@ async function createMcpServer(): Promise<McpServer> {
       const chosen = model ?? await routeModel(prompt, { preference, cwd, profileId: profile })
         .then((route) => route.model)
         .catch(() => undefined);
-      const task = await delegate(profile, prompt, cwd, chosen, parent, { scope, allowQuestions, effort, timeoutMs });
+      const task = await delegate(profile, prompt, cwd, chosen, parent, { scope, allowQuestions, effort, tldr, timeoutMs });
       return result({ ...startedTask(task), ...(await warningsFor(cwd, task)) });
     }
     const selection = await routeModel(prompt, { preference, modelHint: model, cwd });
@@ -313,6 +319,7 @@ async function createMcpServer(): Promise<McpServer> {
       scope,
       allowQuestions,
       effort,
+      tldr,
       timeoutMs,
     });
     return result({ ...startedTask(task), selection, ...(await warningsFor(cwd, task)) });

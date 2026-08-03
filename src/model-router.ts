@@ -226,7 +226,12 @@ export function classifyTask(prompt: string): {
 
 export function modelTraits(model: ModelInfo): ModelTraits {
   const id = model.id.toLowerCase();
-  const quality = /(?:haiku|nano|mini|flash|spark|lite|20b)/.test(id) ? 2
+  // `flash` in a model name almost always marks a small tier, but
+  // deepseek-v4-flash is a full-strength everyday model. The name test below
+  // runs first and would floor it at 2, which is under the min_quality of
+  // every route class — so policy could never select it, however it is listed.
+  const quality = /deepseek-v4-flash/.test(id) ? 4
+    : /(?:haiku|nano|mini|flash|spark|lite|20b)/.test(id) ? 2
     : /(?:opus|fable|(?:^|[-/])sol|pro|max|ultra|reasoning|kimi-k3|kimi-k2\.7-code|gpt-5\.6)/.test(id) ? 5
     : /(?:sonnet|luna|terra|kimi-k2\.[56]|large|gpt-5\.[45]|glm-5|qwen3\.[67]|minimax-m3)/.test(id) ? 4
     : 3;

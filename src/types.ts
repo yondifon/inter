@@ -110,6 +110,8 @@ export interface Task {
   timeoutMs?: number;
   /** Reasoning effort requested for this run; persisted so resume reuses it. */
   effort?: string;
+  /** Caller's one-line handle for this task, what a human reads instead of the prompt. */
+  tldr?: string;
   sessionId?: string;
   completion?: TaskCompletion;
   attempts?: TaskAttempt[];
@@ -125,6 +127,8 @@ export interface TaskSummary {
   cwd: string;
   state: TaskState;
   promptPreview: string;
+  /** Caller's one-line handle for this task, shown in the app's task list. */
+  tldr?: string;
   createdAt: string;
   updatedAt: string;
   error?: string;

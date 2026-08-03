@@ -45,6 +45,7 @@ interface TaskRow {
   allow_questions: number;
   timeout_ms: number | null;
   effort: string | null;
+  tldr: string | null;
   session_id: string | null;
   completion_json: string | null;
   attempts_json: string | null;
@@ -57,7 +58,7 @@ interface TaskRow {
 
 const TASK_COLUMNS = `id, profile_id, model, prompt, shipped_prompt, cwd, state, output, error,
              question, parent_task_id, scope_json, grant_id, allow_questions, timeout_ms,
-             effort, session_id, completion_json, attempts_json, cost_usd, turns, archived_at,
+             effort, tldr, session_id, completion_json, attempts_json, cost_usd, turns, archived_at,
              created_at, updated_at`;
 
 // Heartbeats fire every 10s regardless of worker activity, so counting them as
@@ -322,13 +323,13 @@ export class StateStore {
       INSERT INTO tasks(
         id, profile_id, model, prompt, cwd, state, output, error, question,
         parent_task_id, scope_json, grant_id, allow_questions, timeout_ms,
-        effort, session_id, completion_json, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        effort, tldr, session_id, completion_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       task.id, task.profileId, task.model, task.prompt, task.cwd, task.state,
       task.output, task.error ?? null, task.question ?? null, task.parentTaskId ?? null,
       JSON.stringify(task.scope), task.grantId ?? null, task.allowQuestions ? 1 : 0,
-      task.timeoutMs ?? null, task.effort ?? null, task.sessionId ?? null,
+      task.timeoutMs ?? null, task.effort ?? null, task.tldr ?? null, task.sessionId ?? null,
       task.completion ? JSON.stringify(task.completion) : null,
       task.createdAt, task.updatedAt,
     );
@@ -903,6 +904,7 @@ export class StateStore {
       ["cost_usd", "REAL"],
       ["turns", "INTEGER"],
       ["effort", "TEXT"],
+      ["tldr", "TEXT"],
     ] as const) {
       if (!taskColumns.has(column)) {
         this.database.exec(`ALTER TABLE tasks ADD COLUMN ${column} ${type}`);
@@ -1177,6 +1179,7 @@ function taskFromRow(row: TaskRow): Task {
     allowQuestions: row.allow_questions === 1,
     ...(row.timeout_ms ? { timeoutMs: row.timeout_ms } : {}),
     ...(row.effort ? { effort: row.effort } : {}),
+    ...(row.tldr ? { tldr: row.tldr } : {}),
     ...(row.session_id ? { sessionId: row.session_id } : {}),
     ...(row.completion_json
       ? { completion: JSON.parse(row.completion_json) as TaskCompletion }
@@ -1224,6 +1227,7 @@ function taskSummaryFromRow(row: TaskRow): TaskSummary {
     cwd: task.cwd,
     state: task.state,
     promptPreview: task.prompt.replace(/\s+/g, " ").trim().slice(0, 240),
+    ...(task.tldr ? { tldr: task.tldr } : {}),
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
     ...(task.error ? { error: task.error.slice(0, 500) } : {}),

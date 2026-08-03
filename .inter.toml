@@ -7,14 +7,17 @@ version = 1
 #
 # No haiku and no free-tier catalog entries anywhere. Cheapest-wins produced
 # models that answer without thinking, so the floor is sonnet on claude and a
-# gpt-5.6 or kimi elsewhere. Luna leads on codex and opencode-go.
+# deepseek-flash, gpt-5.6, or kimi elsewhere. Deepseek-flash leads on opencode
+# and carries the everyday classes; raise effort rather than reaching for a
+# bigger model when a task in those classes needs more thinking. Kimi stays for
+# advanced reasoning — the build and reasoning classes. Luna leads on codex.
 
 [routes.mechanical]
 preference = "speed"
 min_quality = 3
 allow = [
   { provider = "claude", model = "sonnet" },
-  { provider = "opencode", model = "opencode-go/gpt-5.6-luna" },
+  { provider = "opencode", model = "opencode-go/deepseek-v4-flash" },
   { provider = "codex", model = "gpt-5.6-luna" },
 ]
 
@@ -23,8 +26,7 @@ preference = "balanced"
 min_quality = 4
 allow = [
   { provider = "claude", model = "sonnet" },
-  { provider = "opencode", model = "opencode-go/gpt-5.6-luna" },
-  { provider = "opencode", model = "opencode-go/kimi-k2.7-code" },
+  { provider = "opencode", model = "opencode-go/deepseek-v4-flash" },
   { provider = "codex", model = "gpt-5.6-luna" },
 ]
 
@@ -34,8 +36,7 @@ min_quality = 4
 allow = [
   { provider = "claude", model = "sonnet" },
   { provider = "claude", model = "opus" },
-  { provider = "opencode", model = "opencode-go/gpt-5.6-luna" },
-  { provider = "opencode", model = "opencode-go/kimi-k2.7-code" },
+  { provider = "opencode", model = "opencode-go/deepseek-v4-flash" },
   { provider = "codex", model = "gpt-5.6-luna" },
 ]
 
@@ -45,23 +46,22 @@ min_quality = 5
 allow = [
   { provider = "claude", model = "opus" },
   { provider = "claude", model = "sonnet" },
-  { provider = "opencode", model = "opencode-go/gpt-5.6-luna" },
   { provider = "opencode", model = "opencode-go/kimi-k3" },
   { provider = "codex", model = "gpt-5.6-luna" },
 ]
 
-# Security, architecture, and root-cause work lands here. Kimi is listed first
-# because this class is where provider policy refusals bite hardest on
-# authorized security work, so naming the opencode profile explicitly gets kimi.
-# Automatic routing is score-driven and currently lands on luna, which is both
-# quality 5 and far cheaper. Claude/opus is the fallback whose remaining
-# headroom Inter can actually measure, since opencode reports no usage at all.
+# Security, architecture, and root-cause work lands here, and kimi is the only
+# opencode entry on purpose. Selection is score-driven, not list order: while
+# luna was also listed it won every time on cost, so listing kimi first bought
+# nothing. Leaving kimi alone is what actually routes this class to it. This is
+# also where provider policy refusals bite hardest on authorized security work.
+# Claude/opus is the fallback whose remaining headroom Inter can measure, since
+# opencode reports no usage at all.
 [routes.reasoning]
 preference = "quality"
 min_quality = 5
 allow = [
   { provider = "opencode", model = "opencode-go/kimi-k3" },
-  { provider = "opencode", model = "opencode-go/gpt-5.6-luna" },
   { provider = "claude", model = "opus" },
   { provider = "codex", model = "gpt-5.6-luna" },
 ]

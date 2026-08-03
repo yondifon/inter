@@ -37,6 +37,8 @@ export interface DelegateOptions {
   timeoutMs?: number;
   /** Reasoning effort. Only codex and opencode expose a lever for it. */
   effort?: string;
+  /** Caller's one-line handle for the task, what a human reads instead of the prompt. */
+  tldr?: string;
 }
 
 export interface ResumeOptions {
@@ -224,6 +226,7 @@ async function prepareTask(
     ...(parentTaskId ? { parentTaskId } : {}),
     ...(timeoutMs ? { timeoutMs } : {}),
     ...(options.effort ? { effort: options.effort } : {}),
+    ...(options.tldr ? { tldr: options.tldr } : {}),
   };
   return {
     task,

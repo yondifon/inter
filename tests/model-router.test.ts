@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { chooseModel, classifyTask, routeModel } from "../src/model-router";
+import { chooseModel, classifyTask, modelTraits, routeModel } from "../src/model-router";
 import type { ProfileStatus } from "../src/profile-status";
 import type { RoutingPolicy } from "../src/routing-policy";
 import { closeStateStore, stateStore } from "../src/store";
@@ -444,5 +444,31 @@ allow = [{ provider = "claude", model = "opus" }]
       [],
       buildPolicy,
     )).toThrow("model hint sonnet has no eligible model for build");
+  });
+});
+
+describe("model traits", () => {
+  function traitsFor(id: string) {
+    return modelTraits({
+      id,
+      label: id,
+      provider: "opencode",
+      profileId: "opencode",
+      source: "discovered",
+    });
+  }
+
+  test("a flash name still marks a small tier", () => {
+    expect(traitsFor("opencode-go/gemini-3.6-flash-low").quality).toBe(2);
+    expect(traitsFor("haiku").quality).toBe(2);
+  });
+
+  test("deepseek-v4-flash is an everyday model despite the flash name", () => {
+    // At the name-derived 2 it fell under min_quality for every route class,
+    // so no policy listing could ever select it.
+    const traits = traitsFor("opencode-go/deepseek-v4-flash");
+    expect(traits.quality).toBe(4);
+    // Still genuinely fast; only the quality read was wrong.
+    expect(traits.speed).toBe(5);
   });
 });
