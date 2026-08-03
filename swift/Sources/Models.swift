@@ -64,6 +64,8 @@ struct TaskSnapshot: Codable, Identifiable, Hashable {
     var profileId: String
     var model: String
     var prompt: String
+    /// Short human label, max 60 chars. Absent on tasks predating the field.
+    var title: String? = nil
     var cwd: String
     var state: String
     var createdAt: String
@@ -94,6 +96,17 @@ struct TaskSnapshot: Codable, Identifiable, Hashable {
     /// spends header width on nothing.
     var displayPath: String {
         (cwd as NSString).abbreviatingWithTildeInPath
+    }
+
+    /// The broker's short label when it has one, otherwise the prompt's first
+    /// line. Unlike `TaskOrganizer.heading(for:)` this is not truncated —
+    /// callers rely on `.lineLimit(1)` to clip.
+    var displayLabel: String {
+        let label = title?.trimmingCharacters(in: .whitespaces)
+        guard let label, !label.isEmpty else {
+            return prompt.split(whereSeparator: \.isNewline).first.map(String.init) ?? "Untitled task"
+        }
+        return label
     }
 }
 

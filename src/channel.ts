@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { McpServer } from "@modelcontextprotocol/server";
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
+import { z } from "zod/v4";
 
 // The channel is a Claude Code-only accelerator on top of Inter's portable
 // follow-along (a blocking `wait` call with until: "attention"), not a
@@ -12,10 +13,13 @@ export const CHANNEL_INSTRUCTIONS = [
   "needs_input — the worker asked a question. Answer it directly with Inter's reply tool (task_id in the tag) when the answer is reversible and stays within the task's existing scope, or is a scope expansion you can already justify — reply accepts a scope granting paths with the answer. Do not bounce these to the user.",
   "completed — verify the result before treating the work as done.",
   "failed or blocked — read the reason in the tag, then decide whether to resume the task or re-delegate it.",
+  "cancelled — the task was stopped. No further action needed unless you want to resume it.",
+  "You can act on these yourself with the channel's cancel and resume tools: cancel stops a task you no longer want (even one parked on a question you will not answer), and resume retries a failed, cancelled, or blocked task, optionally with an instruction. No need to ask the user.",
   "Escalate to the user only for product intent, secrets, destructive actions, or authority the user has not already granted.",
 ].join(" ");
 
-const brokerUrl = `http://127.0.0.1:${Number(Bun.env.INTER_PORT ?? 7331)}/api/state`;
+const brokerHost = `http://127.0.0.1:${Number(Bun.env.INTER_PORT ?? 7331)}`;
+const brokerUrl = `${brokerHost}/api/state`;
 const POLL_INTERVAL_MS = 1_000;
 const MAX_BACKOFF_MS = 30_000;
 const DEFAULT_MAX_TRACKED_TASKS = 1_024;
@@ -24,7 +28,7 @@ const DEFAULT_MAX_TRACKED_TASKS = 1_024;
 // `/api/tasks/:id/events` per task: it gives a whole-broker view in one
 // request, needs no prior knowledge of task ids, and survives broker
 // restarts that a per-task cursor would miss.
-export const WORTHY_STATES = new Set(["needs_input", "completed", "failed", "blocked"]);
+export const WORTHY_STATES = new Set(["needs_input", "completed", "failed", "blocked", "cancelled"]);
 
 // The fields of a task the watcher reads to build an event: a structural
 // subset of Task (src/types.ts) so tests need not construct the whole row.
@@ -33,6 +37,8 @@ export interface TaskView {
   profileId: string;
   cwd: string;
   state: string;
+  /** Short label for the task, what a sidebar reads at a glance. */
+  title?: string;
   question?: string;
   error?: string;
   output?: string;
@@ -106,30 +112,36 @@ export function channelEvent(task: TaskView): ChannelEvent {
         state: task.state,
         cwd: task.cwd,
         profile: task.profileId,
+        ...(task.title ? { title: task.title } : {}),
       },
     },
   };
 }
 
 export function eventContent(task: TaskView): string {
-  const { id, cwd } = task;
+  const { id, cwd, title } = task;
+  // The title is the label a human scans for; lead with it and keep the id on
+  // the same line so the message still reads when no title was given.
+  const head = title ? `${title} (${id})` : `Inter task ${id}`;
   switch (task.state) {
     case "needs_input":
       return [
-        `Inter task ${id} needs your input.`,
+        `${head} needs your input.`,
         `question: ${task.question ?? "(no question recorded)"}`,
         `profile: ${task.profileId}`,
         `cwd: ${cwd}`,
         `Answer with Inter's reply tool (task_id: ${id}).`,
       ].join("\n");
     case "completed":
-      return `Inter task ${id} completed.\n${shortOutcome(task)}\ncwd: ${cwd}`;
+      return `${head} completed.\n${shortOutcome(task)}\ncwd: ${cwd}`;
     case "failed":
-      return `Inter task ${id} failed.\n${reasonLine(task)}\ncwd: ${cwd}`;
+      return `${head} failed.\n${reasonLine(task)}\ncwd: ${cwd}`;
     case "blocked":
-      return `Inter task ${id} is blocked.\n${reasonLine(task)}\ncwd: ${cwd}`;
+      return `${head} is blocked.\n${reasonLine(task)}\ncwd: ${cwd}`;
+    case "cancelled":
+      return `${head} was cancelled.\n${reasonLine(task)}\ncwd: ${cwd}`;
     default:
-      return `Inter task ${id} is ${task.state}.`;
+      return `${head} is ${task.state}.`;
   }
 }
 
@@ -174,6 +186,39 @@ async function main(): Promise<void> {
     void pollLoop(mcp, watcher);
   };
 
+  // Claude Code connected via the channel sees only the channel's tools, so
+  // cancel/resume proxy to the broker's HTTP API rather than living broker-side.
+  mcp.registerTool("cancel", {
+    description: "Cancel a delegated Inter task via the broker. Works on queued, running, needs_input, and blocked tasks, so a task parked on a question you do not want to answer is not a dead end. This does not delete the task record.",
+    inputSchema: z.object({
+      taskId: z.string().describe("Inter task id returned by delegate, reply, or resume."),
+      reason: z.string().min(1).max(500).optional()
+        .describe("Stored as the task error and shown to the user. Default: \"cancelled by channel client\"."),
+    }),
+  }, async ({ taskId, reason }) => {
+    const url = `${brokerHost}/api/tasks/${encodeURIComponent(taskId)}?reason=${encodeURIComponent(reason ?? "cancelled by channel client")}`;
+    const response = await fetch(url, { method: "DELETE" });
+    if (!response.ok) throw new Error(`cancel failed: DELETE /api/tasks/${taskId} -> ${response.status}${await errorDetail(response)}`);
+    return result(await response.json());
+  });
+  mcp.registerTool("resume", {
+    description: "Retry a failed, cancelled, or blocked Inter task via the broker, continuing its existing provider session. Optional instruction is given to the worker to continue; omit it to resume as-is.",
+    inputSchema: z.object({
+      taskId: z.string().describe("Inter task id returned by delegate, reply, or resume."),
+      instruction: z.string().min(1).max(64_000).optional()
+        .describe("Instruction for the worker continuing the session. Omit to resume as-is."),
+    }),
+  }, async ({ taskId, instruction }) => {
+    const url = `${brokerHost}/api/tasks/${encodeURIComponent(taskId)}/resume`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: instruction === undefined ? undefined : JSON.stringify({ instruction }),
+    });
+    if (!response.ok) throw new Error(`resume failed: POST /api/tasks/${taskId}/resume -> ${response.status}${await errorDetail(response)}`);
+    return result(await response.json());
+  });
+
   await mcp.connect(new StdioServerTransport());
 }
 
@@ -206,6 +251,19 @@ async function pollLoop(mcp: McpServer, watcher: ChannelWatcher): Promise<void> 
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function result(value: unknown) {
+  return { content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] };
+}
+
+async function errorDetail(response: Response): Promise<string> {
+  try {
+    const body = await response.json() as { error?: string };
+    return body.error ? `: ${body.error}` : "";
+  } catch {
+    return "";
+  }
 }
 
 if (import.meta.main) {

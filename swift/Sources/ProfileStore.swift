@@ -83,6 +83,54 @@ final class ProfileStore {
         }
     }
 
+    /// Stops a task and its worker process tree. The reason is stored as the
+    /// task error; omitted, the broker falls back to its own default.
+    func cancelTask(_ task: TaskSnapshot, reason: String? = nil) async -> Bool {
+        let id = task.id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? task.id
+        var components = URLComponents(url: InterServer.api("tasks/\(id)"), resolvingAgainstBaseURL: false)!
+        if let reason {
+            components.queryItems = [URLQueryItem(name: "reason", value: reason)]
+        }
+        guard let url = components.url else { return false }
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+                self.error = "Couldn’t cancel task"
+                return false
+            }
+            await refresh()
+            return true
+        } catch {
+            self.error = "Couldn’t cancel task"
+            return false
+        }
+    }
+
+    /// Restarts a failed, cancelled, or blocked task in its original session.
+    /// An instruction is handed to the worker at the head of the continued
+    /// session; nil continues exactly where the run stopped.
+    func resumeTask(_ task: TaskSnapshot, instruction: String? = nil) async -> Bool {
+        let id = task.id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? task.id
+        var request = URLRequest(url: InterServer.api("tasks/\(id)/resume"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: instruction.map { ["instruction": $0] } ?? [:])
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            guard (response as? HTTPURLResponse)?.statusCode == 202 else {
+                self.error = "Couldn’t resume task"
+                return false
+            }
+            await refresh()
+            return true
+        } catch {
+            self.error = "Couldn’t resume task"
+            return false
+        }
+    }
+
     /// One project's memories in full. Off the poll: values run to 16k characters
     /// each, so they are read only when a project is on screen.
     func memories(cwd: String) async -> [MemorySnapshot] {

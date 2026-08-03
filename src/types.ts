@@ -112,6 +112,8 @@ export interface Task {
   effort?: string;
   /** Caller's one-line handle for this task, what a human reads instead of the prompt. */
   tldr?: string;
+  /** Short label for this task, what a sidebar reads at a glance. */
+  title?: string;
   sessionId?: string;
   completion?: TaskCompletion;
   attempts?: TaskAttempt[];
@@ -129,6 +131,8 @@ export interface TaskSummary {
   promptPreview: string;
   /** Caller's one-line handle for this task, shown in the app's task list. */
   tldr?: string;
+  /** Short label for this task, shown in the app's sidebar. */
+  title?: string;
   createdAt: string;
   updatedAt: string;
   error?: string;

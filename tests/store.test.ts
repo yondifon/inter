@@ -394,6 +394,42 @@ describe("SQLite state store", () => {
     reopened.close();
   });
 
+  test("round-trips a caller title and leaves it undefined when absent", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const withTitle = { ...task(), title: "Add dark mode" };
+    store.createTask(withTitle);
+    expect(store.getTask(withTitle.id)!.title).toBe("Add dark mode");
+    // The app's task list reads summaries, so the label has to ride them too.
+    expect(store.listTaskSummaries({}).find(({ id }) => id === withTitle.id)?.title)
+      .toBe("Add dark mode");
+
+    // No title stays absent rather than surfacing as an empty string.
+    const withoutTitle = task();
+    store.createTask(withoutTitle);
+    expect(store.getTask(withoutTitle.id)!.title).toBeUndefined();
+    store.close();
+  });
+
+  test("migrates databases without the title column, leaving rows readable", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const saved = { ...task(), title: "Write a README" };
+    store.createTask(saved);
+    expect(store.getTask(saved.id)?.title).toBe("Write a README");
+    store.close();
+
+    // Simulate a database created before the title migration.
+    const raw = new Database(db);
+    raw.exec("ALTER TABLE tasks DROP COLUMN title");
+    raw.close();
+
+    const reopened = new StateStore({ path: db, seedProfiles: [profile] });
+    expect(reopened.getTask(saved.id)).toMatchObject({ id: saved.id, prompt: saved.prompt });
+    expect(reopened.getTask(saved.id)?.title).toBeUndefined();
+    reopened.close();
+  });
+
   test("persists terminal tasks and ordered lifecycle events", () => {
     const { db } = paths();
     const store = new StateStore({ path: db, seedProfiles: [profile] });

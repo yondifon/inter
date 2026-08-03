@@ -42,6 +42,9 @@ struct TaskDetail: View {
     @State private var loadFailed = false
     @State private var showingTechnicalEvents = false
     @State private var showingRunFacts = false
+    @State private var confirmingCancel = false
+    @State private var showingResumeSheet = false
+    @State private var showingActionError = false
     /// Whether activity opens on its newest event. Fixed when the task opens: a
     /// run that lands while it is being read would otherwise yank the trace back
     /// to the top under the reader.
@@ -101,6 +104,25 @@ struct TaskDetail: View {
                 else if eventCursor == 0 { try? await Task.sleep(for: .milliseconds(500)) }
             }
         }
+        // Cancel kills the worker process tree, so it always asks first (EC-004).
+        .confirmationDialog("Cancel this task?", isPresented: $confirmingCancel) {
+            Button("Cancel Task", role: .destructive) {
+                Task { await performCancel() }
+            }
+            Button("Keep Running", role: .cancel) {}
+        } message: {
+            Text("This stops the worker’s process tree. The task can be resumed later.")
+        }
+        // Option-click on Resume opens the instruction sheet; a plain click fires
+        // the task right away (EC-003).
+        .sheet(isPresented: $showingResumeSheet) {
+            ResumeSheet { instruction in
+                Task { await performResume(instruction: instruction) }
+            }
+        }
+        .alert("Couldn’t update the task.", isPresented: $showingActionError) {
+            Button("OK", role: .cancel) {}
+        }
     }
 
     @ViewBuilder private var sectionContent: some View {
@@ -135,7 +157,7 @@ struct TaskDetail: View {
         HStack(spacing: 8) {
             StateMarker(state: state, speaks: !state.wantsLabelBesideName)
                 .help(state.label)
-            Text(task.prompt.components(separatedBy: .newlines).first ?? "Task")
+            Text(task.displayLabel)
                 .scaledFont(.title3, weight: .semibold)
                 .lineLimit(1)
             if state.wantsLabelBesideName {
@@ -164,6 +186,14 @@ struct TaskDetail: View {
                     label: "Copy resume command — \(resumeCommand)",
                     symbol: "arrow.clockwise"
                 )
+            }
+            if canResume {
+                IconButton(symbol: "arrow.clockwise.circle", label: "Resume task") { resumeAction() }
+            }
+            if canCancel {
+                IconButton(symbol: "xmark.circle", label: "Cancel task", tint: AnyShapeStyle(.red)) {
+                    confirmingCancel = true
+                }
             }
             IconButton(symbol: "folder", label: "Open folder") {
                 NSWorkspace.shared.open(URL(fileURLWithPath: task.cwd))
@@ -210,6 +240,38 @@ struct TaskDetail: View {
     private var sessionId: String? {
         let trimmed = task.sessionId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// Cancel preconditions on the broker: the worker is live or about to be.
+    private var canCancel: Bool {
+        [.queued, .running, .needsInput, .blocked].contains(state)
+    }
+
+    /// Resume preconditions on the broker: the run settled without completing.
+    private var canResume: Bool {
+        [.failed, .cancelled, .blocked].contains(state)
+    }
+
+    private func resumeAction() {
+        if NSEvent.modifierFlags.contains(.option) {
+            showingResumeSheet = true
+        } else {
+            Task { await performResume(instruction: nil) }
+        }
+    }
+
+    private func performCancel() async {
+        guard await store.cancelTask(task) else {
+            showingActionError = true
+            return
+        }
+    }
+
+    private func performResume(instruction: String?) async {
+        guard await store.resumeTask(task, instruction: instruction) else {
+            showingActionError = true
+            return
+        }
     }
 
     @ViewBuilder private var eventContent: some View {
@@ -316,6 +378,48 @@ struct TaskDetail: View {
         var known = Set(events.map(\.id))
         events.append(contentsOf: incoming.filter { known.insert($0.id).inserted })
         events.sort { $0.id < $1.id }
+    }
+}
+
+/// Instruction picker for the resume fast path's Option-click: the continued
+/// session opens with the field's text, or as-is when it is left blank.
+private struct ResumeSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var instruction = ""
+    let onResume: (String?) -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Resume task").font(.title3.weight(.semibold))
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button("Resume") {
+                    let value = trimmedInstruction
+                    dismiss()
+                    onResume(value)
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            .padding(20)
+            Divider()
+            TextField("Instruction for the worker (optional)", text: $instruction, axis: .vertical)
+                .lineLimit(3...8)
+                .textFieldStyle(.plain)
+                .padding(20)
+            Text("The worker sees this at the head of the continued session. Leave it blank to continue as-is.")
+                .scaledFont(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 20)
+                .padding(.bottom, 20)
+        }
+        .frame(width: 480)
+        .background(Surface.content)
+    }
+
+    private var trimmedInstruction: String? {
+        let value = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
     }
 }
 

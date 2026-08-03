@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { publicTask, publicTaskSummary, waitTaskView } from "../src/public-task";
+import { publicTask, publicTaskSummary, taskView, TASK_FIELD_GROUPS, waitTaskView } from "../src/public-task";
 import { runCostFrom } from "../src/tasks";
 import type { Task, TaskSummary } from "../src/types";
 
@@ -66,6 +66,157 @@ describe("wait payload", () => {
     expect(waitTaskView(pollingTask({ tldr: "Add dark mode and run the tests" })).tldr)
       .toBe("Add dark mode and run the tests");
     expect(waitTaskView(pollingTask())).not.toHaveProperty("tldr");
+  });
+
+  test("rides the caller's title on every poll and omits it when absent", () => {
+    expect(waitTaskView(pollingTask({ title: "Add dark mode" })).title)
+      .toBe("Add dark mode");
+    expect(waitTaskView(pollingTask())).not.toHaveProperty("title");
+  });
+});
+
+describe("taskView", () => {
+  const now = new Date().toISOString();
+  const full = pollingTask({
+    state: "completed",
+    output: "the result",
+    error: "something went wrong",
+    question: "which file?",
+    parentTaskId: "parent-1",
+    grantId: "grant-1",
+    timeoutMs: 60_000,
+    effort: "xhigh",
+    tldr: "Add dark mode",
+    title: "Dark mode",
+    completion: { blocked: false, code: "completed" },
+    attempts: [{ output: "first", endedAt: now }],
+    costUsd: 1.64,
+    turns: 21,
+    archivedAt: now,
+  });
+
+  test("core is always present", () => {
+    const view = taskView(full, []);
+    expect(view).toHaveProperty("id");
+    expect(view).toHaveProperty("state");
+    expect(view).toHaveProperty("updatedAt");
+    expect(view).toHaveProperty("attemptCount", 1);
+    expect(view).toHaveProperty("archivedAt");
+    expect(view).not.toHaveProperty("sessionId");
+  });
+
+  test("attemptCount absent when there are no attempts", () => {
+    const view = taskView(pollingTask(), []);
+    expect(view).not.toHaveProperty("attemptCount");
+  });
+
+  test("empty fields includes none of the heavy or payload fields", () => {
+    const view = taskView(full, []);
+    expect(Object.keys(view).sort()).toEqual([
+      "archivedAt", "attemptCount", "id", "state", "updatedAt",
+    ]);
+  });
+
+  test("routing group adds its own fields and nothing else", () => {
+    const view = taskView(full, ["routing"]);
+    expect(view).toHaveProperty("profileId", full.profileId);
+    expect(view).toHaveProperty("model", full.model);
+    expect(view).toHaveProperty("cwd", full.cwd);
+    expect(view).toHaveProperty("createdAt");
+    expect(view).toHaveProperty("effort", full.effort);
+    expect(view).not.toHaveProperty("title");
+    expect(view).not.toHaveProperty("prompt");
+    expect(view).not.toHaveProperty("output");
+  });
+
+  test("effort stays absent when the task has none", () => {
+    const view = taskView(pollingTask(), ["routing"]);
+    expect(view).not.toHaveProperty("effort");
+  });
+
+  test("scope group adds its own fields and nothing else", () => {
+    const view = taskView(full, ["scope"]);
+    expect(view).toHaveProperty("scope");
+    expect(view).toHaveProperty("grantId", full.grantId);
+    expect(view).toHaveProperty("allowQuestions");
+    expect(view).toHaveProperty("timeoutMs", full.timeoutMs);
+    expect(view).not.toHaveProperty("prompt");
+    expect(view).not.toHaveProperty("output");
+  });
+
+  test("completion group adds its own fields and nothing else", () => {
+    const view = taskView(full, ["completion"]);
+    expect(view).toHaveProperty("completion");
+    expect(view).toHaveProperty("error", full.error);
+    expect(view).toHaveProperty("question", full.question);
+    expect(view).not.toHaveProperty("prompt");
+    expect(view).not.toHaveProperty("output");
+  });
+
+  test("spend group adds its own fields and nothing else", () => {
+    const view = taskView(full, ["spend"]);
+    expect(view).toHaveProperty("costUsd", full.costUsd);
+    expect(view).toHaveProperty("turns", full.turns);
+    expect(view).not.toHaveProperty("prompt");
+  });
+
+  test("costUsd and turns stay absent when the task has none", () => {
+    const view = taskView(pollingTask(), ["spend"]);
+    expect(view).not.toHaveProperty("costUsd");
+    expect(view).not.toHaveProperty("turns");
+  });
+
+  test("fields replace the default, they do not extend it", () => {
+    const view = taskView(full, ["output"]);
+    expect(view).toHaveProperty("output", full.output);
+    expect(view).not.toHaveProperty("prompt");
+    expect(view).not.toHaveProperty("shippedPrompt");
+    expect(view).not.toHaveProperty("profileId");
+  });
+
+  test('"all" includes prompt, shippedPrompt, output and attempts, omits sessionId', () => {
+    const view = taskView(full, ["all"]);
+    expect(view).toHaveProperty("prompt", full.prompt);
+    expect(view).toHaveProperty("shippedPrompt", full.shippedPrompt);
+    expect(view).toHaveProperty("output", full.output);
+    expect(view).toHaveProperty("attempts");
+    expect(view).not.toHaveProperty("sessionId");
+  });
+
+  test("inspect default includes prompt and output but omits shippedPrompt and attempts", () => {
+    const inspectGroups = Object.keys(TASK_FIELD_GROUPS).filter(
+      (k) => k !== "shippedPrompt" && k !== "attempts",
+    );
+    const view = taskView(full, inspectGroups as Parameters<typeof taskView>[1]);
+    expect(view).toHaveProperty("prompt", full.prompt);
+    expect(view).toHaveProperty("output", full.output);
+    expect(view).not.toHaveProperty("shippedPrompt");
+    expect(view).not.toHaveProperty("attempts");
+  });
+
+  test("absent optional fields stay absent rather than appearing as undefined", () => {
+    const lean = pollingTask({});
+    const view = taskView(lean, ["all"]);
+    expect(view).not.toHaveProperty("error");
+    expect(view).not.toHaveProperty("question");
+    expect(view).not.toHaveProperty("completion");
+    expect(view).not.toHaveProperty("costUsd");
+    expect(view).not.toHaveProperty("turns");
+    expect(view).not.toHaveProperty("effort");
+    expect(view).not.toHaveProperty("tldr");
+    expect(view).not.toHaveProperty("title");
+    expect(view).not.toHaveProperty("parentTaskId");
+    expect(view).not.toHaveProperty("grantId");
+    expect(view).not.toHaveProperty("timeoutMs");
+    expect(view).not.toHaveProperty("archivedAt");
+    expect(view).not.toHaveProperty("attemptCount");
+    expect(view).not.toHaveProperty("sessionId");
+  });
+
+  test("never emits sessionId under any fields value including all", () => {
+    for (const fields of [["routing"] as const, ["all"] as const, [] as const]) {
+      expect(taskView(full, fields)).not.toHaveProperty("sessionId");
+    }
   });
 });
 

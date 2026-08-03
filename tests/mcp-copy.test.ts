@@ -73,4 +73,11 @@ describe("MCP consent copy", () => {
     expect(DELEGATE_DESCRIPTION).toContain("structured markdown");
     expect(DELEGATE_DESCRIPTION).toContain("never one flattened paragraph");
   });
+
+  test("requires a title alongside the tldr and distinguishes them", () => {
+    expect(DELEGATE_DESCRIPTION).toContain("Always pass title");
+    expect(DELEGATE_DESCRIPTION).toContain("max 60 chars");
+    expect(DELEGATE_DESCRIPTION).toContain("readable at a glance in a sidebar");
+    expect(DELEGATE_DESCRIPTION).toContain("title is what you read in the list");
+  });
 });

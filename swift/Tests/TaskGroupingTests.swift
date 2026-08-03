@@ -3,12 +3,13 @@ import XCTest
 @testable import Inter
 
 final class TaskGroupingTests: XCTestCase {
-    private func task(_ id: String, cwd: String, parent: String? = nil, prompt: String = "prompt") -> TaskSnapshot {
+    private func task(_ id: String, cwd: String, parent: String? = nil, prompt: String = "prompt", title: String? = nil) -> TaskSnapshot {
         TaskSnapshot(
             id: id,
             profileId: "worker",
             model: "sonnet",
             prompt: prompt,
+            title: title,
             cwd: cwd,
             state: "completed",
             createdAt: "2026-07-29T10:00:00Z",
@@ -155,6 +156,53 @@ final class TaskGroupingTests: XCTestCase {
         let heading = TaskOrganizer.heading(String(repeating: "delegate ", count: 20))
         XCTAssertLessThanOrEqual(heading.count, 38)
         XCTAssertTrue(heading.hasSuffix("…"))
+    }
+
+    func testTitleWinsOverThePromptFirstLine() {
+        let groups = TaskOrganizer.organize(
+            tasks: [
+                task("root", cwd: inter, prompt: "Build the marketing site\nwith a contact form", title: "Ship the landing page"),
+                task("a", cwd: inter, parent: "root"),
+            ],
+            project: nil,
+            grouping: .parent
+        )
+        XCTAssertEqual(groups[0].title, "Ship the landing page", "the broker's label is the heading when a task has one")
+    }
+
+    func testMissingOrBlankTitleFallsBackToThePromptFirstLine() {
+        let withTitle = TaskOrganizer.organize(
+            tasks: [
+                task("root", cwd: inter, prompt: "Retry the failed build", title: "   "),
+                task("a", cwd: inter, parent: "root"),
+            ],
+            project: nil,
+            grouping: .parent
+        )
+        XCTAssertEqual(withTitle[0].title, "Retry the failed build")
+
+        let untitled = TaskOrganizer.organize(
+            tasks: [
+                task("root", cwd: inter, prompt: "Retry the failed build"),
+                task("a", cwd: inter, parent: "root"),
+            ],
+            project: nil,
+            grouping: .parent
+        )
+        XCTAssertEqual(untitled[0].title, "Retry the failed build")
+    }
+
+    func testDisplayLabelPrefersTheTitle() {
+        let labeled = task("1", cwd: inter, prompt: "Build the marketing site\nwith a contact form", title: "Ship the landing page")
+        XCTAssertEqual(labeled.displayLabel, "Ship the landing page", "the broker's label is the row's label when a task has one")
+    }
+
+    func testDisplayLabelFallsBackToThePromptFirstLine() {
+        let blank = task("1", cwd: inter, prompt: "Retry the failed build", title: "   ")
+        XCTAssertEqual(blank.displayLabel, "Retry the failed build", "a blank title falls back to the prompt's first line")
+
+        let untitled = task("2", cwd: inter, prompt: "Retry the failed build")
+        XCTAssertEqual(untitled.displayLabel, "Retry the failed build", "a missing title falls back to the prompt's first line")
     }
 
     func testCollapsingHidesOnlyTheGroupsRows() {

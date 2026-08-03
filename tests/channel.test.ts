@@ -92,6 +92,19 @@ describe("channel notification shape", () => {
     });
   });
 
+  test("meta carries the title when present and omits it otherwise", () => {
+    expect(channelEvent(task("t1", "completed", { title: "Add dark mode" })).params.meta)
+      .toMatchObject({ title: "Add dark mode" });
+    expect(channelEvent(task("t1", "completed"))).not.toHaveProperty("params.meta.title");
+  });
+
+  test("content leads with the title, and reads without it", () => {
+    const titled = channelEvent(task("t1", "completed", { title: "Add dark mode" }));
+    expect(titled.params.content.startsWith("Add dark mode (t1)")).toBe(true);
+    const untitled = channelEvent(task("t1", "completed"));
+    expect(untitled.params.content.startsWith("Inter task t1 completed.")).toBe(true);
+  });
+
   test("meta keys are identifier-only and values are strings", () => {
     const identifier = /^[A-Za-z0-9_]+$/;
     for (const state of WORTHY_STATES) {

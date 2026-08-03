@@ -2,7 +2,7 @@
 
 Global coding-agent switchboard. Inter runs as a macOS app with a menu-bar item, exposes one
 local MCP endpoint, and delegates bounded work to enabled Claude Code, Codex,
-OpenCode, or Antigravity profiles.
+OpenCode, Antigravity, or Pi profiles.
 
 ## For coding agents
 
@@ -232,7 +232,7 @@ that remain. If a route must use one exact model, list only that model in
 `allow`.
 
 An `allow` entry has `provider` and `model`. Provider IDs are `claude`, `codex`,
-`opencode`, or `antigravity`. Model matching is case-insensitive, uses the full
+`opencode`, `antigravity`, or `pi`. Model matching is case-insensitive, uses the full
 model ID, and supports `*` as an anchored wildcard:
 
 ```toml

@@ -19,6 +19,8 @@ struct ContentView: View {
     @AppStorage("taskGrouping") private var groupingRaw = TaskGrouping.parent.rawValue
     @AppStorage("collapsedTaskGroups") private var collapsedRaw = ""
     @AppStorage("showArchivedTasks") private var showArchivedTasks = false
+    @State private var taskPendingCancel: String?
+    @State private var showingTaskActionError = false
     @Environment(\.uiScale) private var uiScale
 
     var body: some View {
@@ -58,6 +60,16 @@ struct ContentView: View {
                                 )
                                 .tag(SidebarSelection.task(task.id))
                                 .contextMenu {
+                                    if canCancel(task) {
+                                        Button("Cancel Task", systemImage: "xmark.circle", role: .destructive) {
+                                            taskPendingCancel = task.id
+                                        }
+                                    }
+                                    if canResume(task) {
+                                        Button("Resume", systemImage: "arrow.clockwise.circle") {
+                                            Task { await performResume(task) }
+                                        }
+                                    }
                                     Button(showArchivedTasks ? "Restore" : "Archive",
                                            systemImage: showArchivedTasks ? "arrow.uturn.backward" : "archivebox") {
                                         setArchived(task, !showArchivedTasks)
@@ -132,6 +144,26 @@ struct ContentView: View {
         .sheet(item: $editing) { ProfileFormView(store: store, profile: $0) }
         .sheet(isPresented: $showingInstall) { InstallResultsView(results: installResults) }
         .task { store.start() }
+        // Cancel from the context menu always confirms first (EC-004).
+        .confirmationDialog(
+            "Cancel this task?",
+            isPresented: Binding(
+                get: { taskPendingCancel != nil },
+                set: { if !$0 { taskPendingCancel = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: taskPendingCancel
+        ) { id in
+            Button("Cancel Task", role: .destructive) {
+                Task { await performCancel(id) }
+            }
+            Button("Keep Running", role: .cancel) {}
+        } message: { _ in
+            Text("This stops the worker’s process tree. The task can be resumed later.")
+        }
+        .alert("Couldn’t update the task.", isPresented: $showingTaskActionError) {
+            Button("OK", role: .cancel) {}
+        }
         .frame(minWidth: 760, minHeight: 520)
     }
 
@@ -179,6 +211,32 @@ struct ContentView: View {
             let changed = await store.setArchived(task, archived)
             guard changed, selection == .task(task.id) else { return }
             selection = nextID.map(SidebarSelection.task)
+        }
+    }
+
+    /// Context menu entries mirror the detail header's preconditions, so a menu
+    /// never offers an action the broker would reject.
+    private func canCancel(_ task: TaskSnapshot) -> Bool {
+        [.queued, .running, .needsInput, .blocked].contains(TaskState(task.state))
+    }
+
+    private func canResume(_ task: TaskSnapshot) -> Bool {
+        [.failed, .cancelled, .blocked].contains(TaskState(task.state))
+    }
+
+    private func performCancel(_ id: String) async {
+        guard let task = store.tasks.first(where: { $0.id == id }) else { return }
+        guard await store.cancelTask(task) else {
+            showingTaskActionError = true
+            return
+        }
+    }
+
+    /// Fast path only — the detail header carries the instruction sheet.
+    private func performResume(_ task: TaskSnapshot) async {
+        guard await store.resumeTask(task) else {
+            showingTaskActionError = true
+            return
         }
     }
 
@@ -464,7 +522,7 @@ private struct TaskRow: View {
         return parts.joined(separator: " · ")
     }
     private var title: String {
-        task.prompt.split(whereSeparator: \.isNewline).first.map(String.init) ?? "Untitled task"
+        task.displayLabel
     }
 }
 

@@ -90,7 +90,7 @@ enum TaskOrganizer {
         let byID = Dictionary(tasks.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let groups = bucket(tasks) { task in
             let root = self.root(of: task, in: byID)
-            return (root.id, heading(root.prompt))
+            return (root.id, heading(for: root))
         }
         return groups.map { group in
             let solo = group.tasks.count == 1 && group.tasks[0].parentTaskId == nil
@@ -156,6 +156,12 @@ enum TaskOrganizer {
             .trimmingCharacters(in: .whitespaces) ?? prompt
         guard line.count > headingLimit else { return line }
         return "\(line.prefix(headingLimit - 1))…"
+    }
+
+    /// Heading for a group rooted at this task: the broker's short label when
+    /// it has one, otherwise the prompt's first line.
+    static func heading(for task: TaskSnapshot) -> String {
+        heading(task.displayLabel)
     }
 
     /// Keeps keyboard and reading flow after a row leaves the sidebar. Prefer the

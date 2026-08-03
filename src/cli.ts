@@ -29,13 +29,13 @@ import { DELEGATE_DESCRIPTION, MCP_INSTRUCTIONS } from "./mcp-copy";
 import { defaultModelFor } from "./provider-defaults";
 import { normalizeProfile } from "./profile-input";
 import { deleteMemory, getMemory, listMemories, setMemory } from "./memories";
-import { publicTask, publicTaskSummary, waitTaskView } from "./public-task";
+import { publicTaskSummary, taskView, waitTaskView, TASK_FIELD_KEYS, type TaskField } from "./public-task";
 import { mcpWaitBlockMs } from "./mcp-wait";
 import { loadRoutingPolicy } from "./routing-policy";
 
 const port = Number(Bun.env.INTER_PORT ?? 7331);
 const VERSION = "0.6.0";
-const MCP_CONTRACT_VERSION = 19;
+const MCP_CONTRACT_VERSION = 20;
 // A foreground MCP call still owns the caller's agent turn, which is why
 // `until: "attention"` matters: it returns the instant the task needs the
 // caller rather than burning the full block.
@@ -46,6 +46,23 @@ const scopeSchema = z.object({
 const taskStateSchema = z.enum([
   "queued", "running", "needs_input", "answered", "blocked", "completed", "failed", "cancelled",
 ]);
+
+const taskFieldSchema = z.array(z.enum(TASK_FIELD_KEYS)).optional()
+  .describe(
+    "The response shape. Defaults to a small acknowledgement; supplying any `fields` replaces " +
+    "the default, it does not add to it. `[\"all\"]` returns the full record. " +
+    "Heavy groups that cost real context: `prompt`, `shippedPrompt`, `output`, `attempts`.",
+  );
+
+const DEFAULT_DELEGATE_FIELDS: TaskField[] = ["routing", "scope"];
+const DEFAULT_REPLY_FIELDS: TaskField[] = ["routing"];
+const DEFAULT_RESUME_FIELDS: TaskField[] = ["routing"];
+const DEFAULT_CANCEL_FIELDS: TaskField[] = ["completion", "spend"];
+const DEFAULT_ARCHIVE_FIELDS: TaskField[] = [];
+const DEFAULT_INSPECT_FIELDS: TaskField[] = (() => {
+  const excluded = new Set(["shippedPrompt", "attempts", "all"]);
+  return TASK_FIELD_KEYS.filter((k): k is TaskField => !excluded.has(k));
+})();
 
 // Preferred revision is 2026-07-28: stateless, no session pinning, one fresh
 // server per request so dynamic profile tools always reflect current settings.
@@ -213,15 +230,19 @@ Bun.serve({
         scope?: { read: string[]; write: string[] };
         allowQuestions?: boolean;
         timeoutMs?: number;
+        tldr?: string;
+        title?: string;
       };
       try {
         const task = await delegate(body.profile, body.prompt, body.cwd, body.model, body.parent, {
           scope: body.scope,
           allowQuestions: body.allowQuestions,
           timeoutMs: body.timeoutMs,
+          tldr: body.tldr,
+          title: body.title,
         });
         return Response.json(
-          startedTask(task),
+          startedTask(task, DEFAULT_DELEGATE_FIELDS),
           { status: 202 },
         );
       } catch (error) {
@@ -235,7 +256,7 @@ Bun.serve({
         return Response.json({ error: "archived must be a boolean" }, { status: 400 });
       }
       try {
-        return Response.json(publicTask(setTaskArchived(decodeURIComponent(patchTaskId), body.archived)));
+        return Response.json(taskView(setTaskArchived(decodeURIComponent(patchTaskId), body.archived), DEFAULT_ARCHIVE_FIELDS));
       } catch (error) {
         return Response.json({ error: String(error) }, { status: 400 });
       }
@@ -243,10 +264,39 @@ Bun.serve({
     const cancelTaskId = url.pathname.match(/^\/api\/tasks\/([^/]+)$/)?.[1];
     if (cancelTaskId && request.method === "DELETE") {
       try {
-        return Response.json(await cancelTask(
+        return Response.json(taskView(await cancelTask(
           decodeURIComponent(cancelTaskId),
           url.searchParams.get("reason") ?? undefined,
-        ));
+        ), DEFAULT_CANCEL_FIELDS));
+      } catch (error) {
+        return Response.json({ error: String(error) }, { status: 400 });
+      }
+    }
+    const resumeTaskId = url.pathname.match(/^\/api\/tasks\/([^/]+)\/resume$/)?.[1];
+    if (resumeTaskId && request.method === "POST") {
+      const text = await request.text();
+      let body: {
+        instruction?: string;
+        timeoutMs?: number;
+        scope?: { read: string[]; write: string[] };
+        allowQuestions?: boolean;
+      } = {};
+      if (text) {
+        try {
+          body = JSON.parse(text);
+        } catch {
+          return Response.json({ error: "invalid JSON body" }, { status: 400 });
+        }
+      }
+      try {
+        return Response.json(
+          startedTask(await resumeTask(decodeURIComponent(resumeTaskId), body.instruction, {
+            timeoutMs: body.timeoutMs,
+            scope: body.scope,
+            allowQuestions: body.allowQuestions,
+          }), DEFAULT_RESUME_FIELDS),
+          { status: 202 },
+        );
       } catch (error) {
         return Response.json({ error: String(error) }, { status: 400 });
       }
@@ -300,10 +350,17 @@ async function createMcpServer(): Promise<McpServer> {
           "user reads it on the task list, not the prompt. No markdown, no file paths unless they " +
           "are the point.",
         ),
+      title: z.string().min(1).max(60)
+        .describe(
+          "Short imperative label, max 60 chars, what the task does, no markdown, " +
+          "readable at a glance in a sidebar.",
+        ),
       timeoutMs: z.number().int().min(1).max(86_400_000).optional()
         .describe("Hard runtime limit. The task lands in failed with code timeout."),
+      fields: taskFieldSchema,
     }),
-  }, async ({ profile, model, preference, prompt, cwd, parent, scope, allowQuestions, effort, tldr, timeoutMs }) => {
+  }, async ({ profile, model, preference, prompt, cwd, parent, scope, allowQuestions, effort, tldr, title, timeoutMs, fields }) => {
+    const resolvedFields = fields ?? DEFAULT_DELEGATE_FIELDS;
     if (profile) {
       // The caller named the account but not the model. Let the project policy
       // pick that profile's best model for this task class instead of falling
@@ -311,8 +368,8 @@ async function createMcpServer(): Promise<McpServer> {
       const chosen = model ?? await routeModel(prompt, { preference, cwd, profileId: profile })
         .then((route) => route.model)
         .catch(() => undefined);
-      const task = await delegate(profile, prompt, cwd, chosen, parent, { scope, allowQuestions, effort, tldr, timeoutMs });
-      return result({ ...startedTask(task), ...(await warningsFor(cwd, task)) });
+      const task = await delegate(profile, prompt, cwd, chosen, parent, { scope, allowQuestions, effort, tldr, title, timeoutMs });
+      return result({ ...startedTask(task, resolvedFields), ...(await warningsFor(cwd, task)) });
     }
     const selection = await routeModel(prompt, { preference, modelHint: model, cwd });
     const task = await delegate(selection.profileId, prompt, cwd, selection.model, parent, {
@@ -320,9 +377,10 @@ async function createMcpServer(): Promise<McpServer> {
       allowQuestions,
       effort,
       tldr,
+      title,
       timeoutMs,
     });
-    return result({ ...startedTask(task), selection, ...(await warningsFor(cwd, task)) });
+    return result({ ...startedTask(task, resolvedFields), selection, ...(await warningsFor(cwd, task)) });
   });
   server.registerTool("route", {
     description: "Choose a profile and model for a proposed task without starting it. Use before delegate to compare providers by quality, cost, speed, and available rate-limit headroom, especially when the current provider is low on usage.",
@@ -336,14 +394,15 @@ async function createMcpServer(): Promise<McpServer> {
     await routeModel(prompt, { modelHint, preference, cwd }),
   ));
   server.registerTool("inspect", {
-    description: "Get the full snapshot of one delegated task: the caller's prompt, the prompt actually shipped to the provider, output, earlier attempts, scope, grant, and spend. Use after wait reports something worth reading in full.",
+    description: "Get one task's record: prompt, output, scope, grant, spend, and completion. By default the two heaviest fields (shippedPrompt and attempts) are opt-in — pass `fields: [\"shippedPrompt\", \"attempts\"]` to include them. Use after wait reports something worth reading in full.",
     inputSchema: z.object({
       taskId: z.string().describe("Inter task id returned by delegate, reply, or resume."),
+      fields: taskFieldSchema,
     }),
-  }, async ({ taskId }) => {
+  }, async ({ taskId, fields }) => {
     const task = getTask(taskId);
     if (!task) throw new Error(unknownTaskMessage(taskId));
-    return result(publicTask(task));
+    return result(taskView(task, fields ?? DEFAULT_INSPECT_FIELDS));
   });
   server.registerTool("wait", {
     description: "Check one to eight delegated tasks for new progress, a question, or completion. Blocks for real — up to 30s — and until: \"attention\" is the way to follow a task: it returns the moment the task asks a question or reaches a terminal state. Calling it again after it returns empty is the correct way to keep following, not a mistake. Returns a prompt preview rather than the prompt, and full output only once a task has settled; use inspect for everything else. Heartbeats do not count as progress.",
@@ -405,39 +464,43 @@ async function createMcpServer(): Promise<McpServer> {
     return result({ removed: deleteMemory(cwd, key, expectedVersion) });
   });
   server.registerTool("reply", {
-    description: "Answer a question from a task in needs_input state. Pass only its Inter task ID; Inter maps it to the private provider session and returns the same task ID. Optional scope is granted with the answer, replacing the task's scope and becoming the cwd's grant.",
+    description: "Answer a question from a task in needs_input state. Pass only its Inter task ID; Inter maps it to the private provider session and returns the same task ID with routing info. Optional scope is granted with the answer, replacing the task's scope and becoming the cwd's grant. By default a small acknowledgement; pass `fields` to get more.",
     inputSchema: z.object({
       taskId: z.string(),
       answer: z.string().min(1),
       scope: scopeSchema.optional(),
+      fields: taskFieldSchema,
     }),
-  }, async ({ taskId, answer, scope }) => result(startedTask(await reply(taskId, answer, { scope }))));
+  }, async ({ taskId, answer, scope, fields }) => result(startedTask(await reply(taskId, answer, { scope }), fields ?? DEFAULT_REPLY_FIELDS)));
   server.registerTool("resume", {
-    description: "Retry a failed, cancelled, or blocked task. Pass only its Inter task ID; Inter maps it to the private root provider session and returns the same task ID. Optional scope and allowQuestions replace those task settings before continuation; get explicit approval before expanding scope. Use reply instead when the task needs input.",
+    description: "Retry a failed, cancelled, or blocked task. Pass only its Inter task ID; Inter maps it to the private root provider session and returns the same task ID. Optional scope and allowQuestions replace those task settings before continuation; get explicit approval before expanding scope. Use reply instead when the task needs input. By default a small acknowledgement; pass `fields` to get more.",
     inputSchema: z.object({
       taskId: z.string(),
       instruction: z.string().min(1).max(64_000).optional(),
       timeoutMs: z.number().int().min(1).max(86_400_000).optional(),
       scope: scopeSchema.optional(),
       allowQuestions: z.boolean().optional(),
+      fields: taskFieldSchema,
     }),
-  }, async ({ taskId, instruction, timeoutMs, scope, allowQuestions }) =>
-    result(startedTask(await resumeTask(taskId, instruction, { timeoutMs, scope, allowQuestions }))));
+  }, async ({ taskId, instruction, timeoutMs, scope, allowQuestions, fields }) =>
+    result(startedTask(await resumeTask(taskId, instruction, { timeoutMs, scope, allowQuestions }), fields ?? DEFAULT_RESUME_FIELDS)));
   server.registerTool("cancel", {
-    description: "Stop a delegated task and its worker process tree. Works on queued, running, needs_input, and blocked tasks, so a task parked on a question you do not want to answer is not a dead end. This does not delete the task record.",
+    description: "Stop a delegated task and its worker process tree. Works on queued, running, needs_input, and blocked tasks, so a task parked on a question you do not want to answer is not a dead end. This does not delete the task record. By default returns completion and spend; pass `fields` to get more.",
     inputSchema: z.object({
       taskId: z.string(),
       reason: z.string().min(1).max(500).optional()
         .describe("Stored as the task error and shown to the user."),
+      fields: taskFieldSchema,
     }),
-  }, async ({ taskId, reason }) => result(publicTask(await cancelTask(taskId, reason))));
+  }, async ({ taskId, reason, fields }) => result(taskView(await cancelTask(taskId, reason), fields ?? DEFAULT_CANCEL_FIELDS)));
   server.registerTool("archive", {
-    description: "Archive or restore a delegated task without deleting its history. Archived tasks stay addressable by Inter task ID and are hidden from active task lists by default.",
+    description: "Archive or restore a delegated task without deleting its history. Archived tasks stay addressable by Inter task ID and are hidden from active task lists by default. Returns the core acknowledgement (id, state, updatedAt); pass `fields` to get more.",
     inputSchema: z.object({
       taskId: z.string(),
       archived: z.boolean().default(true),
+      fields: taskFieldSchema,
     }),
-  }, async ({ taskId, archived }) => result(publicTask(setTaskArchived(taskId, archived))));
+  }, async ({ taskId, archived, fields }) => result(taskView(setTaskArchived(taskId, archived), fields ?? DEFAULT_ARCHIVE_FIELDS)));
   server.registerTool("profiles", {
     description: "Everything needed to pick a destination: configured provider profiles with their capabilities and default models, plus — on request — their model catalogs, availability, and rate-limit headroom. This is the one capacity read; use route to have Inter choose for you.",
     inputSchema: z.object({
@@ -503,9 +566,9 @@ function result(value: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] };
 }
 
-function startedTask(task: Task) {
+function startedTask(task: Task, fields: readonly TaskField[]) {
   return {
-    ...publicTask(task),
+    ...taskView(task, fields),
     cursor: stateStore().latestTaskEventId([task.id], true),
   };
 }

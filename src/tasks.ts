@@ -40,6 +40,8 @@ export interface DelegateOptions {
   effort?: string;
   /** Caller's one-line handle for the task, what a human reads instead of the prompt. */
   tldr?: string;
+  /** Short label for the task, what a sidebar reads at a glance. */
+  title?: string;
 }
 
 export interface ResumeOptions {
@@ -242,6 +244,7 @@ async function prepareTask(
     ...(timeoutMs ? { timeoutMs } : {}),
     ...(options.effort ? { effort: options.effort } : {}),
     ...(options.tldr ? { tldr: options.tldr } : {}),
+    ...(options.title ? { title: options.title } : {}),
   };
   return {
     task,
