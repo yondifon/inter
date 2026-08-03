@@ -1,8 +1,8 @@
 import type { Task, TaskState, TaskSummary } from "./types";
 
 export const TASK_FIELD_GROUPS = {
-  routing: ["profileId", "model", "cwd", "createdAt", "effort"],
-  labels: ["title", "tldr", "parentTaskId"],
+  routing: ["profileId", "model", "effort"],
+  context: ["cwd", "createdAt", "updatedAt", "title", "tldr", "parentTaskId"],
   scope: ["scope", "grantId", "allowQuestions", "timeoutMs"],
   prompt: ["prompt"],
   shippedPrompt: ["shippedPrompt"],
@@ -26,14 +26,14 @@ export function publicTaskSummary(task: TaskSummary): Omit<TaskSummary, "session
 }
 
 /**
- * Return what a caller asked for, and nothing else. The default is a small
- * acknowledgement — id, state, updatedAt, and attemptCount when there are
- * attempts — because most callers already have the data they just sent.
- * Pass {@link TaskField} groups to pull in the parts the caller genuinely needs.
- * `"all"` expands to every group. Never emits `sessionId`.
+ * Return what a caller asked for, and nothing else. The floor is id, state,
+ * plus attemptCount when there are prior attempts and archivedAt when set.
+ * Most callers already have the data they just sent, which is why the floor is
+ * so bare. Pass {@link TaskField} groups to pull in the parts the caller
+ * genuinely needs. `"all"` expands to every group. Never emits `sessionId`.
  */
-export function taskView(task: Task, fields: readonly TaskField[]): object {
-  const groups = fields.includes("all" as TaskField)
+export function taskView(task: Task, fields: readonly TaskField[]): Record<string, unknown> {
+  const groups = fields.includes("all")
     ? Object.keys(TASK_FIELD_GROUPS)
     : fields;
   const want = new Set(groups.flatMap((g) => (TASK_FIELD_GROUPS as Record<string, readonly string[]>)[g] ?? []));
@@ -41,7 +41,6 @@ export function taskView(task: Task, fields: readonly TaskField[]): object {
   return {
     id: task.id,
     state: task.state,
-    updatedAt: task.updatedAt,
     // attemptCount is always on — it is a number, and it tells the caller there
     // is an attempts group worth asking for.
     ...(task.attempts?.length ? { attemptCount: task.attempts.length } : {}),
@@ -50,11 +49,12 @@ export function taskView(task: Task, fields: readonly TaskField[]): object {
     // routing
     ...(want.has("profileId") ? { profileId: task.profileId } : {}),
     ...(want.has("model") ? { model: task.model } : {}),
-    ...(want.has("cwd") ? { cwd: task.cwd } : {}),
-    ...(want.has("createdAt") ? { createdAt: task.createdAt } : {}),
     ...(want.has("effort") && task.effort ? { effort: task.effort } : {}),
 
-    // labels
+    // context
+    ...(want.has("cwd") ? { cwd: task.cwd } : {}),
+    ...(want.has("createdAt") ? { createdAt: task.createdAt } : {}),
+    ...(want.has("updatedAt") ? { updatedAt: task.updatedAt } : {}),
     ...(want.has("title") && task.title ? { title: task.title } : {}),
     ...(want.has("tldr") && task.tldr ? { tldr: task.tldr } : {}),
     ...(want.has("parentTaskId") && task.parentTaskId ? { parentTaskId: task.parentTaskId } : {}),

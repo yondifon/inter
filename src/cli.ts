@@ -54,13 +54,13 @@ const taskFieldSchema = z.array(z.enum(TASK_FIELD_KEYS)).optional()
     "Heavy groups that cost real context: `prompt`, `shippedPrompt`, `output`, `attempts`.",
   );
 
-const DEFAULT_DELEGATE_FIELDS: TaskField[] = ["routing", "scope"];
-const DEFAULT_REPLY_FIELDS: TaskField[] = ["routing"];
-const DEFAULT_RESUME_FIELDS: TaskField[] = ["routing"];
-const DEFAULT_CANCEL_FIELDS: TaskField[] = ["completion", "spend"];
+const DEFAULT_DELEGATE_FIELDS: TaskField[] = ["routing"];
+const DEFAULT_REPLY_FIELDS: TaskField[] = [];
+const DEFAULT_RESUME_FIELDS: TaskField[] = [];
+const DEFAULT_CANCEL_FIELDS: TaskField[] = [];
 const DEFAULT_ARCHIVE_FIELDS: TaskField[] = [];
 const DEFAULT_INSPECT_FIELDS: TaskField[] = (() => {
-  const excluded = new Set(["shippedPrompt", "attempts", "all"]);
+  const excluded = new Set(["prompt", "shippedPrompt", "attempts", "all"]);
   return TASK_FIELD_KEYS.filter((k): k is TaskField => !excluded.has(k));
 })();
 
@@ -394,7 +394,7 @@ async function createMcpServer(): Promise<McpServer> {
     await routeModel(prompt, { modelHint, preference, cwd }),
   ));
   server.registerTool("inspect", {
-    description: "Get one task's record: prompt, output, scope, grant, spend, and completion. By default the two heaviest fields (shippedPrompt and attempts) are opt-in — pass `fields: [\"shippedPrompt\", \"attempts\"]` to include them. Use after wait reports something worth reading in full.",
+    description: "Get one task's record: output, scope, grant, spend, and completion. By default the three heaviest fields (prompt, shippedPrompt and attempts) are opt-in — pass `fields: [\"all\"]` for the full snapshot. Use after wait reports something worth reading in full.",
     inputSchema: z.object({
       taskId: z.string().describe("Inter task id returned by delegate, reply, or resume."),
       fields: taskFieldSchema,
@@ -464,7 +464,7 @@ async function createMcpServer(): Promise<McpServer> {
     return result({ removed: deleteMemory(cwd, key, expectedVersion) });
   });
   server.registerTool("reply", {
-    description: "Answer a question from a task in needs_input state. Pass only its Inter task ID; Inter maps it to the private provider session and returns the same task ID with routing info. Optional scope is granted with the answer, replacing the task's scope and becoming the cwd's grant. By default a small acknowledgement; pass `fields` to get more.",
+    description: "Answer a question from a task in needs_input state. Pass only its Inter task ID; Inter maps it to the private provider session and returns the same task ID. Optional scope is granted with the answer, replacing the task's scope and becoming the cwd's grant. By default a small acknowledgement; pass `fields` to get more.",
     inputSchema: z.object({
       taskId: z.string(),
       answer: z.string().min(1),
@@ -485,7 +485,7 @@ async function createMcpServer(): Promise<McpServer> {
   }, async ({ taskId, instruction, timeoutMs, scope, allowQuestions, fields }) =>
     result(startedTask(await resumeTask(taskId, instruction, { timeoutMs, scope, allowQuestions }), fields ?? DEFAULT_RESUME_FIELDS)));
   server.registerTool("cancel", {
-    description: "Stop a delegated task and its worker process tree. Works on queued, running, needs_input, and blocked tasks, so a task parked on a question you do not want to answer is not a dead end. This does not delete the task record. By default returns completion and spend; pass `fields` to get more.",
+    description: "Stop a delegated task and its worker process tree. Works on queued, running, needs_input, and blocked tasks, so a task parked on a question you do not want to answer is not a dead end. This does not delete the task record. By default a small acknowledgement; pass `fields` to get more.",
     inputSchema: z.object({
       taskId: z.string(),
       reason: z.string().min(1).max(500).optional()
@@ -494,7 +494,7 @@ async function createMcpServer(): Promise<McpServer> {
     }),
   }, async ({ taskId, reason, fields }) => result(taskView(await cancelTask(taskId, reason), fields ?? DEFAULT_CANCEL_FIELDS)));
   server.registerTool("archive", {
-    description: "Archive or restore a delegated task without deleting its history. Archived tasks stay addressable by Inter task ID and are hidden from active task lists by default. Returns the core acknowledgement (id, state, updatedAt); pass `fields` to get more.",
+    description: "Archive or restore a delegated task without deleting its history. Archived tasks stay addressable by Inter task ID and are hidden from active task lists by default. Returns the core acknowledgement (id, state); pass `fields` to get more.",
     inputSchema: z.object({
       taskId: z.string(),
       archived: z.boolean().default(true),

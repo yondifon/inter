@@ -99,10 +99,10 @@ describe("taskView", () => {
     const view = taskView(full, []);
     expect(view).toHaveProperty("id");
     expect(view).toHaveProperty("state");
-    expect(view).toHaveProperty("updatedAt");
     expect(view).toHaveProperty("attemptCount", 1);
     expect(view).toHaveProperty("archivedAt");
     expect(view).not.toHaveProperty("sessionId");
+    expect(view).not.toHaveProperty("updatedAt");
   });
 
   test("attemptCount absent when there are no attempts", () => {
@@ -113,17 +113,23 @@ describe("taskView", () => {
   test("empty fields includes none of the heavy or payload fields", () => {
     const view = taskView(full, []);
     expect(Object.keys(view).sort()).toEqual([
-      "archivedAt", "attemptCount", "id", "state", "updatedAt",
+      "archivedAt", "attemptCount", "id", "state",
     ]);
+  });
+
+  test("floor is exactly {id, state} when a task has no attempts and no archivedAt", () => {
+    const lean = pollingTask({});
+    const view = taskView(lean, []);
+    expect(Object.keys(view).sort()).toEqual(["id", "state"]);
   });
 
   test("routing group adds its own fields and nothing else", () => {
     const view = taskView(full, ["routing"]);
     expect(view).toHaveProperty("profileId", full.profileId);
     expect(view).toHaveProperty("model", full.model);
-    expect(view).toHaveProperty("cwd", full.cwd);
-    expect(view).toHaveProperty("createdAt");
     expect(view).toHaveProperty("effort", full.effort);
+    expect(view).not.toHaveProperty("cwd");
+    expect(view).not.toHaveProperty("createdAt");
     expect(view).not.toHaveProperty("title");
     expect(view).not.toHaveProperty("prompt");
     expect(view).not.toHaveProperty("output");
@@ -183,12 +189,12 @@ describe("taskView", () => {
     expect(view).not.toHaveProperty("sessionId");
   });
 
-  test("inspect default includes prompt and output but omits shippedPrompt and attempts", () => {
+  test("inspect default includes output and scope but omits prompt, shippedPrompt and attempts", () => {
     const inspectGroups = Object.keys(TASK_FIELD_GROUPS).filter(
-      (k) => k !== "shippedPrompt" && k !== "attempts",
+      (k) => k !== "prompt" && k !== "shippedPrompt" && k !== "attempts",
     );
     const view = taskView(full, inspectGroups as Parameters<typeof taskView>[1]);
-    expect(view).toHaveProperty("prompt", full.prompt);
+    expect(view).not.toHaveProperty("prompt");
     expect(view).toHaveProperty("output", full.output);
     expect(view).not.toHaveProperty("shippedPrompt");
     expect(view).not.toHaveProperty("attempts");
