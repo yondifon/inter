@@ -112,63 +112,59 @@ export function taskView(task: Task, fields: readonly TaskField[]): TaskFieldVie
   };
 }
 
-export interface WaitTaskView {
-  id: string;
-  profileId: string;
-  model: string;
-  cwd: string;
-  state: TaskState;
-  promptPreview: string;
-  /** Caller's own one-line handle; a human scans the list by it, unlike the prompt text. */
-  tldr?: string;
-  /** Short label for the task, what a sidebar reads at a glance. */
-  title?: string;
-  createdAt: string;
-  updatedAt: string;
-  error?: string;
-  question?: string;
-  parentTaskId?: string;
-  grantId?: string;
-  completion?: Task["completion"];
-  costUsd?: number;
-  turns?: number;
-  attemptCount?: number;
-  archivedAt?: string;
-  output?: string;
-}
+/**
+ * `wait` is the one tool a caller runs in a loop, so its default is the moving
+ * half of a task and nothing else: completion tells it how the run ended, spend
+ * tells it what that cost, and `updatedAt` is the clock. Everything static —
+ * profile, model, cwd, prompt, title — is the same on the tenth poll as on the
+ * first, so it comes only when `fields` asks for it.
+ */
+const WAIT_DEFAULT_FIELDS: readonly TaskField[] = ["completion", "spend"];
 
 /**
- * What a polling caller needs, and nothing it already has. `wait` may be called
- * many times against the same task, so echoing the prompt back on every poll
- * burns the caller's context to repeat what it wrote. The full text stays one
- * `inspect` away; output rides along only once the run has something final to
- * say, which is the point at which the caller stops polling anyway.
+ * What a polling caller needs, and nothing it already has. Passing `fields`
+ * replaces this default the same way it does on every other tool — including
+ * `["output"]`, which is how a caller reads a finished run without a second
+ * `inspect` call.
  */
-export function waitTaskView(task: Task): WaitTaskView {
-  return {
-    id: task.id,
-    profileId: task.profileId,
-    model: task.model,
-    cwd: task.cwd,
-    state: task.state,
-    promptPreview: preview(task.prompt),
-    // The caller's own tldr rides every poll: it is short, and it is the label
-    // the human scans for — unlike the prompt, which stays on inspect.
-    ...(task.tldr ? { tldr: task.tldr } : {}),
-    ...(task.title ? { title: task.title } : {}),
-    createdAt: task.createdAt,
-    updatedAt: task.updatedAt,
-    ...(task.error ? { error: task.error } : {}),
-    ...(task.question ? { question: task.question } : {}),
-    ...(task.parentTaskId ? { parentTaskId: task.parentTaskId } : {}),
-    ...(task.grantId ? { grantId: task.grantId } : {}),
-    ...(task.completion ? { completion: task.completion } : {}),
-    ...(task.costUsd === undefined ? {} : { costUsd: task.costUsd }),
-    ...(task.turns === undefined ? {} : { turns: task.turns }),
-    ...(task.attempts?.length ? { attemptCount: task.attempts.length } : {}),
-    ...(task.archivedAt ? { archivedAt: task.archivedAt } : {}),
-    ...(settled(task.state) && task.output ? { output: task.output } : {}),
-  };
+export function waitTaskView(task: Task, fields?: readonly TaskField[]): TaskFieldView {
+  if (fields) return taskView(task, fields);
+  // `updatedAt` is the only member of `context` that moves, and the group is
+  // all-or-nothing, so it is added rather than selected.
+  return { ...taskView(task, WAIT_DEFAULT_FIELDS), updatedAt: task.updatedAt };
+}
+
+/** One task's slice of the event stream, with the association hoisted out of the rows. */
+export interface WaitEventGroup {
+  taskId: string;
+  events: Array<{ id: number; type: string; at: string; summary: string }>;
+}
+
+/** A summary is a line in a trace, not a transcript; a thinking block is neither. */
+const MAX_EVENT_SUMMARY = 160;
+
+/**
+ * Fold the flat event list onto its tasks. Every row used to restate `taskId`
+ * and `state` — up to a hundred times per call, for a set of at most eight
+ * tasks — so the association moves to the group and the per-task state stays
+ * where it belongs, on the task. Nothing is lost: the group key names the task,
+ * and `id` still orders the rows and feeds the cursor.
+ */
+export function waitEventsView(
+  events: ReadonlyArray<{ id: number; taskId: string; type: string; at: string; summary: string }>,
+): WaitEventGroup[] {
+  const groups = new Map<string, WaitEventGroup>();
+  for (const event of events) {
+    let group = groups.get(event.taskId);
+    if (!group) groups.set(event.taskId, group = { taskId: event.taskId, events: [] });
+    group.events.push({
+      id: event.id,
+      type: event.type,
+      at: event.at,
+      summary: preview(event.summary, MAX_EVENT_SUMMARY),
+    });
+  }
+  return [...groups.values()];
 }
 
 export function settled(state: TaskState): boolean {
@@ -176,6 +172,6 @@ export function settled(state: TaskState): boolean {
     state === "blocked" || state === "needs_input";
 }
 
-function preview(prompt: string): string {
-  return prompt.replace(/\s+/g, " ").trim().slice(0, 240);
+function preview(text: string, max = 240): string {
+  return text.replace(/\s+/g, " ").trim().slice(0, max);
 }

@@ -1,8 +1,8 @@
 # Response shape (`fields`)
 
-Seven MCP tools (`delegate`, `reply`, `resume`, `handoff`, `cancel`, `archive`, `inspect`)
-accept a `fields` selector that controls which parts of the task record come
-back in the response. The rule is *small by default*: a real `cancel` response
+Eight MCP tools (`delegate`, `reply`, `resume`, `handoff`, `cancel`, `archive`,
+`inspect`, `wait`) accept a `fields` selector that controls which parts of the
+task record come back in the response. The rule is *small by default*: a real `cancel` response
 once spent 18,000 characters to say `state: "cancelled"`, and one `shippedPrompt`
 peaked at 35,405 characters. The caller already wrote the prompt — it should not
 pay to get it back unless it asks.
@@ -25,6 +25,12 @@ present.
 | `cancel` | `[]` | `id`, `state` |
 | `archive` | `[]` | `id`, `state`, `archivedAt` |
 | `inspect` | everything except `prompt`, `shippedPrompt`, `attempts` | the record minus the three heaviest fields |
+| `wait` | `["completion", "spend"]` plus `updatedAt` | `id`, `state`, `updatedAt`, `completion`, `error`, `question`, `costUsd`, `turns` |
+
+`wait` is the one tool called in a loop, so its default is the moving half of a
+task and nothing else — see [follow-along.md](follow-along.md). `updatedAt` is
+added rather than selected because it is the only member of `context` that
+moves and the group is all-or-nothing.
 
 ## `fields` replaces the default
 

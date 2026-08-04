@@ -29,16 +29,28 @@ import { DELEGATE_DESCRIPTION, HANDOFF_DESCRIPTION, MCP_INSTRUCTIONS } from "./m
 import { defaultModelFor } from "./provider-defaults";
 import { normalizeProfile } from "./profile-input";
 import { deleteMemory, getMemory, listMemories, setMemory } from "./memories";
-import { publicTaskSummary, taskView, waitTaskView, settled, TASK_FIELD_KEYS, type TaskField } from "./public-task";
+import { publicTaskSummary, taskView, waitEventsView, waitTaskView, settled, TASK_FIELD_KEYS, type TaskField } from "./public-task";
 import { mcpWaitBlockMs } from "./mcp-wait";
 import { loadRoutingPolicy } from "./routing-policy";
+import { runWatch } from "./watch";
 
 const port = Number(Bun.env.INTER_PORT ?? 7331);
 const VERSION = "0.6.0";
 const MCP_CONTRACT_VERSION = 21;
+
+// `watch` is the one invocation that is not the broker. It reads the same
+// SQLite store the broker writes, rather than calling the broker over HTTP, so
+// a caller holding a task id gets an answer even when nothing is listening on
+// the port — and the deadline belongs to the process, not to a request. It must
+// therefore claim the process before Bun.serve binds anything.
+if (process.argv[2] === "watch") {
+  process.exit(await runWatch(process.argv.slice(3)));
+}
+
 // A foreground MCP call still owns the caller's agent turn, which is why
 // `until: "attention"` matters: it returns the instant the task needs the
-// caller rather than burning the full block.
+// caller rather than burning the full block. `inter watch` is the way out of
+// that trade entirely — a backgrounded process owns no turn at all.
 const scopeSchema = z.object({
   read: z.array(z.string()).max(200),
   write: z.array(z.string()).max(200),
@@ -441,7 +453,7 @@ async function createMcpServer(): Promise<McpServer> {
     return result(taskView(task, fields ?? DEFAULT_INSPECT_FIELDS));
   });
   server.registerTool("wait", {
-    description: "Check one to eight delegated tasks for new progress, a question, or completion. Blocks for real — up to 30s — and until: \"attention\" is the way to follow a task: it returns the moment the task asks a question or reaches a terminal state. Calling it again after it returns empty is the correct way to keep following, not a mistake. Returns a prompt preview rather than the prompt, and full output only once a task has settled; use inspect for everything else. Heartbeats do not count as progress.",
+    description: "Check one to eight delegated tasks for new progress, a question, or completion. Blocks for real — up to 30s — and until: \"attention\" is the way to follow a task: it returns the moment the task asks a question or reaches a terminal state. Calling it again after it returns empty is the correct way to keep following, not a mistake. Returns only what moves — state, updatedAt, and how the run ended; pass `fields: [\"output\"]` to read a finished run without a second call. To follow a task without spending a turn on it at all, background the `inter watch <taskId>` command instead. Heartbeats do not count as progress.",
     inputSchema: z.object({
       taskIds: z.array(z.string()).min(1).max(8)
         .describe("Inter task ids to check together."),
@@ -453,8 +465,9 @@ async function createMcpServer(): Promise<McpServer> {
         ),
       until: z.enum(["progress", "attention"]).default("progress")
         .describe("progress returns on any new event; attention returns only on a question or a terminal state."),
+      fields: taskFieldSchema,
     }),
-  }, async ({ taskIds, timeoutMs, afterCursor, until }, extra) => {
+  }, async ({ taskIds, timeoutMs, afterCursor, until, fields }, extra) => {
     const waited = await waitForTasks(
       taskIds,
       mcpWaitBlockMs(timeoutMs),
@@ -462,7 +475,11 @@ async function createMcpServer(): Promise<McpServer> {
       afterCursor,
       until,
     );
-    return result({ ...waited, tasks: waited.tasks.map(waitTaskView) });
+    return result({
+      ...waited,
+      tasks: waited.tasks.map((task) => waitTaskView(task, fields)),
+      ...(waited.events ? { events: waitEventsView(waited.events) } : {}),
+    });
   });
   server.registerTool("health", {
     description: "Check whether the Inter broker is running and read its broker and MCP contract versions. Use for connection or compatibility diagnosis, not worker availability.",

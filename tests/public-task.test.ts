@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { publicTaskSummary, taskView, TASK_FIELD_GROUPS, waitTaskView } from "../src/public-task";
+import { publicTaskSummary, taskView, TASK_FIELD_GROUPS, waitEventsView, waitTaskView } from "../src/public-task";
 import { runCostFrom } from "../src/tasks";
 import type { Task, TaskSummary } from "../src/types";
 
@@ -24,36 +24,60 @@ function pollingTask(overrides: Partial<Task> = {}): Task {
 }
 
 describe("wait payload", () => {
-  test("never echoes the prompt back to the caller who wrote it", () => {
-    const view = waitTaskView(pollingTask());
+  // The floor, pinned the same way taskView(task, []) is: wait is the one tool
+  // called in a loop, so anything that does not move between two calls has to
+  // be asked for. Widening this set is a contract change, not a tidy-up.
+  test("the default is the moving half of the task and nothing else", () => {
+    const view = waitTaskView(pollingTask({
+      title: "Add dark mode",
+      tldr: "Add dark mode and run the tests",
+      grantId: "grant-1",
+      parentTaskId: "task-0",
+    }));
 
-    // wait gets polled repeatedly; repeating a 4k prompt each time is pure cost.
-    expect(view).not.toHaveProperty("prompt");
-    expect(view).not.toHaveProperty("shippedPrompt");
-    expect(view.promptPreview.length).toBeLessThanOrEqual(240);
-    expect(JSON.stringify(view).length).toBeLessThan(1_000);
+    expect(Object.keys(view).sort()).toEqual(["id", "state", "updatedAt"]);
   });
 
-  test("withholds output while running and delivers it once settled", () => {
-    expect(waitTaskView(pollingTask({ state: "running", output: "half done" })).output)
-      .toBeUndefined();
+  test("adds only what moved, when it is there to report", () => {
+    const view = waitTaskView(pollingTask({
+      state: "needs_input",
+      question: "Which database?",
+      error: "the first attempt timed out",
+      completion: { code: "unverified", blocked: false },
+      costUsd: 1.64,
+      turns: 21,
+    }));
 
-    for (const state of ["completed", "failed", "cancelled", "blocked", "needs_input"] as const) {
-      expect(waitTaskView(pollingTask({ state, output: "the answer" })).output).toBe("the answer");
+    expect(Object.keys(view).sort()).toEqual([
+      "completion", "costUsd", "error", "id", "question", "state", "turns", "updatedAt",
+    ]);
+  });
+
+  test("never echoes back what the caller wrote, at any state", () => {
+    for (const state of ["running", "completed", "failed", "cancelled", "blocked", "needs_input"] as const) {
+      const view = waitTaskView(pollingTask({ state, output: "the answer" }));
+      expect(view).not.toHaveProperty("prompt");
+      expect(view).not.toHaveProperty("shippedPrompt");
+      // Output used to ride every settled task. One real wait response came back
+      // at 276,560 characters because of it; `fields: ["output"]` asks for it.
+      expect(view).not.toHaveProperty("output");
+      expect(JSON.stringify(view).length).toBeLessThan(300);
     }
   });
 
-  test("carries spend, grant and attempt count without the attempt bodies", () => {
+  test("fields replaces the default, the way it does on every other tool", () => {
+    expect(waitTaskView(pollingTask({ state: "completed", output: "the answer" }), ["output"]))
+      .toEqual({ id: "task-1", state: "completed", output: "the answer" });
+    expect(waitTaskView(pollingTask(), ["routing"]))
+      .toEqual({ id: "task-1", state: "running", profileId: "claude-work", model: "opus" });
+  });
+
+  test("attempt count still rides the floor without the attempt bodies", () => {
     const view = waitTaskView(pollingTask({
-      state: "completed",
-      output: "done",
-      costUsd: 1.64,
-      turns: 21,
-      grantId: "grant-1",
       attempts: [{ output: "first try", endedAt: new Date().toISOString() }],
     }));
 
-    expect(view).toMatchObject({ costUsd: 1.64, turns: 21, grantId: "grant-1", attemptCount: 1 });
+    expect(view).toMatchObject({ attemptCount: 1 });
     expect(view).not.toHaveProperty("attempts");
   });
 
@@ -61,17 +85,42 @@ describe("wait payload", () => {
     expect(waitTaskView(pollingTask())).not.toHaveProperty("sessionId");
     expect(taskView(pollingTask(), ["shippedPrompt"]).shippedPrompt).toBeDefined();
   });
+});
 
-  test("rides the caller's tldr on every poll and omits it when absent", () => {
-    expect(waitTaskView(pollingTask({ tldr: "Add dark mode and run the tests" })).tldr)
-      .toBe("Add dark mode and run the tests");
-    expect(waitTaskView(pollingTask())).not.toHaveProperty("tldr");
+describe("wait events", () => {
+  const rows = [
+    { id: 1, taskId: "task-1", type: "agent.tool", state: "running" as const, at: "t1", summary: "Read src/store.ts" },
+    { id: 2, taskId: "task-2", type: "agent.tool", state: "running" as const, at: "t2", summary: "Edit src/cli.ts" },
+    { id: 3, taskId: "task-1", type: "completed", state: "completed" as const, at: "t3", summary: "Done" },
+  ];
+
+  test("hoists the association onto the group instead of stamping every row", () => {
+    const groups = waitEventsView(rows);
+
+    expect(groups).toEqual([
+      {
+        taskId: "task-1",
+        events: [
+          { id: 1, type: "agent.tool", at: "t1", summary: "Read src/store.ts" },
+          { id: 3, type: "completed", at: "t3", summary: "Done" },
+        ],
+      },
+      {
+        taskId: "task-2",
+        events: [{ id: 2, type: "agent.tool", at: "t2", summary: "Edit src/cli.ts" }],
+      },
+    ]);
+    // The state a row was written in is the task's, and the task carries it.
+    for (const group of groups) for (const event of group.events) {
+      expect(event).not.toHaveProperty("state");
+      expect(event).not.toHaveProperty("taskId");
+    }
   });
 
-  test("rides the caller's title on every poll and omits it when absent", () => {
-    expect(waitTaskView(pollingTask({ title: "Add dark mode" })).title)
-      .toBe("Add dark mode");
-    expect(waitTaskView(pollingTask())).not.toHaveProperty("title");
+  test("a summary stays a trace line, not a transcript", () => {
+    const [group] = waitEventsView([{ ...rows[0]!, summary: `thinking\n${"a".repeat(500)}` }]);
+
+    expect(group!.events[0]!.summary).toBe(`thinking ${"a".repeat(151)}`);
   });
 });
 

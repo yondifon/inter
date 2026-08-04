@@ -86,6 +86,14 @@ export interface TaskEvent {
 export interface StateStoreOptions {
   path?: string;
   seedProfiles?: Profile[];
+  /**
+   * Open without claiming the broker's startup duties. Seeding and interrupted-
+   * task recovery both assume the opener is the process that owns the running
+   * workers; a second process that merely reads — `inter watch` — would
+   * otherwise fail every queued and running task the live broker is still
+   * driving, which is the opposite of watching them.
+   */
+  observe?: boolean;
 }
 
 export interface TaskListQuery {
@@ -128,6 +136,7 @@ export class StateStore {
         VALUES (5, 'backfill task worker session ids')
       `).run();
     }
+    if (options.observe) return;
     // Passed as a thunk: seeding happens once, but the argument would be
     // evaluated on every start, and discovery reads the home directory.
     this.seed(() => options.seedProfiles ?? discoverProfiles());
@@ -968,6 +977,15 @@ let sharedStore: StateStore | undefined;
 
 export function stateStore(): StateStore {
   return sharedStore ??= new StateStore();
+}
+
+/**
+ * Claim the shared store as a reader before anything opens it as the broker.
+ * A no-op once the store is open, so a caller already running inside the broker
+ * keeps the broker's store.
+ */
+export function observeStateStore(): StateStore {
+  return sharedStore ??= new StateStore({ observe: true });
 }
 
 export function closeStateStore(): void {
