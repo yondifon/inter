@@ -10,6 +10,14 @@ export const MCP_INSTRUCTIONS = [
   "Answer a worker's reversible in-scope questions yourself; bring product intent, secrets, destructive actions, and requests for new authority to the user.",
 ].join(" ");
 
+export const COMPLETE_DESCRIPTION = [
+  "Mark a blocked or failed task completed on the caller's word that the work demonstrably landed, when the worker never attested its own completion.",
+  "Use this only after you checked the deliverable yourself: the worker's unverified completion survives untouched on the record, and this override permanently and visibly carries who asserted it, why, and the code it replaced — an asserted completion stays distinguishable from a verified one.",
+  "The reason is required and must be non-empty; there are no silent overrides.",
+  "Rejected for a task still running — asserting completion of work in flight is a worse mistake than leaving the record wrong — for one already completed, and for one the caller cancelled; resume or archive those instead.",
+  "Returns the core acknowledgement (id, state); pass `fields` for more.",
+].join(" ");
+
 // resume and handoff both continue a dead task, and picking the wrong one either
 // wastes another account's quota or waits on a session that will never answer.
 // The difference is stated in the first two sentences, not buried.

@@ -310,6 +310,38 @@ describe("SQLite state store", () => {
     store.close();
   });
 
+  test("asserts completion over blocked and failed only, keeping the original completion", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const dead = task("blocked");
+    store.createTask(dead);
+    dead.completion = { blocked: true, code: "unverified", reason: "no marker" };
+    store.saveTask(dead);
+
+    const asserted = store.assertTaskCompletion(dead.id, { assertedBy: "alice", reason: "checked by hand" });
+    expect(asserted.state).toBe("completed");
+    expect(asserted.completion).toMatchObject({
+      code: "unverified",
+      blocked: true,
+      assertedCompletion: {
+        assertedBy: "alice",
+        reason: "checked by hand",
+        replacedCode: "unverified",
+      },
+    });
+
+    // The store refuses anything that is not a dead, unattested run.
+    const running = task("running");
+    store.createTask(running);
+    expect(() => store.assertTaskCompletion(running.id, { assertedBy: "alice", reason: "looks done" }))
+      .toThrow("task cannot be asserted completed from state running");
+    const done = task("completed");
+    store.createTask(done);
+    expect(() => store.assertTaskCompletion(done.id, { assertedBy: "alice", reason: "still fine" }))
+      .toThrow("task cannot be asserted completed from state completed");
+    store.close();
+  });
+
   test("probes task states without materialising full rows", () => {
     const { db } = paths();
     const store = new StateStore({ path: db, seedProfiles: [profile] });

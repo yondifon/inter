@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, relative, resolve } from "node:path";
-import { canResumeSession, commandFor, finalText, resumeCommandFor, sessionIdFrom, writeTargetsFrom } from "./adapters";
+import { abortedTurn, canResumeSession, commandFor, finalText, resumeCommandFor, sessionIdFrom, writeTargetsFrom } from "./adapters";
 import { loadConfig, profileEnv } from "./config";
 import { taskEventView } from "./events";
 import {
@@ -720,7 +720,9 @@ async function runTask(
       return;
     }
     const output = finalText(profile, stdout);
-    const outcome = interpretWorkerOutcome(exitCode, output, stderr);
+    // Only the raw stream knows the turn died mid-generation; the final text it
+    // left behind is indistinguishable from a worker that just never signed off.
+    const outcome = interpretWorkerOutcome(exitCode, output, stderr, abortedTurn(stdout));
     // A worker that dies during startup prints its real error as a stream
     // event, not on stderr; without this the task surfaces only "exit 1".
     if (outcome.state === "failed" && !stderr.trim()) {
@@ -1133,6 +1135,48 @@ export async function cancelTask(id: string, reason = "cancelled by caller", tim
   }
   taskWaiter.notify(id);
   return cancelled;
+}
+
+/**
+ * The states a caller can assert completion over: the run is dead and the
+ * worker never attested its own success, so a human check can resolve the
+ * record. `cancelled` is deliberately absent — the caller already corrected
+ * that record by cancelling it, and resume or archive are its paths — and
+ * `running` is a worse mistake than a wrong record.
+ */
+const ASSERTABLE_STATES: Task["state"][] = ["blocked", "failed"];
+
+/**
+ * Mark a blocked or failed task completed on the caller's word that the work
+ * landed, keeping the unverified completion on the record. The distinction is
+ * the point: `completion` still carries the worker's missing attestation, and
+ * `completion.assertedCompletion` carries who asserted, why, and the code it
+ * replaced, so a reader can tell an asserted completion from a verified one
+ * without opening the database.
+ */
+export async function assertTaskCompletion(id: string, assertedBy: string, reason: string): Promise<Task> {
+  const by = assertedBy.trim();
+  if (!by) throw new Error(`asserted completion needs who asserted it: ${id}`);
+  if (by.length > 200) throw new Error("assertedBy exceeds 200 characters");
+  const why = reason.trim();
+  if (!why) throw new Error(`asserted completion needs a reason: ${id}`);
+  if (why.length > 500) throw new Error("reason exceeds 500 characters");
+  const task = requireTask(id);
+  if (task.state === "completed") {
+    throw new Error(`task is already completed: ${id}`);
+  }
+  if (task.state === "running") {
+    throw new Error(`task is still running: ${id} — asserting completion of work still in flight is not allowed; wait for it to settle`);
+  }
+  if (task.state === "cancelled") {
+    throw new Error(`task was cancelled: ${id} — the cancellation is the caller's own record; resume it or archive it instead`);
+  }
+  if (!ASSERTABLE_STATES.includes(task.state)) {
+    throw new Error(`task cannot be asserted completed from state ${task.state}: ${id} — completion is asserted only over a dead run the worker did not attest (blocked or failed)`);
+  }
+  const completed = stateStore().assertTaskCompletion(id, { assertedBy: by, reason: why });
+  taskWaiter.notify(id);
+  return completed;
 }
 
 function update(task: Task, patch: Partial<Task>, expectedStates: Task["state"][] = []): boolean {

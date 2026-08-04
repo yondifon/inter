@@ -1,5 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { canResumeSession, commandFor, finalText, resumeCommandFor, sessionIdFrom, writeTargetsFrom } from "../src/adapters";
+import {
+  abortedTurn,
+  canResumeSession,
+  commandFor,
+  finalText,
+  NO_FINAL_MESSAGE,
+  resumeCommandFor,
+  sessionIdFrom,
+  writeTargetsFrom,
+} from "../src/adapters";
 import type { Profile } from "../src/types";
 
 const base: Profile = {
@@ -280,5 +289,81 @@ describe("finalText", () => {
 
   test("falls back to raw when pi emitted no assistant text", () => {
     expect(finalText(pi, "not json at all")).toBe("not json at all");
+  });
+
+  const opencode: Profile = { ...base, provider: "opencode" };
+
+  /**
+   * Task a99ab111: an opencode run whose last events are step parts with no
+   * text field handed its whole ~100KB JSONL stream back as the worker's final
+   * message, PERMISSION_BLOCK matched inside a payload, and the task was
+   * reported permission_denied with a JSON blob as its reason.
+   */
+  test("a stream with no assistant text does not masquerade as the worker's words", () => {
+    const raw = [
+      JSON.stringify({ type: "step_start", sessionID: "ses_04bd" }),
+      JSON.stringify({
+        type: "tool_use",
+        part: { tool: "bash", state: { input: { command: "ls" }, output: "needs your permission" } },
+      }),
+      JSON.stringify({ type: "step_finish", part: { type: "step-finish", reason: "unknown", tokens: { output: 0 } } }),
+    ].join("\n");
+
+    expect(finalText(opencode, raw)).toBe(NO_FINAL_MESSAGE);
+  });
+
+  // The fallback exists because provider shapes vary; a worker that really did
+  // print prose must still get that prose back.
+  test("plain text output is still returned untouched", () => {
+    expect(finalText(opencode, "  I rewrote the parser.\n")).toBe("I rewrote the parser.");
+  });
+
+  /**
+   * opencode puts the sign-off inside a JSON string, where the line-anchored
+   * marker parsing in task-protocol would never see it. Recovering that line is
+   * what keeps INTER_RESULT / INTER_BLOCKED / INTER_NEEDS_INPUT detection
+   * working once the raw stream stops being the fallback.
+   */
+  test("recovers a marker written inside a JSON-escaped string", () => {
+    for (const marker of ["INTER_RESULT: completed", "INTER_BLOCKED: worker_error | disk full", "INTER_NEEDS_INPUT: Which database?"]) {
+      const raw = [
+        JSON.stringify({ type: "step_start", sessionID: "ses_04bd" }),
+        JSON.stringify({ type: "message", nested: { deep: [{ note: `Wrote three files.\n${marker}` }] } }),
+        JSON.stringify({ type: "step_finish", part: { type: "step-finish", reason: "stop", tokens: { output: 12 } } }),
+      ].join("\n");
+      expect(finalText(opencode, raw)).toBe(marker);
+    }
+  });
+
+  // The shipped prompt states the marker mid-sentence and workers echo it back.
+  // Only the marker's own line comes out, so task-protocol still refuses it.
+  test("an echoed instruction comes back as that one line, not the whole prompt", () => {
+    const raw = JSON.stringify({
+      type: "user",
+      part: { note: "Goal: port the parser.\nIf the work is done, end with: INTER_RESULT: completed\nDo not claim completion early." },
+    });
+
+    expect(finalText(opencode, raw)).toBe(NO_FINAL_MESSAGE);
+  });
+});
+
+describe("abortedTurn", () => {
+  const stepFinish = (part: Record<string, unknown>) =>
+    [
+      JSON.stringify({ type: "step_start", sessionID: "ses_04bd" }),
+      JSON.stringify({ type: "step_finish", part: { type: "step-finish", ...part } }),
+    ].join("\n");
+
+  test("names a generation that died mid-turn", () => {
+    expect(abortedTurn(stepFinish({ reason: "unknown", tokens: { output: 0 } })))
+      .toContain("ended the turn mid-generation");
+  });
+
+  // A run that generated text and then stopped is a worker that did not sign
+  // off, which is a different report and must stay one.
+  test("says nothing about a step that produced output", () => {
+    expect(abortedTurn(stepFinish({ reason: "unknown", tokens: { output: 116 } }))).toBeUndefined();
+    expect(abortedTurn(stepFinish({ reason: "tool-calls", tokens: { output: 0 } }))).toBeUndefined();
+    expect(abortedTurn("not json at all")).toBeUndefined();
   });
 });

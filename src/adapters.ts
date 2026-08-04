@@ -219,7 +219,7 @@ export function finalText(profile: Profile, raw: string): string {
         if (typeof parsed.result === "string") return parsed.result;
       } catch {}
     }
-    return raw;
+    return fallbackText(raw);
   }
 
   if (profile.provider === "pi") {
@@ -246,7 +246,7 @@ export function finalText(profile: Profile, raw: string): string {
         if (typeof error === "string" && error.trim()) return error;
       } catch {}
     }
-    return raw.trim();
+    return fallbackText(raw);
   }
 
   const lines = raw.trim().split("\n");
@@ -264,7 +264,101 @@ export function finalText(profile: Profile, raw: string): string {
       if (typeof text === "string") return text;
     } catch {}
   }
-  return raw.trim();
+  return fallbackText(raw);
+}
+
+/** No line of the stream carried a text field. */
+export const NO_FINAL_MESSAGE = "(no final message: the provider stream carried no assistant text)";
+
+const MARKER = /^[\t ]*(?:[>#*_\-~`]+[\t ]*)*INTER_(?:RESULT|BLOCKED|NEEDS_INPUT)\s*:/i;
+
+/**
+ * What to report when no provider branch found a final message. Returning the
+ * raw stream was the old answer, and for a JSONL run it let the transcript
+ * masquerade as the worker's own words: `interpretWorkerOutcome` ran its prose
+ * regexes over ~100KB of JSON, matched a "permission" mention inside a payload,
+ * and filed the task `permission_denied` with a JSON blob as its reason.
+ *
+ * A worker that simply printed prose still gets that prose back untouched — the
+ * fallback exists because provider shapes vary, and something beats nothing. A
+ * JSONL stream instead gives back only what it really holds: a marker written
+ * into a JSON string, which is where opencode puts it, so `INTER_RESULT` /
+ * `INTER_BLOCKED` / `INTER_NEEDS_INPUT` detection keeps working for every
+ * provider — and otherwise a note that says outright there was no message.
+ */
+function fallbackText(raw: string): string {
+  const trimmed = raw.trim();
+  if (!isEventStream(trimmed)) return trimmed;
+  return markerLine(trimmed) ?? NO_FINAL_MESSAGE;
+}
+
+/** A JSONL event stream, as opposed to a worker that printed plain text. */
+function isEventStream(raw: string): boolean {
+  const lines = raw.split("\n").map((line) => line.trim()).filter(Boolean);
+  return lines.length > 0 && lines.every((line) => line.startsWith("{"));
+}
+
+/**
+ * The marker as the worker wrote it, recovered from wherever in the event it
+ * was nested. `JSON.parse` is what un-escapes it: on the wire the sign-off sits
+ * inside a JSON string as `\n`-separated text, where the line-anchored parsing
+ * in task-protocol would never see it. Only the marker's own line comes back,
+ * so a stream that merely echoes the prompt's instruction hands over that
+ * echo — which the same parsing correctly refuses — and not the whole prompt.
+ */
+function markerLine(raw: string): string | undefined {
+  for (const line of raw.split("\n").reverse()) {
+    let event: unknown;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    for (const value of strings(event)) {
+      const found = value.split(/\r?\n/).reverse().find((text) => MARKER.test(text));
+      if (found) return found.trim();
+    }
+  }
+  return undefined;
+}
+
+function* strings(node: unknown): Generator<string> {
+  if (typeof node === "string") yield node;
+  else if (Array.isArray(node)) for (const item of node) yield* strings(item);
+  else if (node && typeof node === "object") for (const value of Object.values(node)) yield* strings(value);
+}
+
+/** Reasons opencode gives for a step that stopped without producing anything. */
+const ABORTED_REASONS = new Set(["unknown", "aborted", "error", "cancelled", "canceled"]);
+
+/**
+ * Why the turn ended, when it ended without the worker's own words. An opencode
+ * generation that dies mid-flight closes on `step_finish` with
+ * `reason: "unknown"` and zero output tokens, and the CLI still exits 0 — so it
+ * was reported `unverified`, "worker exited without an Inter completion
+ * marker", the same report as a worker that did the whole job and signed off
+ * wrong. That confusion cost a correct, completed run its diagnosis twice on
+ * 2026-08-03, once after $5.75 and 81 turns.
+ *
+ * Only the last `step_finish` is read, and only when it produced no output, so
+ * a run that actually generated text is never described this way.
+ */
+export function abortedTurn(raw: string): string | undefined {
+  for (const line of raw.trim().split("\n").reverse()) {
+    let event: Record<string, unknown>;
+    try {
+      event = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (event.type !== "step_finish") continue;
+    const part = object(event.part);
+    const reason = str(part.reason);
+    const output = Number(object(part.tokens).output ?? 0);
+    if (!reason || output > 0 || !ABORTED_REASONS.has(reason.toLowerCase())) return undefined;
+    return `the provider ended the turn mid-generation: step_finish reason "${reason}", no output tokens`;
+  }
+  return undefined;
 }
 
 function object(value: unknown): Record<string, unknown> {

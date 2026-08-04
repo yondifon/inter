@@ -24,6 +24,13 @@ const BLOCKED = new RegExp(
   "i",
 );
 const PERMISSION_BLOCK = /\b(?:awaiting|need(?:ing)?|requires?) (?:your )?(?:permission|approval)\b|\bcannot proceed\b.*\bpermission\b/i;
+// Some providers report a failure as data and still exit 0: pi ends the turn
+// with `401 {"type":"error","error":{"type":"AuthError","message":"Invalid API
+// key."}}`, which reached the no-marker path below and was filed `unverified` —
+// the same code as a worker that did the job and signed off wrong. The status
+// has to sit beside the provider's own JSON error to match here, so a worker
+// writing prose about auth or rate limits is not mistaken for one.
+const PROVIDER_ERROR = /\b([45]\d\d)\s+(\{[^\n]*"error"[^\n]*\})/;
 
 export interface WorkerOutcome {
   state: "needs_input" | "blocked" | "completed" | "failed";
@@ -108,7 +115,17 @@ function proseQuestion(output: string): string | undefined {
   return undefined;
 }
 
-export function interpretWorkerOutcome(exitCode: number, output: string, stderr: string): WorkerOutcome {
+/**
+ * `aborted` is what the adapter learned from the raw stream and the final text
+ * cannot carry: that the turn died mid-generation rather than finishing without
+ * a sign-off. Optional, so a caller with no stream still gets today's reading.
+ */
+export function interpretWorkerOutcome(
+  exitCode: number,
+  output: string,
+  stderr: string,
+  aborted?: string,
+): WorkerOutcome {
   const question = needsInputQuestion(output);
   if (question) {
     return {
@@ -153,6 +170,28 @@ export function interpretWorkerOutcome(exitCode: number, output: string, stderr:
       state: "completed",
       output: output.replace(COMPLETED, "").trim(),
       completion: { exitCode, blocked: false, code: "completed" },
+    };
+  }
+  // A zero exit is not the same as a working account. Both of these reach here
+  // only after the completion marker was looked for and not found, so nothing
+  // that signed off correctly can be reclassified by them.
+  const rejected = output.match(PROVIDER_ERROR);
+  if (rejected) {
+    const status = Number(rejected[1]);
+    const reason = compact(`provider returned ${status}: ${providerErrorMessage(rejected[2]!) ?? rejected[2]!}`);
+    return {
+      state: "failed",
+      output,
+      error: reason,
+      completion: { exitCode, blocked: true, code: statusFailure(status, rejected[0]!), reason },
+    };
+  }
+  if (aborted) {
+    return {
+      state: "failed",
+      output,
+      error: aborted,
+      completion: { exitCode, blocked: true, code: "aborted", reason: aborted },
     };
   }
   // Most workers ask in prose instead of emitting the needs_input marker; a
@@ -253,6 +292,23 @@ function zoneOffsetMinutes(zone: string, at: Date): number | undefined {
     return name.includes("GMT") ? 0 : undefined;
   } catch {
     // An unknown zone name is not a reason to lose the time; fall back to local.
+    return undefined;
+  }
+}
+
+/** The status code is the provider's own verdict; trust it over the prose. */
+function statusFailure(status: number, text: string): CompletionCode {
+  if (status === 401 || status === 403) return "auth";
+  if (status === 402) return "billing";
+  if (status === 429) return "rate_limit";
+  return classifyFailure(text);
+}
+
+function providerErrorMessage(json: string): string | undefined {
+  try {
+    const message = (JSON.parse(json) as { error?: { message?: unknown } }).error?.message;
+    return typeof message === "string" && message.trim() ? message.trim() : undefined;
+  } catch {
     return undefined;
   }
 }

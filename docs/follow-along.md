@@ -12,11 +12,21 @@ things on every check:
 
 There are two ways to follow a task. Use the first one by default.
 
-## 1. Background `inter watch` — the default
+## 1. Background the `watch` subcommand — the default
+
+`package.json` declares an `inter` bin, but nothing links it and `make install`
+ships an app bundle rather than a CLI, so `inter` is on nobody's PATH until they
+link it themselves. Until then the invocation is the entry point directly:
 
 ```sh
-inter watch 8f2c1a94-... --timeout 30m &
+bun run src/cli.ts watch 8f2c1a94-... --timeout 30m &
 ```
+
+The rest of this page writes `inter watch` for brevity; substitute
+`bun run src/cli.ts watch` unless the bin is linked. `watchCommand()` in
+`src/watch.ts` derives whichever of the two applies from `process.argv[1]`, and
+both the usage text and the `wait` tool description print it from there — so
+neither can name a command that does not run.
 
 A blocked process costs nothing while it sleeps: no tokens, no turn, no
 context. Every client Inter serves has a shell, so this needs no client
@@ -28,10 +38,17 @@ It blocks until any named task asks a question, fails, is cancelled, or
 completes, and then prints **one line per settled task**:
 
 ```
-8f2c1a94-... completed
-8f2c1a94-... needs_input Which database should the migration target?
-8f2c1a94-... failed timeout after 600000ms
+8f2c1a94-... completed — Port the parser
+8f2c1a94-... needs_input Which database should the migration target? — Port the parser
+8f2c1a94-... failed timeout after 600000ms — Port the parser
+8f2c1a94-... completed (archived) — Port the parser
 ```
+
+The trailing title is what tells a fan-out's lines apart without spending an
+`inspect` per id; a task with no title prints the bare id and state, as before.
+`(archived)` marks a task that has been archived — it still resolves and still
+settles, unlike an id this store has never held, which exits `2` and names the
+database file it searched.
 
 That is the entire output. A task still running prints nothing, because silence
 is the point.

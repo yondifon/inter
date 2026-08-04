@@ -13,6 +13,7 @@ import type {
   Task,
   TaskAttempt,
   TaskCompletion,
+  TaskCompletionOverride,
   TaskState,
   TaskSummary,
   TaskScope,
@@ -445,6 +446,65 @@ export class StateStore {
       cancelled = true;
     });
     return cancelled ? this.getTask(id) : undefined;
+  }
+
+  /**
+   * Moves a dead task's state to `completed` on the caller's assertion that the
+   * work landed, without touching the original completion: `unverified` and its
+   * reason survive so the record still says the worker never attested, and the
+   * override carries who asserted, why, and the code it replaced. Only valid
+   * from `blocked` and `failed` — those are the states where the worker's
+   * outcome is unresolved. Everything else throws: work still in flight, an
+   * already-verified completion, and a cancellation are worse records to
+   * overwrite than an unverified one.
+   */
+  assertTaskCompletion(
+    id: string,
+    updates: { assertedBy: string; reason: string },
+  ): Task {
+    const now = new Date().toISOString();
+    let asserted = false;
+    this.transaction(() => {
+      const current = this.database.query<{
+        state: TaskState;
+        completion_json: string | null;
+      }, [string]>(`
+        SELECT state, completion_json FROM tasks WHERE id = ?
+      `).get(id);
+      if (!current || !["blocked", "failed"].includes(current.state)) {
+        throw new Error(`task cannot be asserted completed from state ${current?.state ?? "unknown"}: ${id}`);
+      }
+      const existing = current.completion_json
+        ? JSON.parse(current.completion_json) as TaskCompletion
+        : undefined;
+      const override: TaskCompletionOverride = {
+        assertedBy: updates.assertedBy,
+        reason: updates.reason,
+        assertedAt: now,
+        // The code the override replaces is derived, never caller-supplied: the
+        // caller may correct a verdict but not rewrite it. Absent only when the
+        // row never carried a completion (the broker-restart path).
+        ...(existing?.code ? { replacedCode: existing.code } : {}),
+      };
+      const changed = this.database.query(`
+        UPDATE tasks
+        SET state = 'completed', completion_json = ?, updated_at = ?
+        WHERE id = ? AND state IN ('blocked', 'failed')
+      `).run(JSON.stringify({ ...(existing ?? {}), assertedCompletion: override }), now, id);
+      if (changed.changes !== 1) {
+        throw new Error(`task cannot be asserted completed from state ${current.state}: ${id}`);
+      }
+      this.addTaskEvent(id, "completion_asserted", "completed", {
+        assertedBy: updates.assertedBy,
+        reason: updates.reason,
+        ...(existing?.code ? { replacedCode: existing.code } : {}),
+        previousState: current.state,
+      });
+      asserted = true;
+    });
+    const task = asserted ? this.getTask(id) : undefined;
+    if (!task) throw new Error(`unknown task: ${id}`);
+    return task;
   }
 
   answerTask(

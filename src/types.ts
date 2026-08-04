@@ -27,12 +27,30 @@ export type CompletionCode =
   | "permission_denied"
   | "needs_authority"
   | "unverified"
+  /** The provider's generation died mid-turn; distinct from finishing unsigned. */
+  | "aborted"
   | "cancelled"
   | "timeout"
   | "auth"
   | "billing"
   | "rate_limit"
   | "worker_error";
+
+/**
+ * A caller's correction of a completion the worker never attested. The state
+ * moves to `completed` but the original completion survives untouched, so an
+ * asserted completion stays visibly different from a verified one forever.
+ */
+export interface TaskCompletionOverride {
+  /** Who or what asserted the completion: the caller's own identity. */
+  assertedBy: string;
+  /** Why the work demonstrably landed despite the recorded outcome. Required, never empty. */
+  reason: string;
+  /** When the caller asserted it, ISO. */
+  assertedAt: string;
+  /** The completion code the override replaced, so the original verdict stays on the record. */
+  replacedCode?: CompletionCode;
+}
 
 export interface TaskCompletion {
   exitCode?: number;
@@ -47,6 +65,13 @@ export interface TaskCompletion {
    * wait until then and `resume` for free, or `handoff` now to another profile.
    */
   resetsAt?: string;
+  /**
+   * Present only when the completion was asserted by a caller rather than
+   * attested by the worker. It rides with `completion` instead of being an
+   * opt-in surface field because a completion view without it would read an
+   * asserted success as a verified one.
+   */
+  assertedCompletion?: TaskCompletionOverride;
 }
 
 export interface Profile {

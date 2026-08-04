@@ -1,6 +1,7 @@
-import { waitForTasks } from "./tasks";
+import { basename, join } from "node:path";
+import { unknownTaskMessage, waitForTasks } from "./tasks";
 import { settled } from "./public-task";
-import { observeStateStore } from "./store";
+import { databasePath, observeStateStore } from "./store";
 import type { Task } from "./types";
 
 /**
@@ -17,11 +18,32 @@ export const DEFAULT_WATCH_TIMEOUT_MS = 30 * 60_000;
 const MAX_WATCH_TIMEOUT_MS = 86_400_000;
 /** Long enough to carry a real question, short enough to stay one line. */
 const MAX_DETAIL = 200;
+/** Enough to tell a fan-out's tasks apart without wrapping the line. */
+const MAX_TITLE = 80;
 
-export const WATCH_USAGE =
-  "usage: inter watch <taskId...> [--timeout 30m]\n" +
-  "  Blocks until a task asks a question, fails, is cancelled, or completes.\n" +
-  "  Prints one line per settled task. Exit 0 with news, 1 on timeout, 2 on bad input.";
+/**
+ * The one place that says how to start this command, so the usage text and the
+ * `wait` tool description — the only pointer an MCP caller ever sees — cannot
+ * drift apart. It is derived rather than written down because `inter` is not on
+ * PATH: `package.json` declares a `bin` that nothing links, and `make install`
+ * ships an app bundle, not a CLI. A description naming a command that does not
+ * exist is worse than one naming a longer command that does.
+ */
+export function watchCommand(taskIds = "<taskId>"): string {
+  // argv[1] is how this process was actually started, so someone who did link
+  // the bin gets `inter` and this checkout gets the invocation that works in it.
+  const entry = process.argv[1];
+  const command = entry && basename(entry).replace(/\.[cm]?[jt]s$/, "") === "inter"
+    ? "inter"
+    : `bun run ${join(import.meta.dir, "cli.ts")}`;
+  return `${command} watch ${taskIds}`;
+}
+
+export function watchUsage(): string {
+  return `usage: ${watchCommand("<taskId...>")} [--timeout 30m]\n` +
+    "  Blocks until a task asks a question, fails, is cancelled, or completes.\n" +
+    "  Prints one line per settled task. Exit 0 with news, 1 on timeout, 2 on bad input.";
+}
 
 interface WatchArgs {
   taskIds: string[];
@@ -79,7 +101,18 @@ function parseDuration(value: string): number | undefined {
 export function watchLine(task: Task): string {
   const detail = task.state === "needs_input" ? task.question : task.error;
   const trimmed = detail?.replace(/\s+/g, " ").trim().slice(0, MAX_DETAIL);
-  return trimmed ? `${task.id} ${task.state} ${trimmed}` : `${task.id} ${task.state}`;
+  // Watching a fan-out printed N bare UUIDs, so telling them apart cost an
+  // `inspect` per id — giving back the saving the command exists to create.
+  const title = task.title?.replace(/\s+/g, " ").trim().slice(0, MAX_TITLE);
+  return [
+    task.id,
+    task.state,
+    // An archived id still resolves and still settles; saying so is what keeps
+    // it distinguishable from an id this store has never heard of.
+    ...(task.archivedAt ? ["(archived)"] : []),
+    ...(trimmed ? [trimmed] : []),
+    ...(title ? [`— ${title}`] : []),
+  ].join(" ");
 }
 
 /**
@@ -95,13 +128,22 @@ export async function runWatch(
   const parsed = parseWatchArgs(argv);
   if ("error" in parsed) {
     err(parsed.error);
-    err(WATCH_USAGE);
+    err(watchUsage());
     return 2;
   }
 
   // Before anything else touches the store: opening it as the broker would run
   // interrupted-task recovery and fail the very tasks being watched.
-  observeStateStore();
+  const store = observeStateStore();
+
+  // An id this store has never held is a typo or a look in the wrong database,
+  // and the caller cannot tell which without being told where the search ran.
+  // An archived id is not in this set — it resolves, and `watchLine` marks it.
+  const missing = parsed.taskIds.filter((id) => !store.getTask(id));
+  if (missing.length > 0) {
+    err(`${unknownTaskMessage(missing.join(", "))} (searched ${databasePath()})`);
+    return 2;
+  }
 
   let waited;
   try {

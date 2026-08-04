@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { closeStateStore, stateStore } from "../src/store";
-import { DEFAULT_WATCH_TIMEOUT_MS, parseWatchArgs, runWatch } from "../src/watch";
+import { DEFAULT_WATCH_TIMEOUT_MS, parseWatchArgs, runWatch, watchCommand } from "../src/watch";
 import type { Task, TaskState } from "../src/types";
 
 let root: string;
@@ -139,13 +139,37 @@ describe("what watch reports", () => {
     expect(code).toBe(2);
     expect(out).toEqual([]);
     expect(err.join(" ")).toContain("unknown task");
+    // A typo and a look in the wrong database read the same until the message
+    // says which store it searched.
+    expect(err.join(" ")).toContain(join(root, "inter.db"));
+  });
+
+  test("an archived task settles like any other, and says it is archived", async () => {
+    const task = seedTask("completed", { title: "Port the parser", archivedAt: new Date().toISOString() });
+    stateStore().setTaskArchived(task.id, true);
+    const { code, out } = await watch([task.id]);
+
+    expect(code).toBe(0);
+    expect(out).toEqual([`${task.id} completed (archived) — Port the parser`]);
+  });
+
+  test("a title rides along so a fan-out's lines tell each other apart", async () => {
+    const first = seedTask("completed", { title: "Port the parser" });
+    const second = seedTask("needs_input", { title: "Wire the store", question: "Which database?" });
+    const { code, out } = await watch([first.id, second.id]);
+
+    expect(code).toBe(0);
+    expect(out).toEqual([
+      `${first.id} completed — Port the parser`,
+      `${second.id} needs_input Which database? — Wire the store`,
+    ]);
   });
 
   test("bad arguments exit 2 and say how to use it", async () => {
     const { code, err } = await watch([]);
 
     expect(code).toBe(2);
-    expect(err.join("\n")).toContain("usage: inter watch");
+    expect(err.join("\n")).toContain(`usage: ${watchCommand("<taskId...>")}`);
   });
 });
 
@@ -167,6 +191,26 @@ describe("the actual command line", () => {
     ]);
     return { code, stdout, stderr };
   }
+
+  /**
+   * The usage text and the `wait` tool description both print `watchCommand()`,
+   * and `wait`'s is the only place an MCP caller learns this command exists. So
+   * the invocation it names has to be one a caller can paste and run — the bug
+   * was that it named `inter watch`, which is on nobody's PATH.
+   */
+  test("the invocation both descriptions print is one that actually runs", async () => {
+    const task = seedTask("completed");
+    const [command, ...argv] = watchCommand(task.id).split(" ");
+    const child = Bun.spawn([command!, ...argv], {
+      env: { ...process.env, INTER_DB: join(root, "inter.db"), INTER_PORT: "0" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
+
+    expect(code).toBe(0);
+    expect(stdout.trimEnd()).toBe(`${task.id} completed`);
+  }, 30_000);
 
   test("prints one line and exits 0 without ever serving HTTP", async () => {
     const task = seedTask("completed");

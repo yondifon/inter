@@ -1,7 +1,7 @@
 # Response shape (`fields`)
 
-Eight MCP tools (`delegate`, `reply`, `resume`, `handoff`, `cancel`, `archive`,
-`inspect`, `wait`) accept a `fields` selector that controls which parts of the
+Nine MCP tools (`delegate`, `reply`, `resume`, `handoff`, `complete`, `cancel`,
+`archive`, `inspect`, `wait`) accept a `fields` selector that controls which parts of the
 task record come back in the response. The rule is *small by default*: a real `cancel` response
 once spent 18,000 characters to say `state: "cancelled"`, and one `shippedPrompt`
 peaked at 35,405 characters. The caller already wrote the prompt — it should not
@@ -23,6 +23,7 @@ present.
 | `resume` | `[]` | `id`, `state`, `cursor` |
 | `handoff` | `["routing"]` | `id`, `state`, `profileId`, `model`, `effort`, `cursor`, `warnings` (when applicable) |
 | `cancel` | `[]` | `id`, `state` |
+| `complete` | `[]` | `id`, `state` |
 | `archive` | `[]` | `id`, `state`, `archivedAt` |
 | `inspect` | everything except `prompt`, `shippedPrompt`, `attempts` | the record minus the three heaviest fields |
 | `wait` | `["completion", "spend"]` plus `updatedAt` | `id`, `state`, `updatedAt`, `completion`, `error`, `question`, `costUsd`, `turns` |

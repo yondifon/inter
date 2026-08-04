@@ -53,6 +53,52 @@ describe("blocked marker", () => {
   });
 });
 
+/**
+ * All four of these used to be one report — `unverified`, "worker exited
+ * without an Inter completion marker" — so a caller could not tell a dead
+ * account from a dead turn from a worker that did the job and signed off wrong
+ * without opening the database.
+ */
+describe("a zero exit that is not a working run", () => {
+  const AUTH = `401 {"type":"error","error":{"type":"AuthError","message":"Invalid API key."}}`;
+  const aborted = "the provider ended the turn mid-generation: step_finish reason \"unknown\", no output tokens";
+
+  test("reads a provider rejection as the failure it is", () => {
+    const outcome = done(AUTH);
+    expect(outcome.state).toBe("failed");
+    expect(outcome.completion.code).toBe("auth");
+    expect(outcome.completion.reason).toBe("provider returned 401: Invalid API key.");
+  });
+
+  test("takes the code from the status the provider returned", () => {
+    const of = (status: number) =>
+      done(`${status} {"type":"error","error":{"message":"nope"}}`).completion.code;
+    expect(of(402)).toBe("billing");
+    expect(of(429)).toBe("rate_limit");
+    expect(of(403)).toBe("auth");
+    expect(of(500)).toBe("worker_error");
+  });
+
+  test("says the turn died instead of blaming the sign-off", () => {
+    const outcome = interpretWorkerOutcome(0, "(no final message: …)", "", aborted);
+    expect(outcome.state).toBe("failed");
+    expect(outcome.completion.code).toBe("aborted");
+    expect(outcome.completion.reason).toBe(aborted);
+  });
+
+  // The other half of the distinction: a worker that finished and did not sign
+  // off is still unverified, and a worker writing prose about auth or rate
+  // limits is not a provider rejection.
+  test("leaves a finished-but-unsigned run unverified", () => {
+    expect(done("I fixed the authentication bug; the rate limit handling is done.").completion.code)
+      .toBe("unverified");
+  });
+
+  test("a signed-off run is completed even if the stream also carried a rejection", () => {
+    expect(done(`${AUTH}\nRetried on the second key.\nINTER_RESULT: completed`).state).toBe("completed");
+  });
+});
+
 describe("needs-input marker", () => {
   test("accepts a bolded question and strips the closing bold", () => {
     const output = "**INTER_NEEDS_INPUT: Which database should I target?**";

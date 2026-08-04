@@ -5,6 +5,7 @@ import { z } from "zod/v4";
 import { loadConfig, saveConfig } from "./config";
 import {
   appendTaskEvent,
+  assertTaskCompletion,
   cancelTask,
   delegate,
   getTask,
@@ -25,14 +26,14 @@ import { listProfileUsage } from "./usage";
 import { stateStore } from "./store";
 import type { Profile, Provider, Task } from "./types";
 import { taskEventView } from "./events";
-import { DELEGATE_DESCRIPTION, HANDOFF_DESCRIPTION, MCP_INSTRUCTIONS } from "./mcp-copy";
+import { COMPLETE_DESCRIPTION, DELEGATE_DESCRIPTION, HANDOFF_DESCRIPTION, MCP_INSTRUCTIONS } from "./mcp-copy";
 import { defaultModelFor } from "./provider-defaults";
 import { normalizeProfile } from "./profile-input";
 import { deleteMemory, getMemory, listMemories, setMemory } from "./memories";
 import { publicTaskSummary, taskView, waitEventsView, waitTaskView, settled, TASK_FIELD_KEYS, type TaskField } from "./public-task";
 import { mcpWaitBlockMs } from "./mcp-wait";
 import { loadRoutingPolicy } from "./routing-policy";
-import { runWatch } from "./watch";
+import { runWatch, watchCommand } from "./watch";
 
 const port = Number(Bun.env.INTER_PORT ?? 7331);
 const VERSION = "0.6.0";
@@ -141,6 +142,7 @@ const DEFAULT_RESUME_FIELDS: TaskField[] = [];
 // not already know, so routing rides the acknowledgement.
 const DEFAULT_HANDOFF_FIELDS: TaskField[] = ["routing"];
 const DEFAULT_CANCEL_FIELDS: TaskField[] = [];
+const DEFAULT_COMPLETE_FIELDS: TaskField[] = [];
 const DEFAULT_ARCHIVE_FIELDS: TaskField[] = [];
 const DEFAULT_INSPECT_FIELDS: TaskField[] = (() => {
   const excluded = new Set(["prompt", "shippedPrompt", "attempts", "all"]);
@@ -453,7 +455,7 @@ async function createMcpServer(): Promise<McpServer> {
     return result(taskView(task, fields ?? DEFAULT_INSPECT_FIELDS));
   });
   server.registerTool("wait", {
-    description: "Check one to eight delegated tasks for new progress, a question, or completion. Blocks for real — up to 30s — and until: \"attention\" is the way to follow a task: it returns the moment the task asks a question or reaches a terminal state. Calling it again after it returns empty is the correct way to keep following, not a mistake. Returns only what moves — state, updatedAt, and how the run ended; pass `fields: [\"output\"]` to read a finished run without a second call. To follow a task without spending a turn on it at all, background the `inter watch <taskId>` command instead. Heartbeats do not count as progress.",
+    description: "Check one to eight delegated tasks for new progress, a question, or completion. Blocks for real — up to 30s — and until: \"attention\" is the way to follow a task: it returns the moment the task asks a question or reaches a terminal state. Calling it again after it returns empty is the correct way to keep following, not a mistake. Returns only what moves — state, updatedAt, and how the run ended; pass `fields: [\"output\"]` to read a finished run without a second call. To follow a task without spending a turn on it at all, background the `" + watchCommand() + "` command instead. Heartbeats do not count as progress.",
     inputSchema: z.object({
       taskIds: z.array(z.string()).min(1).max(8)
         .describe("Inter task ids to check together."),
@@ -570,6 +572,18 @@ async function createMcpServer(): Promise<McpServer> {
       fields: taskFieldSchema,
     }),
   }, async ({ taskId, reason, fields }) => result(taskView(await cancelTask(taskId, reason), fields ?? DEFAULT_CANCEL_FIELDS)));
+  server.registerTool("complete", {
+    description: COMPLETE_DESCRIPTION,
+    inputSchema: z.object({
+      taskId: z.string(),
+      assertedBy: z.string().min(1).max(200)
+        .describe("Who or what verified the work landed: your name, the client, the integration."),
+      reason: z.string().min(1).max(500)
+        .describe("Why the work demonstrably landed despite the recorded outcome. Required; an empty reason is rejected."),
+      fields: taskFieldSchema,
+    }),
+  }, async ({ taskId, assertedBy, reason, fields }) =>
+    result(taskView(await assertTaskCompletion(taskId, assertedBy, reason), fields ?? DEFAULT_COMPLETE_FIELDS)));
   server.registerTool("archive", {
     description: "Archive or restore a delegated task without deleting its history. Archived tasks stay addressable by Inter task ID and are hidden from active task lists by default. Returns the core acknowledgement (id, state); pass `fields` to get more.",
     inputSchema: z.object({
