@@ -140,7 +140,7 @@ export function taskEventView(event: TaskEvent, provider: Profile["provider"]): 
     subjectPresentation(subjectType, subject);
   const detail = presentationDetail(presentation) ?? firstString(
     subject.text, subject.thinking, subject.message, subject.command, subject.file_path, subject.path,
-    input.filePath, input.file_path, input.path, state.output, payload.result,
+    input.filePath, input.file_path, input.path, payload.result,
   );
   // Claude tags a tool_use block with `id` and its result with `tool_use_id`;
   // OpenCode uses `callID` on the part; Codex reuses `item.id` across started
@@ -151,11 +151,14 @@ export function taskEventView(event: TaskEvent, provider: Profile["provider"]): 
   );
   const actionId = action ? { actionId: action } : {};
 
-  if (subjectType.includes("error") || status === "failed") {
+  if (subjectType.includes("error") || status === "failed" || status === "error") {
     const nested = object(subject.error);
-    return { ...base, kind: "error", phase: "failed", title: tool ? `${tool} failed` : "Agent error",
-      detail: detail ?? firstString(nested.message, object(nested.data).message, subject.error),
-      ...actionId, rawText };
+    // opencode reports a failed call with `status: "error"` and the reason in
+    // `state.error`; the reason is the point of the row, so it joins whatever
+    // the arguments already said — same pairing as a failed hook.
+    const error = firstString(nested.message, object(nested.data).message, subject.error, state.error);
+    return { ...base, kind: "error", phase: "failed", title: tool ? `${toolTitle(tool)} failed` : "Agent error",
+      detail: joinDetail(detail, error), ...actionId, rawText };
   }
   // Tool results echo work the matching tool event already reported, so the row
   // stays folded away — but the result is the only place the outcome is stated,
@@ -192,8 +195,17 @@ export function taskEventView(event: TaskEvent, provider: Profile["provider"]): 
       title: tool ? toolTitle(tool) : "File change", detail, presentation, ...actionId, rawText };
   }
   if (subjectType.includes("tool")) {
-    return { ...base, kind: "tool", phase: statusPhase(status),
-      title: tool ? toolTitle(tool) : "Tool call", detail, presentation, ...actionId, rawText };
+    // The tool's result is echoed in `state.output` — for MCP tools a JSON
+    // blob that would bury the row. The detail reads from the arguments, and
+    // only a reduced count falls back to the output.
+    const toolDetail = presentationDetail(presentation) ?? compactOutput(string(state.output));
+    if (tool || presentation || toolDetail) {
+      return { ...base, kind: "tool", phase: statusPhase(status),
+        title: tool ? toolTitle(tool) : "Tool call", detail: toolDetail, presentation, ...actionId, rawText };
+    }
+    // No name, no readable argument, no readable output: nothing to label.
+    // Fall through so a label-less part stays in the raw fallback below
+    // instead of rendering a blank "Tool call" row.
   }
   if (subjectType.includes("usage")) {
     return { ...base, kind: "usage", phase: "info", title: "Usage", detail, rawText };
@@ -898,12 +910,30 @@ function genericToolPresentation(
     parts.push(`${humanize(key)}: ${truncate(value.replace(/\s+/g, " "), 80)}`);
     if (parts.length === 2) break;
   }
+  // MCP tools pass arbitrary argument names the curated list never covers
+  // (`action`, `sql`, `taskId`…). One short string argument names the call
+  // well enough for a line; the rest stays in the raw payload.
+  let namedDynamically = false;
+  if (parts.length < 2) {
+    for (const [key, value] of Object.entries(input)) {
+      if (TOOL_ARG_KEYS.includes(key)) continue;
+      const text = string(value);
+      if (!text) continue;
+      parts.push(`${humanize(key)}: ${truncate(text.replace(/\s+/g, " "), 80)}`);
+      namedDynamically = true;
+      break;
+    }
+  }
   if (!parts.length) {
     const title = firstString(state.title);
     if (!title) return undefined;
     return { type: "tool", text: truncate(title.replace(/\s+/g, " "), 120) };
   }
-  return { type: "tool", text: parts.join(" · ") };
+  // The status is the call's outcome and the only one the part carries. It
+  // rides only the dynamically-named rows: the curated arguments' shape is
+  // pinned by older rows that predate the outcome.
+  return { type: "tool", text: parts.join(" · "),
+    ...(namedDynamically && string(state.status) ? { outcome: string(state.status) } : {}) };
 }
 
 function camelCase(value: string): string {
@@ -986,6 +1016,29 @@ function toolResultOutcome(value: unknown): string | undefined {
     return `${plural(text.trimEnd().split(/\r?\n/).length, "line")} out`;
   }
   return undefined;
+}
+
+/// MCP tool results arrive as JSON text echoed in `state.output`; the trace
+/// reduces them to a count instead of dumping the payload. Short plain-text
+/// outputs keep their text on one line.
+function compactOutput(value?: string): string | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  const compact = trimmed.replace(/\s+/g, " ").trim();
+  if (!trimmed.startsWith("[") && !trimmed.startsWith("{")) {
+    return truncate(compact, 160);
+  }
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (Array.isArray(parsed)) return `${parsed.length} ${parsed.length === 1 ? "item" : "items"}`;
+    if (parsed && typeof parsed === "object") {
+      const keys = Object.keys(parsed);
+      return keys.length ? `${keys.length} ${keys.length === 1 ? "field" : "fields"}` : "empty";
+    }
+  } catch {
+    // Not JSON despite the braces; the one-line form below still fits.
+  }
+  return truncate(compact, 160);
 }
 
 function plural(count: number, noun: string): string {

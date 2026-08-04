@@ -1038,4 +1038,155 @@ describe("task event views", () => {
     expect(view.kind).toBe("lifecycle");
     expect(view.title).toBe("Prompt received");
   });
+
+  test("renders an MCP tool call as a readable row, not the output dump", () => {
+    // Verbatim from a real run: the memory tool's part carries the call at
+    // `part.tool`, the arguments in `state.input`, an empty `state.title`, and
+    // the whole JSON result echoed in `state.output`. The row must read from
+    // the input, never from the output blob.
+    const view = taskEventView({
+      id: 50,
+      taskId: "task",
+      type: "agent.tool_use",
+      state: "running",
+      payload: {
+        type: "tool_use",
+        timestamp: 1785810319300,
+        sessionID: "ses_035691fdbffeYv2l2Kjpxg0EGq",
+        part: {
+          type: "tool",
+          tool: "inter_memory",
+          callID: "call_00_R90nAQSOof8q5Z7SoIMC6984",
+          id: "prt_fca96f715001ZBZFzjfzFj8uB5",
+          sessionID: "ses_035691fdbffeYv2l2Kjpxg0EGq",
+          messageID: "msg_fca96e14f001RiFCTFOeQCavx1",
+          state: {
+            input: { action: "list", cwd: "/Users/malico/desgn/inter" },
+            metadata: { truncated: false },
+            output: "[{ \"key\": \"delegation-model-preference\" }]",
+            status: "completed",
+            time: { start: 1785810319290, end: 1785810319298 },
+            title: "",
+          },
+        },
+      },
+      createdAt: "now",
+    }, "opencode");
+
+    expect(view.kind).toBe("tool");
+    expect(view.phase).toBe("completed");
+    expect(view.title).toBe("Inter Memory");
+    expect(view.detail).toBe("Action: list");
+    expect(view.detail).not.toContain("[{");
+    expect(view.presentation).toEqual({ type: "tool", text: "Action: list", outcome: "completed" });
+    expect(view.actionId).toBe("call_00_R90nAQSOof8q5Z7SoIMC6984");
+  });
+
+  test("marks a still-running MCP tool call as started", () => {
+    const view = taskEventView({
+      id: 51,
+      taskId: "task",
+      type: "agent.tool_use",
+      state: "running",
+      payload: {
+        type: "tool_use",
+        part: {
+          type: "tool",
+          tool: "inter_memory",
+          callID: "call_00_pending",
+          state: {
+            status: "running",
+            input: { action: "get", cwd: "/repo" },
+            title: "",
+          },
+        },
+      },
+      createdAt: "now",
+    }, "opencode");
+    expect(view.kind).toBe("tool");
+    expect(view.phase).toBe("started");
+    expect(view.presentation).toEqual({ type: "tool", text: "Action: get", outcome: "running" });
+  });
+
+  test("reads a failed MCP tool call from its state error", () => {
+    // opencode reports failed calls with `status: "error"` and the reason in
+    // `state.error`, not in the part type — exactly what the escape-probe rows
+    // in the live database carry.
+    const make = (status: string) => taskEventView({
+      id: 52,
+      taskId: "task",
+      type: "agent.tool_use",
+      state: "running",
+      payload: {
+        type: "tool_use",
+        part: {
+          type: "tool",
+          tool: "inter_memory",
+          callID: "call_00_failed",
+          state: {
+            status,
+            input: { action: "set", cwd: "/repo" },
+            error: "Tool execution aborted",
+            title: "",
+          },
+        },
+      },
+      createdAt: "now",
+    }, "opencode");
+
+    const errored = make("error");
+    expect(errored.kind).toBe("error");
+    expect(errored.phase).toBe("failed");
+    expect(errored.title).toBe("Inter Memory failed");
+    expect(errored.detail).toBe("Action: set · Tool execution aborted");
+    expect(errored.actionId).toBe("call_00_failed");
+
+    const failed = make("failed");
+    expect(failed.kind).toBe("error");
+    expect(failed.title).toBe("Inter Memory failed");
+  });
+
+  test("leaves a label-less tool part in the raw fallback", () => {
+    const view = taskEventView({
+      id: 53,
+      taskId: "task",
+      type: "agent.tool_use",
+      state: "running",
+      payload: {
+        type: "tool_use",
+        part: { type: "tool", state: { status: "completed", input: {} } },
+      },
+      createdAt: "now",
+    }, "opencode");
+    expect(view.kind).toBe("raw");
+    expect(view.rawText).toContain("tool_use");
+  });
+
+  test("reduces an unrecognized tool's JSON output to a count", () => {
+    const view = taskEventView({
+      id: 54,
+      taskId: "task",
+      type: "agent.tool_use",
+      state: "running",
+      payload: {
+        type: "tool_use",
+        part: {
+          type: "tool",
+          tool: "inter_tasks",
+          callID: "call_00_count",
+          state: {
+            status: "completed",
+            input: { queryId: 7 },
+            output: "[{ \"id\": 1 }, { \"id\": 2 }, { \"id\": 3 }]",
+            title: "",
+          },
+        },
+      },
+      createdAt: "now",
+    }, "opencode");
+    expect(view.kind).toBe("tool");
+    expect(view.title).toBe("Inter Tasks");
+    expect(view.detail).toBe("3 items");
+    expect(view.detail).not.toContain("[{");
+  });
 });
