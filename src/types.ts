@@ -3,6 +3,14 @@ export type TaskState =
   | "queued"
   | "running"
   | "needs_input"
+  /**
+   * Unreachable: no writer produces it. `answerTask` sets the row back to
+   * `queued` and records `answered` as the *event* type, so the state only ever
+   * appears in an event log. Kept rather than removed because the string is
+   * pinned outside this file — both `CHECK(state IN (…))` constraints in the
+   * live schema and the Swift `TaskState` enum decode it — and those have to
+   * land together with a migration.
+   */
   | "answered"
   | "blocked"
   | "completed"

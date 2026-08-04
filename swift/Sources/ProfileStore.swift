@@ -6,10 +6,7 @@ import Observation
 final class ProfileStore {
     var profiles: [Profile] = []
     var tasks: [TaskSnapshot] = []
-    var profileFailures: [ProfileFailureSnapshot] = []
-    var grants: [ScopeGrantSnapshot] = []
     var memoryProjects: [MemoryProjectSnapshot] = []
-    var error: String?
     private var polling: Task<Void, Never>?
 
     func start() {
@@ -31,13 +28,8 @@ final class ProfileStore {
             let state = try JSONDecoder().decode(BrokerState.self, from: data)
             profiles = state.profiles
             tasks = state.tasks
-            profileFailures = state.profileFailures
-            grants = state.grants
             memoryProjects = state.memoryProjects ?? []
-            error = nil
-        } catch {
-            self.error = "Broker unavailable"
-        }
+        } catch {}
     }
 
     func save(_ profile: Profile, isNew: Bool) async throws {
@@ -72,13 +64,11 @@ final class ProfileStore {
         do {
             let (_, response) = try await URLSession.shared.data(for: request)
             guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-                self.error = "Couldn’t update task archive"
                 return false
             }
             await refresh()
             return true
         } catch {
-            self.error = "Couldn’t update task archive"
             return false
         }
     }
@@ -97,13 +87,11 @@ final class ProfileStore {
         do {
             let (_, response) = try await URLSession.shared.data(for: request)
             guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-                self.error = "Couldn’t cancel task"
                 return false
             }
             await refresh()
             return true
         } catch {
-            self.error = "Couldn’t cancel task"
             return false
         }
     }
@@ -120,13 +108,11 @@ final class ProfileStore {
         do {
             let (_, response) = try await URLSession.shared.data(for: request)
             guard (response as? HTTPURLResponse)?.statusCode == 202 else {
-                self.error = "Couldn’t resume task"
                 return false
             }
             await refresh()
             return true
         } catch {
-            self.error = "Couldn’t resume task"
             return false
         }
     }
@@ -140,28 +126,11 @@ final class ProfileStore {
         do {
             let (data, response) = try await URLSession.shared.data(from: url)
             guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-                self.error = "Couldn’t load project memories"
                 return []
             }
             return try JSONDecoder().decode(MemoryList.self, from: data).memories
         } catch {
-            self.error = "Couldn’t load project memories"
             return []
-        }
-    }
-
-    func revokeGrant(_ id: String) async {
-        var request = URLRequest(url: InterServer.api("grants/\(id)"))
-        request.httpMethod = "DELETE"
-        do {
-            let (_, response) = try await URLSession.shared.data(for: request)
-            guard (response as? HTTPURLResponse)?.statusCode == 204 else {
-                self.error = "Couldn’t revoke scope grant"
-                return
-            }
-            await refresh()
-        } catch {
-            self.error = "Couldn’t revoke scope grant"
         }
     }
 }

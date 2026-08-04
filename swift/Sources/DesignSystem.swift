@@ -33,21 +33,10 @@ enum Surface {
     }
 }
 
-/// One switch for the app's voice. `.data` puts every machine-produced string —
-/// ids, paths, commands, models, env values, tool names — in the monospaced face
-/// and leaves prose in the system face, which stays 20% narrower and easier to
-/// read across a wide panel. `.mono` sends the whole app mono, prose included.
-enum Typeface {
-    case data
-    case mono
-
-    static let current: Typeface = .data
-
-    /// Resolves a call site's request against the app-wide choice.
-    static func design(_ requested: Font.Design) -> Font.Design {
-        current == .mono ? .monospaced : requested
-    }
-}
+// The app's voice: every machine-produced string — ids, paths, commands, models,
+// env values, tool names — asks for the monospaced face at its call site, and
+// prose stays in the system face, which is 20% narrower and easier to read
+// across a wide panel.
 
 // MARK: - UI scale
 
@@ -101,7 +90,7 @@ extension Font {
         .system(
             size: TextStyleSize.base(style) * scale,
             weight: weight ?? TextStyleSize.weight(style),
-            design: Typeface.design(design)
+            design: design
         )
     }
 }

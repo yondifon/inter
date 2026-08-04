@@ -70,11 +70,14 @@ export function commandFor(
   }
 }
 
+/**
+ * Every provider {@link resumeCommandFor} knows how to resume is a case in its
+ * switch, and that switch is the one place the set is written down. What it
+ * cannot resume is a profile carrying its own `command`: Inter did not build
+ * that argv, so it has nowhere to put a session id.
+ */
 export function canResumeSession(profile: Profile): boolean {
-  if (profile.command) return false;
-  return profile.provider === "claude" || profile.provider === "codex" ||
-    profile.provider === "opencode" || profile.provider === "antigravity" ||
-    profile.provider === "pi";
+  return !profile.command;
 }
 
 export function resumeCommandFor(

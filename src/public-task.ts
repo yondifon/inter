@@ -10,15 +10,21 @@ export const TASK_FIELD_GROUPS = {
   attempts: ["attempts"],
   completion: ["completion", "error", "question"],
   spend: ["costUsd", "turns"],
-} as const;
+} as const satisfies Record<string, readonly (keyof Task)[]>;
 
-export const TASK_FIELD_KEYS = [...Object.keys(TASK_FIELD_GROUPS), "all"] as const;
-export type TaskField = (typeof TASK_FIELD_KEYS)[number];
+export type TaskFieldGroup = keyof typeof TASK_FIELD_GROUPS;
+export type TaskField = TaskFieldGroup | "all";
 
-export function publicTask(task: Task): Omit<Task, "sessionId"> {
-  const { sessionId: _sessionId, ...value } = task;
-  return value;
-}
+/**
+ * Spelled out rather than derived: `Object.keys` returns `string[]`, so building
+ * this list from it collapsed {@link TaskField} to `string` and left every
+ * `fields` default unchecked. The `satisfies` clause keeps the list honest — a
+ * group renamed or dropped from {@link TASK_FIELD_GROUPS} fails to compile here.
+ */
+export const TASK_FIELD_KEYS = [
+  "routing", "context", "scope", "prompt", "shippedPrompt",
+  "output", "attempts", "completion", "spend", "all",
+] as const satisfies readonly TaskField[];
 
 export function publicTaskSummary(task: TaskSummary): Omit<TaskSummary, "sessionId"> {
   const { sessionId: _sessionId, ...value } = task;
@@ -36,17 +42,23 @@ function publicAttempt(attempt: TaskAttempt): Omit<TaskAttempt, "sessionId"> {
 }
 
 /**
+ * What {@link taskView} emits: the always-present floor, plus whatever groups
+ * the caller selected. Never `sessionId` — it is not in `Task`'s public half.
+ */
+export type TaskFieldView =
+  & Partial<Omit<Task, "sessionId" | "id" | "state">>
+  & { id: string; state: TaskState; attemptCount?: number };
+
+/**
  * Return what a caller asked for, and nothing else. The floor is id, state,
  * plus attemptCount when there are prior attempts and archivedAt when set.
  * Most callers already have the data they just sent, which is why the floor is
  * so bare. Pass {@link TaskField} groups to pull in the parts the caller
  * genuinely needs. `"all"` expands to every group. Never emits `sessionId`.
  */
-export function taskView(task: Task, fields: readonly TaskField[]): Record<string, unknown> {
-  const groups = fields.includes("all")
-    ? Object.keys(TASK_FIELD_GROUPS)
-    : fields;
-  const want = new Set(groups.flatMap((g) => (TASK_FIELD_GROUPS as Record<string, readonly string[]>)[g] ?? []));
+export function taskView(task: Task, fields: readonly TaskField[]): TaskFieldView {
+  const groups = fields.includes("all") ? TASK_FIELD_KEYS : fields;
+  const want = new Set(groups.flatMap((g) => (g === "all" ? [] : TASK_FIELD_GROUPS[g])));
 
   return {
     id: task.id,

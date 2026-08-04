@@ -79,11 +79,6 @@ struct TaskSnapshot: Codable, Identifiable, Hashable {
     /// Provider-native worker session. Copy this into the provider CLI when a
     /// task must be resumed outside Inter.
     var sessionId: String?
-    /// The text actually sent to the provider: the caller's prompt plus this
-    /// cwd's memories and the protocol wrapper.
-    var shippedPrompt: String?
-    /// Scope grant this run inherited. Absent means it fell back to the whole tree.
-    var grantId: String?
     var costUsd: Double?
     var turns: Int?
     var archivedAt: String?
@@ -160,10 +155,6 @@ struct TaskEventPage: Codable {
 struct BrokerState: Codable {
     var profiles: [Profile]
     var tasks: [TaskSnapshot]
-    /// Why a provider is being avoided right now.
-    var profileFailures: [ProfileFailureSnapshot]
-    /// What each working directory has been approved to expose.
-    var grants: [ScopeGrantSnapshot]
     /// How much memory each project holds. Optional so a broker predating the
     /// field still decodes instead of blanking the whole window.
     var memoryProjects: [MemoryProjectSnapshot]?
@@ -204,21 +195,4 @@ struct ProfileFailureSnapshot: Codable, Identifiable, Hashable {
     var failedAt: String
     var consecutiveFailures: Int
     var retryAt: String?
-}
-
-struct ScopeGrantSnapshot: Codable, Identifiable, Hashable {
-    var id: String
-    var cwd: String
-    /// Destination the scope was approved for. Empty on grants predating
-    /// per-destination approval, which other profiles borrow rather than own.
-    var profileId: String
-    var scope: TaskScopeSnapshot
-    var createdAt: String
-    var lastUsedAt: String
-    var useCount: Int
-}
-
-struct TaskScopeSnapshot: Codable, Hashable {
-    var read: [String]
-    var write: [String]
 }

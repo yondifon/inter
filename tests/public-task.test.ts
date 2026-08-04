@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { publicTask, publicTaskSummary, taskView, TASK_FIELD_GROUPS, waitTaskView } from "../src/public-task";
+import { publicTaskSummary, taskView, TASK_FIELD_GROUPS, waitTaskView } from "../src/public-task";
 import { runCostFrom } from "../src/tasks";
 import type { Task, TaskSummary } from "../src/types";
 
@@ -59,7 +59,7 @@ describe("wait payload", () => {
 
   test("keeps the provider session private while inspect keeps the full text", () => {
     expect(waitTaskView(pollingTask())).not.toHaveProperty("sessionId");
-    expect(publicTask(pollingTask()).shippedPrompt).toBeDefined();
+    expect(taskView(pollingTask(), ["shippedPrompt"]).shippedPrompt).toBeDefined();
   });
 
   test("rides the caller's tldr on every poll and omits it when absent", () => {
@@ -238,7 +238,7 @@ describe("taskView", () => {
         completion: { blocked: true, code: "rate_limit" },
       }],
     });
-    const attempts = taskView(moved, ["attempts"]).attempts as Array<Record<string, unknown>>;
+    const attempts = taskView(moved, ["attempts"]).attempts ?? [];
     expect(attempts[0]).toHaveProperty("profileId", "claude-work");
     expect(attempts[0]).not.toHaveProperty("sessionId");
     expect(JSON.stringify(taskView(moved, ["all"]))).not.toContain("provider-session");
@@ -287,8 +287,8 @@ describe("public task contract", () => {
       sessionId: task.sessionId,
     } satisfies TaskSummary;
 
-    expect(publicTask(task)).toMatchObject({ id: "inter-task" });
-    expect(publicTask(task)).not.toHaveProperty("sessionId");
+    expect(taskView(task, ["all"])).toMatchObject({ id: "inter-task" });
+    expect(taskView(task, ["all"])).not.toHaveProperty("sessionId");
     expect(publicTaskSummary(summary)).not.toHaveProperty("sessionId");
   });
 });
