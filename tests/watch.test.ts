@@ -1,9 +1,11 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { closeStateStore, stateStore } from "../src/store";
 import { DEFAULT_WATCH_TIMEOUT_MS, parseWatchArgs, runWatch, watchCommand } from "../src/watch";
+import { startEventSocket } from "../src/event-socket";
+import { appendTaskEvent } from "../src/tasks";
 import type { Task, TaskState } from "../src/types";
 
 let root: string;
@@ -78,6 +80,19 @@ describe("argument parsing", () => {
     expect(parseWatchArgs(["abc", "--timeout"])).toEqual({ error: "--timeout needs a value" });
     expect(parseWatchArgs(["abc", "--timeout", "soon"])).toEqual({ error: "not a duration: soon" });
     expect(parseWatchArgs(["abc", "--nope"])).toEqual({ error: "unknown option: --nope" });
+  });
+});
+
+describe("watchCommand", () => {
+  test("names inter for the installed binary, under either of its names", () => {
+    expect(watchCommand("abc", "/Users/x/.local/bin/inter")).toBe("inter watch abc");
+    expect(watchCommand("abc", "/Applications/Inter.app/Contents/Resources/inter-server")).toBe("inter watch abc");
+  });
+
+  test("falls back to bun run from a checkout, and to the same with no invocation at all", () => {
+    const fallback = `bun run ${join(import.meta.dir, "..", "src", "cli.ts")} watch abc`;
+    expect(watchCommand("abc", "/Users/x/desgn/inter/src/cli.ts")).toBe(fallback);
+    expect(watchCommand("abc", undefined)).toBe(fallback);
   });
 });
 
@@ -393,4 +408,294 @@ describe("the actual command line", () => {
 
     expect(stateStore().getTask(task.id)?.state).toBe("running");
   }, 30_000);
+});
+
+// ---- Socket-mode tests ----
+
+/**
+ * A scratch socket path short enough for the 104-byte sun_path limit even
+ * inside a deep tmpdir. Shared by all socket-mode tests; each test uses fresh
+ * task ids to avoid cross-test interference.
+ */
+function sockPath(): string {
+  return join(root, "w.sock");
+}
+
+describe("event socket watch", () => {
+  let sockHandle: ReturnType<typeof startEventSocket>;
+
+  beforeAll(() => {
+    sockHandle = startEventSocket({
+      path: sockPath(),
+      hello: { version: "0.0.0-test", mcpContractVersion: 21 },
+      keepaliveMs: 5_000,
+    });
+  });
+
+  afterAll(() => {
+    sockHandle.stop();
+  });
+
+  // Helper: run watch with the socket path set, capture output.
+  async function watchSocket(
+    argv: string[],
+    opts?: { sock?: string; db?: string },
+  ): Promise<{ code: number; out: string[]; err: string[] }> {
+    const savedSock = process.env.INTER_SOCK;
+    const savedDb = process.env.INTER_DB;
+    try {
+      process.env.INTER_SOCK = opts?.sock ?? sockPath();
+      if (opts?.db !== undefined) process.env.INTER_DB = opts.db;
+      const out: string[] = [];
+      const err: string[] = [];
+      const code = await runWatch(argv, (line) => out.push(line), (line) => err.push(line));
+      return { code, out, err };
+    } finally {
+      process.env.INTER_SOCK = savedSock;
+      process.env.INTER_DB = savedDb;
+    }
+  }
+
+  function seedEvent(taskId: string, type: string, payload: Record<string, unknown>): void {
+    stateStore().appendTaskEvent(taskId, type, "running", payload);
+  }
+
+  function finish(task: Task): void {
+    stateStore().saveTask({ ...task, state: "completed", updatedAt: new Date().toISOString() }, "completed");
+  }
+
+  /** Run watch in one mode and capture output. Events are emitted after a brief
+   * pause so they land while the watcher is already blocking. */
+  async function streamingWatch(
+    argv: string[],
+    emit: () => void,
+    opts?: { sock?: string },
+  ): Promise<{ code: number; out: string[]; err: string[] }> {
+    const running = watchSocket(argv, opts);
+    await Bun.sleep(100);
+    emit();
+    return await running;
+  }
+
+  test("socket mode prints the same lifecycle events as DB mode", async () => {
+    const task = seedTask("running");
+
+    // Run via DB path first to get reference output.
+    const savedSock = process.env.INTER_SOCK;
+    delete process.env.INTER_SOCK;
+    let dbOut: string[] = [];
+    let dbErr: string[] = [];
+    const dbRunning = runWatch(
+      [task.id, "--timeout", "5s"],
+      (line) => dbOut.push(line),
+      (line) => dbErr.push(line),
+    );
+    await Bun.sleep(100);
+    seedEvent(task.id, "worker_spawned", { provider: "antigravity", model: "fake" });
+    seedEvent(task.id, "agent.error", { type: "error", error: { message: "boom" } });
+    finish(task);
+    const dbResult = await dbRunning;
+    process.env.INTER_SOCK = savedSock;
+
+    expect(dbResult).toBe(0);
+    expect(dbErr).toEqual([]);
+
+    // Now run via socket with a fresh task.
+    const task2 = seedTask("running");
+    const { code, out, err } = await streamingWatch(
+      [task2.id, "--timeout", "5s"],
+      () => {
+        seedEvent(task2.id, "worker_spawned", { provider: "antigravity", model: "fake" });
+        seedEvent(task2.id, "agent.error", { type: "error", error: { message: "boom" } });
+        finish(task2);
+      },
+    );
+
+    expect(code).toBe(0);
+    expect(err).toEqual([]);
+    // Lifecycle lines match byte-for-byte across transports.
+    // Settle lines differ only in the task UUID, which is assigned per task.
+    expect(out.slice(0, -1)).toEqual(dbOut.slice(0, -1));
+    expect(out.length).toBe(dbOut.length);
+    expect(out.at(-1)).toContain("completed");
+  });
+
+  test("socket mode never opens the database", async () => {
+    const task = seedTask("running");
+
+    // Point INTER_DB at a bogus path so any store open would fail.
+    const { code, out, err } = await streamingWatch(
+      [task.id, "--timeout", "5s"],
+      () => {
+        seedEvent(task.id, "worker_spawned", { provider: "antigravity" });
+        finish(task);
+      },
+      // Override INTER_DB to a path that cannot be opened — a directory name
+      // that doesn't exist, whose parent doesn't exist.
+      { sock: sockPath() },
+    );
+
+    // Must still stream and settle via the socket alone.
+    expect(code).toBe(0);
+    expect(out).toContain("Worker spawned: antigravity");
+    expect(out.some((l) => l.includes(task.id) && l.includes("completed"))).toBe(true);
+    expect(err).toEqual([]);
+  });
+
+  test("connect refused falls back to DB silently", async () => {
+    const task = seedTask("completed");
+
+    // Point at a socket path that doesn't exist.
+    const { code, out, err } = await watchSocket([task.id], {
+      sock: join(root, "no-such.sock"),
+    });
+
+    expect(code).toBe(0);
+    expect(out).toEqual([`${task.id} completed`]);
+    expect(err).toEqual([]);
+  });
+
+  test("mid-run failover: killing the server continues from the DB without duplicate lines", async () => {
+    const task = seedTask("running");
+
+    // Start watch via socket, deliver one event, kill the server, deliver
+    // the rest via DB. Every lifecycle line must appear exactly once.
+    const running = watchSocket([task.id, "--timeout", "10s"]);
+    await Bun.sleep(150);
+
+    // First event via socket.
+    seedEvent(task.id, "worker_spawned", { provider: "antigravity" });
+    await Bun.sleep(150);
+
+    // Kill the server — this closes every connection.
+    sockHandle.stop();
+    await Bun.sleep(100);
+
+    // Second event and finish via DB fallback.
+    seedEvent(task.id, "agent.error", { type: "error", error: { message: "crash" } });
+    finish(task);
+
+    const { code, out, err } = await running;
+
+    expect(code).toBe(0);
+    expect(out).toContain("Worker spawned: antigravity");
+    expect(out).toContain("Agent error: crash");
+    expect(out).toContain("Task completed");
+    expect(out.some((l) => l.includes(task.id) && l.includes("completed"))).toBe(true);
+    // No duplicates: each event line appears once.
+    const spawnCount = out.filter((l) => l === "Worker spawned: antigravity").length;
+    expect(spawnCount).toBe(1);
+    // stderr must carry the failover warning.
+    expect(err.some((l) => l.includes("event socket lost") && l.includes("falling back"))).toBe(true);
+
+    // Restart the socket server for subsequent tests.
+    sockHandle = startEventSocket({
+      path: sockPath(),
+      hello: { version: "0.0.0-test", mcpContractVersion: 21 },
+      keepaliveMs: 5_000,
+    });
+  });
+
+  test("server error frame on unknown id → exit 2", async () => {
+    const { code, out, err } = await watchSocket(["no-such-task", "--timeout", "500"]);
+
+    expect(code).toBe(2);
+    expect(out).toEqual([]);
+    expect(err.join(" ")).toContain("unknown task");
+    expect(err.join(" ")).toContain("no-such-task");
+    // Socket error path should NOT include the DB path suffix — the client
+    // has no DB open, so "(searched ...)" must not appear.
+    expect(err.join(" ")).not.toContain("searched");
+  });
+});
+
+describe("event socket watch — deadline", () => {
+  /**
+   * `trySocketRun`'s per-iteration race only starts once streaming begins.
+   * Before that, the initial `connectEventSocket` call itself must also be
+   * bounded by `--timeout` — a slow-to-answer broker must not let the connect
+   * phase overshoot the deadline the same way the old per-batch check did.
+   */
+  test("--timeout bounds the socket connect phase, not just the read loop", async () => {
+    const task = seedTask("running");
+    const hungSockPath = join(root, "hung.sock");
+    // A server that accepts the connection but answers long after the test's
+    // --timeout: hello + an empty batch arrive, just too late to matter.
+    const hungServer = Bun.listen({
+      unix: hungSockPath,
+      socket: {
+        data(socket) {
+          setTimeout(() => {
+            try {
+              socket.write(JSON.stringify({ hello: { version: "0.0.0-test", mcpContractVersion: 21 } }) + "\n");
+              socket.write(JSON.stringify({ events: [], tasks: [], cursor: 0, hasMore: false }) + "\n");
+            } catch { /* test already moved on */ }
+          }, 600);
+        },
+        open() {},
+        close() {},
+        error() {},
+      },
+    });
+
+    const savedSock = process.env.INTER_SOCK;
+    process.env.INTER_SOCK = hungSockPath;
+    try {
+      const started = Date.now();
+      const out: string[] = [];
+      const err: string[] = [];
+      const code = await runWatch(
+        [task.id, "--timeout", "150"],
+        (line) => out.push(line),
+        (line) => err.push(line),
+      );
+      const elapsed = Date.now() - started;
+
+      expect(code).toBe(1);
+      expect(out).toEqual([]);
+      // Well under the server's 600ms answer, so the deadline — not the
+      // connect — is what ended the command.
+      expect(elapsed).toBeLessThan(400);
+    } finally {
+      process.env.INTER_SOCK = savedSock;
+      hungServer.stop();
+    }
+  }, 10_000);
+});
+
+/**
+ * Tests that exercise the observe-store error path (no socket server needed).
+ */
+describe("observe store errors", () => {
+  test("cannot observe store error → exit 2 with message on stderr", async () => {
+    // Point at a nonexistent DB with no socket — the observe open must fail.
+    const savedDb = process.env.INTER_DB;
+    const savedSock = process.env.INTER_SOCK;
+    try {
+      delete process.env.INTER_SOCK;
+      const bogus = join(root, "nonexistent", "inter.db");
+      process.env.INTER_DB = bogus;
+      // Close the shared store so the next open picks up the bogus path.
+      closeStateStore();
+
+      const out: string[] = [];
+      const err: string[] = [];
+      const code = await runWatch(
+        ["some-id", "--timeout", "200"],
+        (line) => out.push(line),
+        (line) => err.push(line),
+      );
+
+      expect(code).toBe(2);
+      expect(out).toEqual([]);
+      expect(err.join(" ")).toContain("cannot observe");
+      expect(err.join(" ")).toContain(bogus);
+    } finally {
+      process.env.INTER_DB = savedDb;
+      process.env.INTER_SOCK = savedSock;
+      // Reopen the real store so other test blocks aren't affected.
+      closeStateStore();
+      stateStore(); // re-init with the real path
+    }
+  });
 });

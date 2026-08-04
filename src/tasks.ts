@@ -231,6 +231,7 @@ export function compactPayload(payload: Record<string, unknown>): Record<string,
 interface PiBlock {
   kind: "thinking" | "text";
   text: string;
+  lastStoredText: string;
 }
 
 /// pi streams one message_update per token — 4,365 thinking_delta rows in a
@@ -238,10 +239,13 @@ interface PiBlock {
 /// The deltas of one block are folded into a buffer and stored once at the
 /// block boundary, in the `*_end` shape pi itself uses to close with the whole
 /// block in `content`; a block that never ends still surfaces a row each
-/// PI_DELTA_FLUSH_MS. toolcall_* fragments are dropped outright:
-/// tool_execution_* already records the call, and a streamed argument token
-/// is not row-worthy. The fold keys off the pi provider, never off the shape —
-/// a non-pi provider emitting identical lines stores them verbatim.
+/// PI_DELTA_FLUSH_MS. A progress flush row carries only new text since the last
+/// flush, so a block with N characters flushed K times stores O(N) characters
+/// total, not O(N·K). The boundary row carries the entire assembled block.
+/// toolcall_* fragments are dropped outright: tool_execution_* already records
+/// the call, and a streamed argument token is not row-worthy. The fold keys off
+/// the pi provider, never off the shape — a non-pi provider emitting identical
+/// lines stores them verbatim.
 function foldPiDelta(
   payload: Record<string, unknown>,
   block: PiBlock | undefined,
@@ -258,19 +262,21 @@ function foldPiDelta(
     return { block };
   }
   if (type === "thinking_delta" || type === "text_delta") {
-    const next = block?.kind === kind ? block : { kind, text: "" };
+    const next = block?.kind === kind ? block : { kind, text: "", lastStoredText: "" };
     const text = typeof detail.delta === "string" ? detail.delta : "";
     next.text += text;
     if (now - lastFlushAt >= PI_DELTA_FLUSH_MS) {
+      const newText = next.text.slice(next.lastStoredText.length);
+      next.lastStoredText = next.text;
       return {
         block: next,
-        row: { type: "message_update", assistantMessageEvent: { type: `${kind}_end`, content: next.text } },
+        row: { type: "message_update", assistantMessageEvent: { type: `${kind}_end`, content: newText } },
       };
     }
     return { block: next };
   }
   if (type === "thinking_start" || type === "text_start") {
-    return { block: { kind, text: typeof detail.delta === "string" ? detail.delta : "" } };
+    return { block: { kind, text: typeof detail.delta === "string" ? detail.delta : "", lastStoredText: "" } };
   }
   // thinking_end / text_end: the boundary row, carrying the whole block.
   const text = block?.kind === kind ? block.text : "";

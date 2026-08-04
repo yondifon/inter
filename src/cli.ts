@@ -35,10 +35,14 @@ import { mcpWaitBlockMs } from "./mcp-wait";
 import { loadRoutingPolicy } from "./routing-policy";
 import { runWatch, watchCommand } from "./watch";
 import { runInflight } from "./inflight";
+import { startEventSocket } from "./event-socket";
+import { MCP_CONTRACT_VERSION, VERSION } from "./version";
 
 const port = Number(Bun.env.INTER_PORT ?? 7331);
-const VERSION = "0.6.0";
-const MCP_CONTRACT_VERSION = 21;
+// The one answer to "what build are you": /health serves it from the broker on
+// the port, `version` prints it from the binary on disk, and `make install`
+// fails when those two disagree. One literal, so the two cannot drift.
+const healthReport = { status: "ok", version: VERSION, mcpContractVersion: MCP_CONTRACT_VERSION } as const;
 
 // `watch` is the one invocation that is not the broker. It reads the same
 // SQLite store the broker writes, rather than calling the broker over HTTP, so
@@ -54,6 +58,24 @@ if (process.argv[2] === "watch") {
 // which is what lets `make install` warn before it kills anything.
 if (process.argv[2] === "inflight") {
   process.exit(runInflight());
+}
+
+// `version` is the binary's own answer to /health, read from disk rather than
+// from the port — the comparison `make install` makes before it calls an
+// install done. It claims the process before Bun.serve binds for the same
+// reason `watch` does.
+if (process.argv[2] === "version") {
+  console.log(JSON.stringify(healthReport));
+  process.exit(0);
+}
+
+// Anything else in argv[2] is a typo reaching for a subcommand, and booting
+// the broker anyway dies on the bound port with an EADDRINUSE that says
+// nothing about the mistake. `--stdio` is a flag for MCP client configs, not
+// a subcommand, and no argument at all is the app bundle launching the broker.
+if (process.argv[2] !== undefined && process.argv[2] !== "--stdio") {
+  console.error(`unknown command '${process.argv[2]}' — usage: inter [watch <taskId...> | inflight | version]`);
+  process.exit(2);
 }
 
 // A foreground MCP call still owns the caller's agent turn, which is why
@@ -175,7 +197,7 @@ Bun.serve({
     const url = new URL(request.url);
     if (url.pathname === "/mcp") return mcpHandler.fetch(request);
     if (url.pathname === "/health") {
-      return Response.json({ status: "ok", version: VERSION, mcpContractVersion: MCP_CONTRACT_VERSION });
+      return Response.json(healthReport);
     }
     if (url.pathname === "/api/state" && request.method === "GET") {
       const config = await loadConfig();
@@ -402,6 +424,16 @@ Bun.serve({
     return new Response("Not found", { status: 404 });
   },
 });
+
+// The port bind is the single-instance lock; the socket unlink after it can
+// never steal a live broker's socket (D-007). The socket is an accelerator —
+// watch falls back to DB polling when it is absent.
+const eventSocket = startEventSocket({
+  hello: { version: VERSION, mcpContractVersion: MCP_CONTRACT_VERSION },
+});
+if (eventSocket.path) {
+  console.log(`event socket bound: ${eventSocket.path}`);
+}
 
 if (process.argv.includes("--stdio")) {
   serveStdio(() => createMcpServer());

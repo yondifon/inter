@@ -240,4 +240,126 @@ describe("capture coalescing and liveness", () => {
     expect(first.payload.stalled).toBe(false);
     expect(Number(first.payload.silentMs)).toBeLessThan(5_000);
   }, 30_000);
+
+  test("flush rows carry only new text, not cumulative; closing row carries the whole block", async () => {
+    const root = mkdtempSync(join(tmpdir(), "inter-capture-"));
+    scratch.push(root);
+    process.env.INTER_DB = join(root, "inter.db");
+    process.env.INTER_ROOTS = root;
+    // Emit a block with deltas spaced to trigger flushes, then close. The key
+    // invariant: flush rows carry only new text since the last flush, and the
+    // closing boundary carries the whole assembled block. Concatenating the
+    // flush contents should reconstruct the closing row's content, not exceed it.
+    const script = [
+      `printf '%s\\n' '{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","delta":"aaa"}}'`,
+      `sleep 1.5`,
+      `printf '%s\\n' '{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","delta":"bbb"}}'`,
+      `sleep 1.5`,
+      `printf '%s\\n' '{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","delta":"ccc"}}'`,
+      `printf '%s\\n' '{"type":"message_update","assistantMessageEvent":{"type":"thinking_end","content":"aaabbbccc"}}'`,
+      `printf 'INTER_RESULT: completed\\n'`,
+    ].join("; ");
+    stateStore().saveProfiles([{ ...streamProfile("pi"), command: ["/bin/sh", "-c", script] }]);
+
+    const task = await delegate("pi", "prompt", root);
+    const done = await settled(task.id);
+    expect(done.state).toBe("completed");
+    const updates = capture(task.id);
+    // At least 2 rows: one or more flushes and the closing boundary.
+    expect(updates.length).toBeGreaterThanOrEqual(2);
+
+    // The last row must be the closing boundary with the whole block.
+    const lastRow = block(updates[updates.length - 1]!);
+    expect(lastRow.type).toBe("thinking_end");
+    expect((lastRow as Record<string, unknown>).content).toBe("aaabbbccc");
+    const closingContent = (lastRow as Record<string, unknown>).content as string;
+
+    // All prior rows are flush rows. Concatenate their contents.
+    const flushContents = updates.slice(0, -1).map((e) => block(e).content as string);
+    const flushConcatenated = flushContents.join("");
+
+    // The concatenated flush rows should equal the closing row's content, or be
+    // a prefix of it (if the last few deltas arrived but no flush fired before close).
+    // They should NOT be longer or contain repetition of earlier content.
+    expect(closingContent.startsWith(flushConcatenated)).toBe(true);
+    // The last row holds the complete text; flushes should never exceed it.
+    expect(flushConcatenated.length).toBeLessThanOrEqual(closingContent.length);
+  }, 15_000);
+
+  test("a block that closes without flushing stores only the closing boundary", async () => {
+    const root = mkdtempSync(join(tmpdir(), "inter-capture-"));
+    scratch.push(root);
+    process.env.INTER_DB = join(root, "inter.db");
+    process.env.INTER_ROOTS = root;
+    // Emit a short block (200 bytes total) in one burst, no time for flush:
+    // this tests the pre-flush behavior is unchanged.
+    const script = [
+      `printf '%s\\n' '{"type":"message_update","assistantMessageEvent":{"type":"thinking_start","contentIndex":0}}'`,
+      `printf '%s\\n' '{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"'$(printf 'x%.0s' {1..100})'"}}'`,
+      `printf '%s\\n' '{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"'$(printf 'y%.0s' {1..100})'"}}'`,
+      `printf '%s\\n' '{"type":"message_update","assistantMessageEvent":{"type":"thinking_end","contentIndex":0,"content":"'$(printf 'xy%.0s' {1..100})'"}}'`,
+      `printf 'INTER_RESULT: completed\\n'`,
+    ].join("; ");
+    stateStore().saveProfiles([{ ...streamProfile("pi"), command: ["/bin/sh", "-c", script] }]);
+
+    const task = await delegate("pi", "prompt", root);
+    const done = await settled(task.id);
+    expect(done.state).toBe("completed");
+    const updates = capture(task.id);
+    // Only the closing row, no intermediate flushes.
+    expect(updates).toHaveLength(1);
+    expect(block(updates[0]!)).toEqual({ type: "thinking_end", content: "x".repeat(100) + "y".repeat(100) });
+  }, 15_000);
+
+  test("toolcall fragments are still dropped outright", async () => {
+    const root = mkdtempSync(join(tmpdir(), "inter-capture-"));
+    scratch.push(root);
+    process.env.INTER_DB = join(root, "inter.db");
+    process.env.INTER_ROOTS = root;
+    // Mix toolcall fragments with real content; only the real content should store.
+    const script = streamScript([
+      { type: "message_update", assistantMessageEvent: { type: "thinking_start", contentIndex: 0 } },
+      { type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "x" } },
+      { type: "message_update", assistantMessageEvent: { type: "toolcall_start", toolCallId: "t1" } },
+      { type: "message_update", assistantMessageEvent: { type: "toolcall_delta", toolCallId: "t1", delta: '{"name' } },
+      { type: "message_update", assistantMessageEvent: { type: "toolcall_end", toolCallId: "t1", content: '{"name":"edit"}' } },
+      { type: "message_update", assistantMessageEvent: { type: "thinking_end", contentIndex: 0, content: "x" } },
+      "INTER_RESULT: completed",
+    ]);
+    stateStore().saveProfiles([{ ...streamProfile("pi"), command: ["/bin/sh", "-c", script] }]);
+
+    const task = await delegate("pi", "prompt", root);
+    const done = await settled(task.id);
+    expect(done.state).toBe("completed");
+    const updates = capture(task.id);
+    // Only the thinking_end boundary; no toolcall rows.
+    expect(updates).toHaveLength(1);
+    expect(block(updates[0]!)).toEqual({ type: "thinking_end", content: "x" });
+    expect(capture(task.id).some((e) => String(block(e)?.type ?? "").startsWith("toolcall"))).toBe(false);
+  }, 15_000);
+
+  test("another provider's identical-looking lines are still stored verbatim", async () => {
+    const root = mkdtempSync(join(tmpdir(), "inter-capture-"));
+    scratch.push(root);
+    process.env.INTER_DB = join(root, "inter.db");
+    process.env.INTER_ROOTS = root;
+    // On opencode, the same lines must all store; the fold is pi-only.
+    const lines = [
+      { type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "x" } },
+      { type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "y" } },
+      { type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "z" } },
+    ];
+    const script = streamScript([...lines, "INTER_RESULT: completed"]);
+    stateStore().saveProfiles([{ ...streamProfile("opencode"), command: ["/bin/sh", "-c", script] }]);
+
+    const task = await delegate("opencode", "prompt", root);
+    const done = await settled(task.id);
+    expect(done.state).toBe("completed");
+    const rows = stateStore().listTaskEvents(task.id).filter((event) => event.type.startsWith("agent."));
+    // All three deltas store as-is; no folding or skipping.
+    expect(rows).toHaveLength(3);
+    for (let index = 0; index < lines.length; index++) {
+      expect(rows[index]!.payload).toEqual(compactPayload(lines[index]!));
+    }
+  }, 15_000);
 });

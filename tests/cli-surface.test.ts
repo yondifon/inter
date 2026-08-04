@@ -319,3 +319,50 @@ describe("/api/state", () => {
     expect(stateStore().getTask(seeded.id)?.output).toBe(task.output);
   });
 });
+
+describe("the build's own answer to /health", () => {
+  test("/health reports the build's identity", async () => {
+    const response = await fetch(`${base}/health`);
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.status).toBe("ok");
+    expect(typeof body.version).toBe("string");
+    expect(typeof body.mcpContractVersion).toBe("number");
+  });
+
+  // `make install` decides the running broker is the build it just made by
+  // comparing these two strings, so the contract worth pinning is that they
+  // are identical.
+  test("the version subcommand prints exactly what /health serves", async () => {
+    const health = await (await fetch(`${base}/health`)).text();
+    const child = Bun.spawn(["bun", "run", join(import.meta.dir, "..", "src", "cli.ts"), "version"], {
+      env: { ...process.env, INTER_PORT: "0" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
+
+    expect(code).toBe(0);
+    expect(stdout.trimEnd()).toBe(health.trimEnd());
+  }, 30_000);
+
+  // A typo used to boot the broker and die on the bound port with an
+  // EADDRINUSE that named nobody's mistake; the usage line names it.
+  test("an unknown subcommand is a usage error, not a broker", async () => {
+    const child = Bun.spawn(["bun", "run", join(import.meta.dir, "..", "src", "cli.ts"), "bogus"], {
+      env: { ...process.env, INTER_PORT: "0" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+
+    expect(code).toBe(2);
+    expect(stdout).toBe("");
+    expect(stderr).toContain("usage:");
+    expect(stderr).toContain("bogus");
+  }, 30_000);
+});

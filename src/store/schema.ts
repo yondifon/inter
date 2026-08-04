@@ -7,6 +7,38 @@ export function configureDatabase(db: Database): void {
   db.exec("PRAGMA foreign_keys = ON");
 }
 
+/**
+ * The subset of configureDatabase safe on a read-only handle. WAL is
+ * deliberately absent: switching journal mode needs a writable connection,
+ * and the broker that owns the file has already set it. busy_timeout and
+ * foreign_keys are per-connection settings and never write to the file.
+ */
+export function configureReadOnlyDatabase(db: Database): void {
+  db.exec("PRAGMA busy_timeout = 5000");
+  db.exec("PRAGMA foreign_keys = ON");
+}
+
+// Every schema version this binary knows, newest last. Version 1 is the
+// founding ledger row; version 5 is the session-id backfill marker, written
+// only after the backfill itself runs, so it is not in the list.
+const MIGRATIONS = [
+  [2, "task scope lifecycle and completion"],
+  [3, "profile failure retry timestamps"],
+  [4, "task worker session ids"],
+  [6, "project memories"],
+  [7, "task archives"],
+  [8, "scope grants, shipped prompts, attempts and cost"],
+  [9, "task titles"],
+  [10, "task worker identity"],
+] as const;
+
+/**
+ * The newest schema this binary can read. Observe-mode opens refuse any
+ * database past it: a newer broker migrated it, and reading it blind would
+ * show a watcher a view of the file that does not match its queries.
+ */
+export const LATEST_SCHEMA_VERSION = Math.max(1, ...MIGRATIONS.map(([version]) => version));
+
 export function migrateDatabase(db: Database): { needsSessionBackfill: boolean } {
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -156,16 +188,7 @@ export function migrateDatabase(db: Database): { needsSessionBackfill: boolean }
       WHERE code = 'rate_limit'
     `);
   }
-  for (const [version, name] of [
-    [2, "task scope lifecycle and completion"],
-    [3, "profile failure retry timestamps"],
-    [4, "task worker session ids"],
-    [6, "project memories"],
-    [7, "task archives"],
-    [8, "scope grants, shipped prompts, attempts and cost"],
-    [9, "task titles"],
-    [10, "task worker identity"],
-  ] as const) {
+  for (const [version, name] of MIGRATIONS) {
     db.query("INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)")
       .run(version, name);
   }

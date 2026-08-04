@@ -2,7 +2,15 @@ import { basename, join } from "node:path";
 import { unknownTaskMessage, waitForTasks } from "./tasks";
 import { settled } from "./public-task";
 import { databasePath, observeStateStore } from "./store";
-import type { Task } from "./types";
+import {
+  connectEventSocket,
+  eventSocketPath,
+  SocketConnectError,
+  SocketErrorFrame,
+  SocketStreamDeath,
+} from "./event-socket";
+import { MCP_CONTRACT_VERSION, VERSION } from "./version";
+import type { Task, TaskState } from "./types";
 
 /**
  * `inter watch` is the floor under follow-along. An MCP `wait` is request and
@@ -17,6 +25,11 @@ import type { Task } from "./types";
  * as they happen — one line each, the plumbing folded away — and whoever reads
  * that log back pays for those lines. Deliberate, and still bounded: the exit
  * code alone carries the news for anything that only reads `$?`.
+ *
+ * When the broker is running, watch prefers its unix-domain event socket for
+ * instant push delivery with zero database access. When the socket is absent or
+ * dies mid-run, it falls back to the same DB-polling loop this command always
+ * used — resuming from the same event cursor so nothing is lost or repeated.
  */
 export const DEFAULT_WATCH_TIMEOUT_MS = 30 * 60_000;
 const MAX_WATCH_TIMEOUT_MS = 86_400_000;
@@ -35,16 +48,19 @@ const MAX_TITLE = 80;
 /**
  * The one place that says how to start this command, so the usage text and the
  * `wait` tool description — the only pointer an MCP caller ever sees — cannot
- * drift apart. It is derived rather than written down because `inter` is not on
- * PATH: `package.json` declares a `bin` that nothing links, and `make install`
- * ships an app bundle, not a CLI. A description naming a command that does not
- * exist is worse than one naming a longer command that does.
+ * drift apart. It is derived rather than written down because the name depends
+ * on how this process started: `make install` links the compiled binary onto
+ * PATH as `inter`, and a checkout has no such link. A description naming a
+ * command that does not exist is worse than one naming a longer command that
+ * does.
  */
-export function watchCommand(taskIds = "<taskId>"): string {
-  // argv[1] is how this process was actually started, so someone who did link
-  // the bin gets `inter` and this checkout gets the invocation that works in it.
-  const entry = process.argv[1];
-  const command = entry && basename(entry).replace(/\.[cm]?[jt]s$/, "") === "inter"
+export function watchCommand(taskIds = "<taskId>", entry: string | undefined = process.argv[1]): string {
+  // argv[1] is how this process was actually started. The installed binary
+  // answers to `inter` whether it was launched through the PATH link or as
+  // the bundle's `inter-server`; anything else is a checkout, which gets the
+  // invocation that works in it.
+  const name = entry && basename(entry).replace(/\.[cm]?[jt]s$/, "");
+  const command = name === "inter" || name === "inter-server"
     ? "inter"
     : `bun run ${join(import.meta.dir, "cli.ts")}`;
   return `${command} watch ${taskIds}`;
@@ -143,75 +159,252 @@ export async function runWatch(
     return 2;
   }
 
-  // Before anything else touches the store: opening it as the broker would run
-  // interrupted-task recovery and fail the very tasks being watched.
-  const store = observeStateStore();
-
-  // An id this store has never held is a typo or a look in the wrong database,
-  // and the caller cannot tell which without being told where the search ran.
-  // An archived id is not in this set — it resolves, and `watchLine` marks it.
-  const missing = parsed.taskIds.filter((id) => !store.getTask(id));
-  if (missing.length > 0) {
-    err(`${unknownTaskMessage(missing.join(", "))} (searched ${databasePath()})`);
-    return 2;
-  }
-
   // One deadline for the whole command rather than one per wait: a task that
   // keeps emitting must not be able to push the finish line back forever.
   const deadline = Date.now() + parsed.timeoutMs;
   // Only a fan-out has to be told whose event this is; a single watch knows.
   const labelled = parsed.taskIds.length > 1;
-  const pending = new Set(parsed.taskIds);
-  // Where the log stands at attach time. Starting from zero instead would
-  // replay the whole trace, which runs to thousands of rows on a long task and
-  // is what `inspect` is for; a watcher came for what happens next.
-  let cursor = store.latestTaskEventId(parsed.taskIds, true);
+
+  // ---- Try the event socket first ----
+
+  const sockResult = await trySocketRun(parsed.taskIds, deadline, labelled, out, err);
+  if (sockResult !== "fallback") return sockResult;
+
+  // ---- DB fallback ----
+
+  return runDbLoop(parsed.taskIds, deadline, labelled, out, err, false);
+}
+
+// ---- Socket attempt ----
+
+/**
+ * Tries the event socket. Returns a numeric exit code on success or fatal
+ * error, or `"fallback"` when the caller should open the store and run the
+ * DB loop instead (socket never existed, or died mid-run and has already
+ * warned to stderr).
+ */
+async function trySocketRun(
+  taskIds: string[],
+  deadline: number,
+  labelled: boolean,
+  out: (line: string) => void,
+  err: (line: string) => void,
+): Promise<number | "fallback"> {
+  let stream;
+  try {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return "fallback";
+    const connecting = connectEventSocket({
+      path: eventSocketPath(),
+      watch: taskIds,
+      // Pass 0 — the server replays history, but we filter to events after
+      // the initialCursor carried in the hello. A huge sentinel would break
+      // the waiter's progress detection (it uses afterCursor as baseline).
+      afterCursor: 0,
+      hello: { version: VERSION, mcpContractVersion: MCP_CONTRACT_VERSION },
+      onVersionWarn: (msg) => err(msg),
+    });
+    // Race the connect itself, not just the per-batch reads below: a broker
+    // that is slow (not absent) to answer must not let --timeout overshoot
+    // while still inside connectEventSocket.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const raced = await Promise.race([
+      connecting.then((s) => ({ timedOut: false as const, stream: s })),
+      new Promise<{ timedOut: true }>((resolve) => {
+        timer = setTimeout(() => resolve({ timedOut: true }), remaining);
+      }),
+    ]).finally(() => clearTimeout(timer));
+    if (raced.timedOut) {
+      // The connect may still land after we've moved on to the DB loop —
+      // close it then so an in-process caller doesn't inherit a live socket
+      // and silence timer (the same leak `finally`'s stream.close() below
+      // prevents for the mainline path).
+      connecting.then((s) => s.close()).catch(() => {});
+      return "fallback";
+    }
+    stream = raced.stream;
+  } catch (e) {
+    if (e instanceof SocketConnectError) return "fallback";
+    if (e instanceof SocketErrorFrame) {
+      err(e.message);
+      return 2;
+    }
+    throw e;
+  }
+
+  // Socket mode: never open the store. Filtering and printing are identical
+  // to the DB path; the batch shapes are the same.
+  const pending = new Set(taskIds);
+  // Start from the cursor the server reports — events before this arrived
+  // before the watcher attached and belong to `inspect`.
+  let cursor = stream.hello.initialCursor ?? 0;
   let settledCount = 0;
+
+  // A manual iterator instead of for-await, because each read races the
+  // deadline: batches only arrive on events or keepalives, and a deadline
+  // checked on arrival alone could overshoot `--timeout` by a whole keepalive.
+  const iterator = stream[Symbol.asyncIterator]();
+  try {
+    while (true) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const result = await Promise.race([
+        iterator.next(),
+        new Promise<"deadline">((resolve) => { timer = setTimeout(() => resolve("deadline"), remaining); }),
+      ]).finally(() => clearTimeout(timer));
+      if (result === "deadline" || result.done) break;
+      const batch = result.value;
+      // Events at or before the attach-time cursor are history; they belong
+      // to `inspect`, not to this watcher.
+      const fresh = batch.events.filter((e) => e.id > cursor);
+      cursor = processStreamedEvents(fresh, cursor, labelled, out);
+      cursor = Math.max(cursor, batch.cursor);
+      if (batch.hasMore) continue;
+      settledCount += settleCompleted(batch.tasks, pending, out);
+      if (pending.size === 0) break;
+    }
+  } catch (e) {
+    if (e instanceof SocketStreamDeath) {
+      err(`event socket lost: ${e.message}; falling back to database`);
+      // Resume from THIS loop's cursor, not e.lastCursor: the client advances
+      // its cursor as frames are enqueued, and death drops any frames still
+      // queued — resuming from lastCursor would skip their events. This cursor
+      // tracks exactly what was printed. Settles carry over too, so a task
+      // that settled over the socket still counts when the DB phase ends with
+      // nothing new.
+      return runDbLoop(taskIds, deadline, labelled, out, err, true, cursor, pending, settledCount);
+    }
+    throw e;
+  } finally {
+    // The CLI exits the process, but an in-process caller — every test — would
+    // otherwise leak the connection and its silence timer. No-op after death.
+    stream.close();
+  }
+
+  return settledCount > 0 ? 0 : 1;
+}
+
+// ---- DB loop ----
+
+async function runDbLoop(
+  taskIds: string[],
+  deadline: number,
+  labelled: boolean,
+  out: (line: string) => void,
+  err: (line: string) => void,
+  /** True when this is a mid-run failover from the socket. */
+  isFailover: boolean,
+  /** Only meaningful when isFailover: the last cursor from the socket. */
+  failoverCursor?: number,
+  /** Only meaningful when isFailover: the surviving pending set. */
+  failoverPending?: Set<string>,
+  /** Only meaningful when isFailover: settles already printed over the socket. */
+  failoverSettled = 0,
+): Promise<number> {
+  let store;
+  try {
+    store = observeStateStore();
+  } catch (e) {
+    err(e instanceof Error ? e.message : String(e));
+    return 2;
+  }
+
+  let cursor: number;
+  let pending: Set<string>;
+  let settledCount: number;
+
+  if (isFailover) {
+    // Resume from the socket's last cursor. The ids were already validated by
+    // the server; no unknown-id check here.
+    cursor = failoverCursor!;
+    pending = failoverPending!;
+    settledCount = failoverSettled;
+  } else {
+    // Fresh DB start: validate ids and pick up the current cursor.
+    const missing = taskIds.filter((id) => !store.getTask(id));
+    if (missing.length > 0) {
+      err(`${unknownTaskMessage(missing.join(", "))} (searched ${databasePath()})`);
+      return 2;
+    }
+    // Where the log stands at attach time. Starting from zero instead would
+    // replay the whole trace, which runs to thousands of rows on a long task
+    // and is what `inspect` is for; a watcher came for what happens next.
+    cursor = store.latestTaskEventId(taskIds, true);
+    pending = new Set(taskIds);
+    settledCount = 0;
+  }
 
   while (pending.size > 0) {
     // What is left of the budget, so the loop can never outlive `--timeout`.
-    // `parseDuration` caps that at a day, well inside the range of the timer
-    // the waiter arms with it.
     const remaining = deadline - Date.now();
     if (remaining <= 0) break;
 
     let waited;
     try {
-      // `until: "progress"` is what turns the one blocking wait into a stream:
-      // it comes back on the next event as well as on a question or a terminal
-      // state, so a long deadline is still safe.
       waited = await waitForTasks([...pending], remaining, undefined, cursor, "progress");
     } catch (error) {
       err(String(error instanceof Error ? error.message : error));
       return 2;
     }
 
-    for (const event of waited.events) {
-      // Skipped events move the cursor too. Leaving one behind would make the
-      // next wait return on it at once, and the loop would spin on a row it has
-      // already decided not to print.
-      cursor = Math.max(cursor, event.id);
-      // A step boundary or a quiet heartbeat is plumbing even though it is
-      // lifecycle, so `minor` has to clear as well as the kind.
-      if (STREAMED_KINDS.has(event.kind) && !event.minor) out(eventLine(event, labelled));
-    }
+    cursor = processStreamedEvents(waited.events, cursor, labelled, out);
     cursor = Math.max(cursor, waited.cursor);
     // More rows than one batch carries: go straight back for the rest instead
     // of waiting, and hold the settle line until the trace behind it is out.
     if (waited.hasMore) continue;
 
-    for (const task of waited.tasks) {
-      if (!pending.has(task.id) || !settled(task.state)) continue;
-      // Dropping it from the wait set is what keeps the loop asleep. The waiter
-      // returns the instant any of its ids needs attention, so a settled id left
-      // in would come back immediately forever while its siblings still run.
-      pending.delete(task.id);
-      settledCount += 1;
-      out(watchLine(task));
-    }
+    settledCount += settleCompleted(waited.tasks, pending, out);
   }
 
   return settledCount > 0 ? 0 : 1;
+}
+
+// ---- Shared per-batch processing (socket and DB paths are identical) ----
+
+/**
+ * Prints one line per streamed event, advances the cursor past skipped rows
+ * too, and returns the new cursor.
+ */
+function processStreamedEvents(
+  events: Array<{ id: number; taskId: string; kind: string; minor?: boolean; summary: string }>,
+  currentCursor: number,
+  labelled: boolean,
+  out: (line: string) => void,
+): number {
+  let cursor = currentCursor;
+  for (const event of events) {
+    // Skipped events move the cursor too. Leaving one behind would make the
+    // next wait return on it at once, and the loop would spin on a row it has
+    // already decided not to print.
+    cursor = Math.max(cursor, event.id);
+    // A step boundary or a quiet heartbeat is plumbing even though it is
+    // lifecycle, so `minor` has to clear as well as the kind.
+    if (STREAMED_KINDS.has(event.kind) && !event.minor) out(eventLine(event, labelled));
+  }
+  return cursor;
+}
+
+/**
+ * Removes settled tasks from the pending set, prints their watch lines, and
+ * returns how many settled.
+ */
+function settleCompleted(
+  tasks: Array<{ id: string; state: string; question?: string; error?: string; title?: string; archivedAt?: string }>,
+  pending: Set<string>,
+  out: (line: string) => void,
+): number {
+  let count = 0;
+  for (const task of tasks) {
+    if (!pending.has(task.id) || !settled(task.state as TaskState)) continue;
+    // Dropping it from the wait set is what keeps the loop asleep. The waiter
+    // returns the instant any of its ids needs attention, so a settled id left
+    // in would come back immediately forever while its siblings still run.
+    pending.delete(task.id);
+    count += 1;
+    out(watchLine(task as Task));
+  }
+  return count;
 }
 
 /**

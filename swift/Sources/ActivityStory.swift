@@ -10,7 +10,10 @@ enum ActivityStory {
     }
 
     /// Consecutive `Thinking` progress events collapsed to one line. `detail`
-    /// is the last event's counter, so the line always shows the final tally.
+    /// is the last event's counter, so the line always shows the final tally
+    /// — unless the provider's reasoning events carry prose instead of a
+    /// counter, in which case `detail` falls back to `"Thinking"` and
+    /// `updates`/`seconds` tell the story instead.
     struct ReasoningPulse: Hashable {
         let id: Int
         let detail: String
@@ -45,9 +48,18 @@ enum ActivityStory {
         func flushPulse() {
             guard let first = pulse.first, let last = pulse.last else { return }
             thinkingTokens += pulse.reduce(0) { $0 + ($1.presentation?.tokensThinking ?? 0) }
+            let rawDetail = last.detail ?? "Thinking"
+            // pi flushes the prose of the thought itself on every tick, roughly
+            // once a second — a run of those collapses into one pulse whose
+            // last detail would otherwise be a full paragraph of raw reasoning
+            // on what is meant to be a single quiet line. Only a detail shaped
+            // like a counter (claude's `~5.2k tokens so far`) is safe to show;
+            // anything else falls back to "Thinking" and lets `updates` and
+            // `seconds`, already rendered alongside it, carry the summary.
+            let detail = isCounter(rawDetail) ? rawDetail.replacingOccurrences(of: " so far", with: "") : "Thinking"
             let line = ReasoningPulse(
                 id: first.id,
-                detail: (last.detail ?? "Thinking").replacingOccurrences(of: " so far", with: ""),
+                detail: detail,
                 updates: pulse.count,
                 seconds: seconds(from: first.createdAt, to: last.createdAt)
             )
@@ -144,6 +156,21 @@ enum ActivityStory {
         event.kind == "reasoning" && event.title == "Thinking"
     }
 
+    /// A counter reads as a number (with an optional `~` and `k`/`m` scale)
+    /// followed by the word `tokens`, optionally trailing `so far` — never a
+    /// sentence. Matching the shape, rather than gating on length, is the
+    /// part that survives a provider we haven't seen yet: a short detail can
+    /// still be prose (a one-word thought), and a long one could in theory be
+    /// a verbose counter, so counting characters would get both wrong.
+    private static let counterPattern = try! NSRegularExpression(
+        pattern: #"^~?[\d,.]+[kKmM]?\s+tokens(\s+so\s+far)?$"#
+    )
+
+    private static func isCounter(_ detail: String) -> Bool {
+        let range = NSRange(detail.startIndex..., in: detail)
+        return counterPattern.firstMatch(in: detail, range: range) != nil
+    }
+
     private static func isSignal(_ event: TaskEventSnapshot) -> Bool {
         if event.presentation?.type == "signal" { return true }
         if event.source == "broker", event.kind == "error" { return true }
@@ -214,6 +241,24 @@ enum ActivityStory {
             if later.phase == "failed" { merged.phase = "failed" }
             return merged
         }
+        // pi and opencode close a call with an event that carries no
+        // arguments at all — a bare `{ type: "tool", outcome: … }` — because
+        // the provider's own end-of-call message never repeats what the call
+        // was for. That closing event still isn't `minor`, so without this
+        // check it would win outright below and the row would lose the path
+        // or command the opening event named, collapsing a Read/Bash row
+        // into a bare "tool" row with nothing to show beside the title. A
+        // closing event that knows only the outcome must not overwrite an
+        // opening event that knows the subject; it only gets to add the
+        // outcome to it.
+        if isOutcomeOnly(later.presentation), isSubject(first.presentation) {
+            var merged = first
+            if let outcome = later.presentation?.outcome {
+                merged.presentation?.outcome = outcome
+            }
+            if later.phase == "failed" { merged.phase = "failed" }
+            return merged
+        }
         var merged = later
         merged.id = first.id
         merged.createdAt = first.createdAt
@@ -226,6 +271,30 @@ enum ActivityStory {
         }
         if first.phase == "failed" { merged.phase = "failed" }
         return merged
+    }
+
+    /// A presentation that says nothing but how the call went: type `"tool"`
+    /// and every field besides `outcome` empty. This is what a
+    /// `tool_execution_end` becomes when the provider sends no result
+    /// arguments — pi sends `args: null` outright.
+    private static func isOutcomeOnly(_ presentation: TaskEventPresentationSnapshot?) -> Bool {
+        guard let presentation, presentation.type == "tool" else { return false }
+        return presentation.path == nil && presentation.change == nil && presentation.command == nil
+            && presentation.status == nil && presentation.exitCode == nil && presentation.text == nil
+            && presentation.completed == nil && presentation.total == nil && presentation.costUsd == nil
+            && presentation.tokensIn == nil && presentation.tokensOut == nil && presentation.tokensCached == nil
+            && presentation.tokensThinking == nil && presentation.turns == nil && presentation.durationMs == nil
+            && presentation.level == nil
+    }
+
+    /// A presentation that names what the call was on: a `"file"` with a
+    /// path, or a `"command"` with a command line. These are the two shapes
+    /// `ActivityWorkRow.inlineContent` draws a chip for.
+    private static func isSubject(_ presentation: TaskEventPresentationSnapshot?) -> Bool {
+        guard let presentation else { return false }
+        if presentation.type == "file" { return presentation.path != nil }
+        if presentation.type == "command" { return presentation.command != nil }
+        return false
     }
 
     /// A failed call is reported twice — the hook names the error and the

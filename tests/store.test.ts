@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Database } from "bun:sqlite";
@@ -42,6 +42,16 @@ function task(state: Task["state"] = "queued"): Task {
     createdAt: now,
     updatedAt: now,
   };
+}
+
+/** The message an open failure carries, so tests can assert on its text. */
+function errorMessage(run: () => void): string {
+  try {
+    run();
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  throw new Error("expected the store open to throw");
 }
 
 describe("SQLite state store", () => {
@@ -1123,5 +1133,98 @@ describe("SQLite state store", () => {
     expect(migrated.query<{ id: string }, []>("SELECT id FROM profiles").all()
       .map(({ id }) => id)).toContain(profile.id);
     migrated.close();
+  });
+
+  test("observe open of a nonexistent path throws and creates nothing", () => {
+    const { root } = paths();
+    const missing = join(root, "nowhere", "inter.db");
+    const message = errorMessage(() => new StateStore({ path: missing, observe: true }));
+    expect(message).toContain(missing);
+    expect(message).toContain("no database at this path");
+    // The point of the check: a mistyped path must not materialise a database,
+    // and neither the file nor its directory may appear afterwards.
+    expect(existsSync(missing)).toBe(false);
+    expect(readdirSync(root)).toEqual([]);
+  });
+
+  test("observe open never writes migrations or the file it reads", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const saved = task("queued");
+    store.createTask(saved);
+    store.close();
+
+    const raw = new Database(db);
+    const before = raw.query<{ version: number }, []>(
+      "SELECT version FROM schema_migrations ORDER BY version",
+    ).all();
+    raw.close();
+    const mtimeBefore = statSync(db).mtimeMs;
+
+    const observer = new StateStore({ path: db, observe: true });
+    expect(observer.getTask(saved.id)).toMatchObject({ id: saved.id, state: "queued" });
+    observer.close();
+
+    // Reading through the observe handle left the ledger and the file untouched.
+    expect(statSync(db).mtimeMs).toBe(mtimeBefore);
+    const rawAfter = new Database(db);
+    const after = rawAfter.query<{ version: number }, []>(
+      "SELECT version FROM schema_migrations ORDER BY version",
+    ).all();
+    rawAfter.close();
+    expect(after).toEqual(before);
+  });
+
+  test("observe open of a schema newer than the binary names the path and the mismatch", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    store.close();
+    const raw = new Database(db);
+    raw.exec("INSERT INTO schema_migrations(version, name) VALUES (999, 'schema from the future')");
+    raw.close();
+
+    const message = errorMessage(() => new StateStore({ path: db, observe: true }));
+    expect(message).toContain(db);
+    expect(message).toContain("newer than this binary knows");
+    expect(message).toContain("v999");
+  });
+
+  test("observe open of a schema behind the binary names the mismatch too", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    store.close();
+    const raw = new Database(db);
+    raw.exec("DELETE FROM schema_migrations WHERE version = 10");
+    raw.close();
+
+    // A behind schema is only readable after a migration, which observe mode
+    // must never run, so the watcher says so instead of guessing at columns.
+    const message = errorMessage(() => new StateStore({ path: db, observe: true }));
+    expect(message).toContain(db);
+    expect(message).toContain("predates this binary");
+  });
+
+  test("observe open of a file that is not an inter database names the path", () => {
+    const { db } = paths();
+    const raw = new Database(db);
+    raw.exec("CREATE TABLE unrelated (id INTEGER PRIMARY KEY)");
+    raw.close();
+
+    const message = errorMessage(() => new StateStore({ path: db, observe: true }));
+    expect(message).toContain(db);
+    expect(message).toContain("no schema_migrations table");
+  });
+
+  test("observe open of a healthy database still reads tasks", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const saved = task("running");
+    store.createTask(saved);
+    store.close();
+
+    const observer = new StateStore({ path: db, observe: true });
+    expect(observer.getTask(saved.id)).toMatchObject({ id: saved.id, state: "running" });
+    expect(observer.inFlightTasks()).toEqual([{ id: saved.id, state: "running" }]);
+    observer.close();
   });
 });

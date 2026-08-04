@@ -96,6 +96,46 @@ final class ActivityStoryTests: XCTestCase {
         XCTAssertEqual(rows[0].detail, "…/kii/AGENTS.md · \(error)")
     }
 
+    /// pi and opencode close a call with `tool_execution_end`, which carries
+    /// no arguments — the presentation on that event is a bare
+    /// `{ type: "tool", outcome: … }`. The opening event still named the
+    /// path; the merged row has to keep it.
+    func testBareToolCloseKeepsTheOpeningFilePresentation() {
+        let opened = TaskEventPresentationSnapshot(type: "file", path: "/Users/malico/desgn/inter/src/watch.ts")
+        let closed = TaskEventPresentationSnapshot(type: "tool", outcome: "120 lines read")
+        let story = ActivityStory.compose([
+            event(1, kind: "file", title: "Read file", phase: "started",
+                  presentation: opened, actionId: "call_01_mAGVOtEM8NoYL0GYE9A29838"),
+            event(2, kind: "tool", title: "Read file", phase: "completed",
+                  presentation: closed, actionId: "call_01_mAGVOtEM8NoYL0GYE9A29838"),
+        ])
+        let rows = work(story.blocks.first)
+        XCTAssertEqual(rows.map(\.id), [1])
+        XCTAssertEqual(rows[0].kind, "file")
+        XCTAssertEqual(rows[0].presentation?.type, "file")
+        XCTAssertEqual(rows[0].presentation?.path, "/Users/malico/desgn/inter/src/watch.ts")
+        XCTAssertEqual(rows[0].presentation?.outcome, "120 lines read")
+    }
+
+    /// A closing event that genuinely knows more than the opening one — its
+    /// own path or command, not just an outcome — still has to win. The fix
+    /// for the bare-tool case must not invert this.
+    func testRicherClosingEventStillWins() {
+        let opened = TaskEventPresentationSnapshot(type: "file", path: "a.rs")
+        let closedWithPath = TaskEventPresentationSnapshot(type: "file", path: "a.rs", outcome: "12 lines read")
+        let story = ActivityStory.compose([
+            event(1, kind: "file", title: "Read file", phase: "started",
+                  presentation: opened, actionId: "toolu_1"),
+            event(2, kind: "file", title: "Read file", phase: "completed",
+                  presentation: closedWithPath, actionId: "toolu_1"),
+        ])
+        let rows = work(story.blocks.first)
+        XCTAssertEqual(rows.map(\.id), [1])
+        XCTAssertEqual(rows[0].presentation?.path, "a.rs")
+        XCTAssertEqual(rows[0].presentation?.outcome, "12 lines read")
+        XCTAssertEqual(rows[0].phase, "completed")
+    }
+
     func testResultWithNoCallToAttachToStaysTechnical() {
         let story = ActivityStory.compose([
             event(1, kind: "raw", title: "Tool result",
@@ -157,6 +197,48 @@ final class ActivityStoryTests: XCTestCase {
         }
         XCTAssertEqual(pulse.detail, "~2.5k tokens")
         XCTAssertEqual(pulse.updates, 2)
+    }
+
+    /// pi's reasoning events carry the prose of the thought itself, flushed
+    /// about once a second. A run of those must not land its last paragraph
+    /// on the pulse line — the line falls back to "Thinking" and leaves the
+    /// summary to `updates`/`seconds`.
+    func testProseThinkingDoesNotLeakOntoThePulseLine() {
+        let story = ActivityStory.compose([
+            event(1, kind: "reasoning", title: "Thinking",
+                  detail: "Let me look at how the events are shaped before touching the merge.",
+                  createdAt: "2026-07-30T15:00:00.000Z"),
+            event(2, kind: "reasoning", title: "Thinking",
+                  detail: "The closing event only carries an outcome, so the opening one has to win.",
+                  createdAt: "2026-07-30T15:00:01.000Z"),
+            event(3, kind: "reasoning", title: "Thinking",
+                  detail: "I'll graft the outcome onto the first event's presentation instead.",
+                  createdAt: "2026-07-30T15:00:02.000Z"),
+        ])
+        guard case .reasoning(let pulse) = story.blocks.first, story.blocks.count == 1 else {
+            return XCTFail("expected one pulse line, got \(story.blocks)")
+        }
+        XCTAssertEqual(pulse.detail, "Thinking")
+        XCTAssertEqual(pulse.updates, 3)
+        XCTAssertEqual(pulse.seconds, 2)
+    }
+
+    /// claude's thinking events are a token ticker — the counter shape must
+    /// keep clearing the prose filter exactly as it did before the filter
+    /// existed.
+    func testCounterShapedThinkingSurvivesThePulseLine() {
+        let story = ActivityStory.compose([
+            event(1, kind: "reasoning", title: "Thinking", detail: "~1.2k tokens so far",
+                  createdAt: "2026-07-30T15:00:00.000Z"),
+            event(2, kind: "reasoning", title: "Thinking", detail: "~5.2k tokens so far",
+                  createdAt: "2026-07-30T15:00:08.000Z"),
+        ])
+        guard case .reasoning(let pulse) = story.blocks.first, story.blocks.count == 1 else {
+            return XCTFail("expected one pulse line, got \(story.blocks)")
+        }
+        XCTAssertEqual(pulse.detail, "~5.2k tokens")
+        XCTAssertEqual(pulse.updates, 2)
+        XCTAssertEqual(pulse.seconds, 8)
     }
 
     func testCollapsesHookAndEchoRowsOfOneAction() {

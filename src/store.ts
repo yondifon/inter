@@ -1,10 +1,15 @@
-import { chmodSync, mkdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { Database } from "bun:sqlite";
 import { discoverProfiles } from "./profile-discovery";
 import { sessionIdFrom } from "./adapters";
-import { configureDatabase, migrateDatabase } from "./store/schema";
+import {
+  configureDatabase,
+  configureReadOnlyDatabase,
+  LATEST_SCHEMA_VERSION,
+  migrateDatabase,
+} from "./store/schema";
 import { parseWorkerIdentity, probeWorker, signalWorkerGroup, type WorkerIdentity } from "./worker-identity";
 import type {
   Profile,
@@ -138,9 +143,19 @@ export interface ProfileSuccess {
 export class StateStore {
   readonly path: string;
   private readonly database: Database;
+  /** True when this handle must never write, migration included. */
+  private readonly observe: boolean;
 
   constructor(options: StateStoreOptions = {}) {
     this.path = resolve(options.path ?? databasePath());
+    this.observe = options.observe === true;
+    // Observe mode is a reader's open: it must not create the file, its
+    // directory, or touch the broker's live schema. It gets its own branch so
+    // every write-capable step below is provably broker-only.
+    if (this.observe) {
+      this.database = this.openObserve();
+      return;
+    }
     mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
     this.database = new Database(this.path, { create: true, strict: true });
     try { chmodSync(this.path, 0o600); } catch {}
@@ -152,15 +167,72 @@ export class StateStore {
         VALUES (5, 'backfill task worker session ids')
       `).run();
     }
-    if (options.observe) return;
     // Passed as a thunk: seeding happens once, but the argument would be
     // evaluated on every start, and discovery reads the home directory.
     this.seed(() => options.seedProfiles ?? discoverProfiles());
     this.recoverInterruptedTasks();
   }
 
+  /**
+   * Open the database as a pure reader: no mkdir, no create, no chmod, no
+   * migration and no backfill — a watcher must be unable to change the file it
+   * is watching, even by accident.
+   *
+   * bun:sqlite's `readonly` open cannot read WAL-mode databases at all
+   * (every query fails with SQLITE_CANTOPEN), and the broker's database is
+   * always WAL, so the read-only that works is a no-create open with the
+   * connection-level `query_only` guard: any write attempt — migration,
+   * backfill, or a stray update — fails with SQLITE_READONLY instead of
+   * mutating anything. `create: false` is not enough on its own: bun:sqlite
+   * still creates a missing file, so the existence check below is what stops
+   * a mistyped path from materialising an empty database.
+   *
+   * The ledger check keeps an old binary honest in both directions: a schema
+   * ahead of LATEST_SCHEMA_VERSION was migrated by a newer broker and this
+   * binary cannot read it; one behind it lacks columns this binary's queries
+   * assume. A behind schema is only readable after a migration, which observe
+   * mode must never run, so the only valid observe target is exactly the
+   * schema this binary was built for.
+   */
+  private openObserve(): Database {
+    if (!existsSync(this.path)) {
+      throw new Error(
+        `cannot observe ${this.path}: no database at this path; run the broker once to create it, or fix INTER_DB`,
+      );
+    }
+    const db = new Database(this.path, { create: false, strict: true });
+    db.exec("PRAGMA query_only = ON");
+    configureReadOnlyDatabase(db);
+    const ledger = db.query<{ name: string }, []>(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'",
+    ).get();
+    if (!ledger) {
+      throw new Error(
+        `cannot observe ${this.path}: not an inter database (no schema_migrations table)`,
+      );
+    }
+    const applied = db.query<{ version: number | null }, []>(
+      "SELECT MAX(version) AS version FROM schema_migrations",
+    ).get()?.version ?? 0;
+    if (applied > LATEST_SCHEMA_VERSION) {
+      throw new Error(
+        `cannot observe ${this.path}: database schema v${applied} is newer than this binary knows ` +
+        `(v${LATEST_SCHEMA_VERSION}); upgrade inter`,
+      );
+    }
+    if (applied < LATEST_SCHEMA_VERSION) {
+      throw new Error(
+        `cannot observe ${this.path}: database schema v${applied} predates this binary ` +
+        `(v${LATEST_SCHEMA_VERSION}); start the broker once so it migrates the database`,
+      );
+    }
+    return db;
+  }
+
   close(): void {
-    this.database.exec("PRAGMA optimize");
+    // PRAGMA optimize can run ANALYZE, which writes; an observe handle must
+    // never write, so only the broker's own handle pays for the tidying.
+    if (!this.observe) this.database.exec("PRAGMA optimize");
     this.database.close();
   }
 
