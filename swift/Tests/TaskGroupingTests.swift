@@ -310,15 +310,68 @@ final class TaskGroupingTests: XCTestCase {
         )
     }
 
-    func testPruningDropsIDsForGroupsThatAreGone() {
-        let groups = TaskOrganizer.organize(
-            tasks: [task("root", cwd: inter), task("child", cwd: inter, parent: "root")],
-            project: nil,
-            grouping: .parent
-        )
+    func testCollapsedGroupsSurviveEncodeDecodeRoundTrip() {
+        var groups = CollapsedGroups()
+        groups.toggle("root", mode: TaskGrouping.parent.rawValue)
+        groups.toggle("completed", mode: TaskGrouping.status.rawValue)
+        let restored = CollapsedGroups.decode(groups.encode(), legacyMode: TaskGrouping.none.rawValue)
+        XCTAssertEqual(restored.ids(for: TaskGrouping.parent.rawValue), ["root"])
+        XCTAssertEqual(restored.ids(for: TaskGrouping.status.rawValue), ["completed"])
+        XCTAssertTrue(restored.ids(for: TaskGrouping.none.rawValue).isEmpty)
+    }
+
+    func testEncodeSortsKeysForAStableStoredString() {
+        var groups = CollapsedGroups()
+        groups.toggle("completed", mode: TaskGrouping.status.rawValue)
+        groups.toggle("root", mode: TaskGrouping.parent.rawValue)
         XCTAssertEqual(
-            TaskOrganizer.pruneCollapsed(["root", "aged-out", inter], groups: groups), ["root"],
-            "saved collapse state must not accumulate ids for tasks that left the list"
+            groups.encode(), #"{"parent":["root"],"status":["completed"]}"#,
+            "sorted keys keep the stored string stable and diffable across saves"
+        )
+    }
+
+    func testLegacyNewlineDataLandsInTheGivenModeOnly() {
+        let groups = CollapsedGroups.decode("root\naged-out", legacyMode: TaskGrouping.parent.rawValue)
+        XCTAssertEqual(groups.ids(for: TaskGrouping.parent.rawValue), ["root", "aged-out"])
+        XCTAssertEqual(
+            groups.ids(for: TaskGrouping.status.rawValue), [],
+            "legacy ids belong to the mode they were saved in, not every mode"
+        )
+    }
+
+    func testToggleInOneModeLeavesTheOtherModesUntouched() {
+        var groups = CollapsedGroups()
+        groups.toggle("root", mode: TaskGrouping.parent.rawValue)
+        groups.toggle("completed", mode: TaskGrouping.status.rawValue)
+        groups.toggle("child", mode: TaskGrouping.parent.rawValue)
+        XCTAssertEqual(groups.ids(for: TaskGrouping.parent.rawValue), ["root", "child"])
+        XCTAssertEqual(groups.ids(for: TaskGrouping.status.rawValue), ["completed"])
+    }
+
+    func testTogglingTwiceEmptiesTheModeAndTheStore() {
+        var groups = CollapsedGroups()
+        groups.toggle("root", mode: TaskGrouping.parent.rawValue)
+        groups.toggle("root", mode: TaskGrouping.parent.rawValue)
+        XCTAssertTrue(groups.ids(for: TaskGrouping.parent.rawValue).isEmpty)
+        XCTAssertEqual(groups.encode(), "", "a mode emptied by toggling must not linger as an empty key")
+    }
+
+    func testTheCapDropsTheOldestIDInAMode() {
+        var groups = CollapsedGroups()
+        for index in 0..<(CollapsedGroups.maxPerMode + 1) {
+            groups.toggle(String(index), mode: TaskGrouping.parent.rawValue)
+        }
+        let ids = groups.ids(for: TaskGrouping.parent.rawValue)
+        XCTAssertEqual(ids.count, CollapsedGroups.maxPerMode)
+        XCTAssertFalse(ids.contains("0"), "the oldest id gives way when the cap is hit")
+        XCTAssertTrue(ids.contains(String(CollapsedGroups.maxPerMode)))
+    }
+
+    func testMalformedAndEmptyInputDecodeEmpty() {
+        XCTAssertEqual(CollapsedGroups.decode("", legacyMode: TaskGrouping.parent.rawValue).encode(), "")
+        XCTAssertEqual(
+            CollapsedGroups.decode(#"{"parent": 5}"#, legacyMode: TaskGrouping.parent.rawValue).encode(), "",
+            "a JSON value that is not the id-object shape is junk, not legacy ids"
         )
     }
 

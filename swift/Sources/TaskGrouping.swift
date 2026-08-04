@@ -34,6 +34,73 @@ struct TaskGroup: Identifiable {
     let tasks: [TaskSnapshot]
 }
 
+/// Collapse state for the sidebar's task groups, kept per grouping mode because
+/// the modes do not share an id space — parent mode keys a group by a task id,
+/// status by a state name, project by a folder path. A flat set of ids was only
+/// ever coherent inside one mode, and pruning it against the rows currently on
+/// screen erased whatever the active filter hid. Stale ids are cheap:
+/// `visibleTasks` already ignores a collapsed id whose group has no heading,
+/// which is what buys the size cap in place of pruning.
+struct CollapsedGroups: Equatable {
+    /// The most ids one mode can hold. Deep enough for a day of runs, and a hard
+    /// stop on unbounded growth.
+    static let maxPerMode = 200
+
+    private var byMode: [String: [String]] = [:]
+
+    /// Reads the new per-mode JSON object. A non-empty value that is not that
+    /// shape is a save from before the format change, so it lands whole in
+    /// `legacyMode`; JSON of any other shape is junk, and junk decodes empty.
+    static func decode(_ raw: String, legacyMode: String) -> CollapsedGroups {
+        var groups = CollapsedGroups()
+        guard !raw.isEmpty else { return groups }
+        if let decoded = try? JSONDecoder().decode([String: [String]].self, from: Data(raw.utf8)) {
+            for (mode, ids) in decoded where !ids.isEmpty {
+                groups.byMode[mode] = ids
+            }
+            return groups
+        }
+        if let first = raw.first(where: { !$0.isWhitespace }),
+           first == "{" || first == "[" {
+            return groups
+        }
+        groups.byMode[legacyMode] = raw.split(separator: "\n").map(String.init)
+        return groups
+    }
+
+    /// Keys sorted so the stored string is stable across saves. Empty stays
+    /// empty — an empty object would be a new format the decoder reads as junk.
+    func encode() -> String {
+        guard !byMode.isEmpty else { return "" }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        guard let data = try? encoder.encode(byMode),
+              let json = String(data: data, encoding: .utf8) else { return "" }
+        return json
+    }
+
+    func ids(for mode: String) -> Set<String> {
+        Set(byMode[mode] ?? [])
+    }
+
+    mutating func toggle(_ id: String, mode: String) {
+        var ids = byMode[mode] ?? []
+        if let index = ids.firstIndex(of: id) {
+            ids.remove(at: index)
+        } else {
+            ids.append(id)
+            if ids.count > Self.maxPerMode {
+                ids.removeFirst(ids.count - Self.maxPerMode)
+            }
+        }
+        if ids.isEmpty {
+            byMode.removeValue(forKey: mode)
+        } else {
+            byMode[mode] = ids
+        }
+    }
+}
+
 /// Filtering and grouping for the task list. Pure, so the ordering and
 /// parent-walking rules are testable without a view.
 enum TaskOrganizer {
@@ -167,12 +234,6 @@ enum TaskOrganizer {
     static func visibleTasks(in group: TaskGroup, collapsed: Set<String>) -> [TaskSnapshot] {
         guard group.title != nil, collapsed.contains(group.id) else { return group.tasks }
         return []
-    }
-
-    /// Drops ids whose group is gone, so parent-task ids cannot pile up in the
-    /// saved preference as tasks age out of the list.
-    static func pruneCollapsed(_ collapsed: Set<String>, groups: [TaskGroup]) -> Set<String> {
-        collapsed.intersection(Set(groups.filter { $0.title != nil }.map(\.id)))
     }
 
     /// First line of a prompt, short enough for a 260pt sidebar heading.

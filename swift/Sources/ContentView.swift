@@ -185,16 +185,17 @@ struct ContentView: View {
 
     private var grouping: TaskGrouping { TaskGrouping(rawValue: groupingRaw) ?? .parent }
 
-    /// Ids are folder paths or task ids, neither of which can contain a newline.
+    /// The raw value is JSON keyed by grouping mode, with the legacy newline
+    /// format folded into the mode it was saved in. Only the current mode's ids
+    /// are read, so one mode's collapses never disturb another's.
     private var collapsedGroups: Set<String> {
-        Set(collapsedRaw.split(separator: "\n").map(String.init))
+        CollapsedGroups.decode(collapsedRaw, legacyMode: groupingRaw).ids(for: groupingRaw)
     }
 
     private func toggleCollapse(_ id: String) {
-        var ids = collapsedGroups
-        if ids.contains(id) { ids.remove(id) } else { ids.insert(id) }
-        collapsedRaw = TaskOrganizer.pruneCollapsed(ids, groups: taskGroups)
-            .sorted().joined(separator: "\n")
+        var groups = CollapsedGroups.decode(collapsedRaw, legacyMode: groupingRaw)
+        groups.toggle(id, mode: groupingRaw)
+        collapsedRaw = groups.encode()
     }
 
     private var taskGroups: [TaskGroup] {
