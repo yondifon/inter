@@ -27,6 +27,19 @@ bundle: server swift-build app-icon
 	codesign --force --deep --sign - $(APP)
 
 install: bundle
+	@# Retiring the broker stops whatever it is driving, so say what that costs
+	@# before doing it rather than leaving the wreckage to be discovered. On a
+	@# terminal this asks; in a script it warns and continues, because an install
+	@# that cannot be overridden is worse than one that destroys work quietly.
+	@# INTER_INSTALL_YES=1 skips the prompt.
+	@if ! $(DIST)/inter-server inflight; then \
+		if [ -t 0 ] && [ -z "$$INTER_INSTALL_YES" ]; then \
+			printf 'Stop them and continue? [y/N] '; read -r reply; \
+			case "$$reply" in [yY]*) ;; *) echo "install aborted"; exit 1 ;; esac; \
+		else \
+			echo "install: continuing anyway (non-interactive)"; \
+		fi; \
+	fi
 	pkill -x Inter || true
 	# The broker outlives the app it was spawned from, and the next launch finds
 	# port 7331 already answering /health — so it reports healthy while serving

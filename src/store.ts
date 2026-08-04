@@ -5,6 +5,7 @@ import { Database } from "bun:sqlite";
 import { discoverProfiles } from "./profile-discovery";
 import { sessionIdFrom } from "./adapters";
 import { configureDatabase, migrateDatabase } from "./store/schema";
+import { parseWorkerIdentity, probeWorker, signalWorkerGroup, type WorkerIdentity } from "./worker-identity";
 import type {
   Profile,
   MemoryEntry,
@@ -75,6 +76,11 @@ const MAX_ATTEMPTS = 10;
 
 const GRANT_COLUMNS = "id, cwd, profile_id, scope_json, created_at, last_used_at, use_count";
 
+// What a task reads when its worker provably did not survive the broker. The
+// wording predates worker identity and is kept exactly: this is still the only
+// honest thing to say about a run whose process is gone.
+const BROKER_RESTART_ERROR = "Broker restarted before task completed";
+
 export interface TaskEvent {
   id: number;
   taskId: string;
@@ -95,6 +101,15 @@ export interface StateStoreOptions {
    * driving, which is the opposite of watching them.
    */
   observe?: boolean;
+}
+
+/** A task that would lose its worker if the broker were restarted right now. */
+export interface InFlightTask {
+  id: string;
+  state: TaskState;
+  title?: string;
+  /** Absent when the task is queued and never spawned, so nothing would be killed. */
+  pid?: number;
 }
 
 export interface TaskListQuery {
@@ -393,6 +408,50 @@ export class StateStore {
       captured = true;
     });
     return captured;
+  }
+
+  /**
+   * Stamp which process is running this task, or clear the stamp when the child
+   * exits. Clearing is what keeps the next boot honest: a row that still names
+   * a worker is taken as evidence one may be alive, so leaving a finished run's
+   * stamp behind would invite the recovery path to probe a recycled pid.
+   */
+  recordTaskWorker(id: string, identity: WorkerIdentity | undefined): void {
+    this.database.query("UPDATE tasks SET worker_json = ? WHERE id = ?")
+      .run(identity ? JSON.stringify(identity) : null, id);
+  }
+
+  taskWorker(id: string): WorkerIdentity | undefined {
+    const row = this.database.query<{ worker_json: string | null }, [string]>(
+      "SELECT worker_json FROM tasks WHERE id = ?",
+    ).get(id);
+    return parseWorkerIdentity(row?.worker_json);
+  }
+
+  /**
+   * Tasks a broker restart would settle. Deliberately the same states
+   * `recoverInterruptedTasks` acts on: a warning that counted tasks recovery
+   * leaves alone — one paused on `needs_input`, say — would overstate the cost
+   * of restarting. Read without claiming the broker's duties, so asking what a
+   * restart costs never causes one.
+   */
+  inFlightTasks(): InFlightTask[] {
+    return this.database.query<{
+      id: string; state: TaskState; title: string | null; tldr: string | null; worker_json: string | null;
+    }, []>(`
+      SELECT id, state, title, tldr, worker_json FROM tasks
+      WHERE state IN ('queued', 'running')
+      ORDER BY updated_at DESC
+    `).all().map((row) => {
+      const worker = parseWorkerIdentity(row.worker_json);
+      const label = row.title ?? row.tldr ?? undefined;
+      return {
+        id: row.id,
+        state: row.state,
+        ...(label ? { title: label } : {}),
+        ...(worker ? { pid: worker.pid } : {}),
+      };
+    });
   }
 
   saveTask(
@@ -982,23 +1041,115 @@ export class StateStore {
     this.database.query("INSERT INTO settings(key, value) VALUES (?, ?)").run("profiles_initialized", "1");
   }
 
+  /**
+   * Settle every task the previous broker was driving, against what is actually
+   * true of its worker process rather than against the assumption that all of
+   * them died with it.
+   *
+   * Workers are spawned detached, so a broker's death does not end them. Three
+   * outcomes, and the record has to distinguish them:
+   *
+   * - **Gone** — the process is provably not running (or never started). Fail
+   *   it, exactly as before.
+   * - **Alive** — the worker outlived the broker and is still writing to the
+   *   user's tree. Its stdout pipe died with the old broker, so nothing it does
+   *   from here can ever be captured, attributed, or costed: it is an
+   *   unsupervised writer in a repository, producing work Inter could never
+   *   report on. Reap it and record `cancelled`. The trade is deliberate —
+   *   in-flight work since the last event is lost, and the reason it is
+   *   affordable is that `session_id` is already persisted, so `resume` picks
+   *   the same provider session back up with its context intact. An orphaned
+   *   writer is the worse failure.
+   * - **Unconfirmed** — the pid exists but identity cannot be established. Say
+   *   so and touch nothing. Signalling here is the one move that turns this
+   *   recovery into a serious bug, so ambiguity always declines to act, and
+   *   `blocked` puts it in front of a human instead of guessing.
+   */
   private recoverInterruptedTasks(): void {
-    const interrupted = this.database.query<{ id: string }, []>(
-      "SELECT id FROM tasks WHERE state IN ('queued', 'running')",
+    const interrupted = this.database.query<{ id: string; worker_json: string | null }, []>(
+      "SELECT id, worker_json FROM tasks WHERE state IN ('queued', 'running')",
     ).all();
     if (interrupted.length === 0) return;
     const now = new Date().toISOString();
+    const decided = interrupted.map(({ id, worker_json }) => ({
+      id,
+      // Reaping runs before the write transaction on purpose: a signal cannot be
+      // rolled back, so the record must be written to match what already
+      // happened rather than the other way round.
+      outcome: this.settleInterruptedWorker(parseWorkerIdentity(worker_json)),
+    }));
     this.transaction(() => {
-      for (const { id } of interrupted) {
+      for (const { id, outcome } of decided) {
         this.database.query(`
-          UPDATE tasks SET state = 'failed', error = 'Broker restarted before task completed', updated_at = ?
+          UPDATE tasks SET state = ?, error = ?, worker_json = NULL, updated_at = ?
           WHERE id = ?
-        `).run(now, id);
-        this.addTaskEvent(id, "broker_restarted", "failed", {
-          error: "Broker restarted before task completed",
+        `).run(outcome.state, outcome.error, now, id);
+        // Only the new outcomes carry a completion. The failed path is left
+        // writing exactly what it always wrote.
+        if (outcome.completion) {
+          this.database.query("UPDATE tasks SET completion_json = ? WHERE id = ?")
+            .run(JSON.stringify(outcome.completion), id);
+        }
+        this.addTaskEvent(id, "broker_restarted", outcome.state, {
+          error: outcome.error,
+          worker: outcome.worker,
+          ...(outcome.detail ? { detail: outcome.detail } : {}),
         });
       }
     });
+  }
+
+  private settleInterruptedWorker(identity: WorkerIdentity | undefined): {
+    state: TaskState;
+    error: string;
+    worker: string;
+    detail?: string;
+    completion?: TaskCompletion;
+  } {
+    // No stamp at all: a queued task that never spawned, or a run predating
+    // worker identity. Nothing to probe and nothing that could be signalled.
+    if (!identity) {
+      return { state: "failed", error: BROKER_RESTART_ERROR, worker: "none" };
+    }
+    const liveness = probeWorker(identity);
+    if (liveness.status === "gone") {
+      return { state: "failed", error: BROKER_RESTART_ERROR, worker: "gone", detail: liveness.reason };
+    }
+    if (liveness.status === "unknown") {
+      const error =
+        `Broker restarted; worker pid ${identity.pid} could not be identified, so it was left alone. ` +
+        "It may still be running — check before resuming.";
+      return {
+        state: "blocked", error, worker: "unconfirmed", detail: liveness.reason,
+        completion: { blocked: true, code: "worker_error", reason: error },
+      };
+    }
+    const signal = signalWorkerGroup(identity, "SIGTERM");
+    if (signal.outcome === "refused") {
+      const error =
+        `Broker restarted; worker pid ${identity.pid} is running but could not be confirmed as ours, ` +
+        `so it was left alone: ${signal.reason}`;
+      return {
+        state: "blocked", error, worker: "unconfirmed", detail: signal.reason,
+        completion: { blocked: true, code: "worker_error", reason: error },
+      };
+    }
+    if (signal.outcome === "gone") {
+      return { state: "failed", error: BROKER_RESTART_ERROR, worker: "gone", detail: signal.reason };
+    }
+    // Terminated rather than abandoned, so `cancelled` is the honest state: the
+    // broker ended this run on purpose. SIGKILL follows for anything that
+    // ignores SIGTERM, re-verifying identity first; unref'd so a short-lived
+    // CLI process is never held open waiting to escalate.
+    const escalate = setTimeout(() => { signalWorkerGroup(identity, "SIGKILL"); }, 2_000);
+    escalate.unref?.();
+    const error =
+      `Broker restarted; worker pid ${identity.pid} outlived it and was stopped because its output ` +
+      "could no longer be captured. Resume to continue on the same provider session.";
+    return {
+      state: "cancelled", error, worker: "reaped",
+      completion: { blocked: true, code: "cancelled", reason: error },
+    };
   }
 
   private addTaskEvent(taskId: string, type: string, state: TaskState, payload: Record<string, unknown>): void {

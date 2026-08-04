@@ -34,6 +34,7 @@ import { publicTaskSummary, taskView, waitEventsView, waitTaskView, settled, TAS
 import { mcpWaitBlockMs } from "./mcp-wait";
 import { loadRoutingPolicy } from "./routing-policy";
 import { runWatch, watchCommand } from "./watch";
+import { runInflight } from "./inflight";
 
 const port = Number(Bun.env.INTER_PORT ?? 7331);
 const VERSION = "0.6.0";
@@ -46,6 +47,13 @@ const MCP_CONTRACT_VERSION = 21;
 // therefore claim the process before Bun.serve binds anything.
 if (process.argv[2] === "watch") {
   process.exit(await runWatch(process.argv.slice(3)));
+}
+
+// `inflight` reports what a broker restart would cost, so it must not be one:
+// it reads the store as an observer and exits non-zero when work is at risk,
+// which is what lets `make install` warn before it kills anything.
+if (process.argv[2] === "inflight") {
+  process.exit(runInflight());
 }
 
 // A foreground MCP call still owns the caller's agent turn, which is why

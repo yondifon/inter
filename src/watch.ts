@@ -8,16 +8,27 @@ import type { Task } from "./types";
  * `inter watch` is the floor under follow-along. An MCP `wait` is request and
  * response inside the caller's turn, so a caller that blocks on one can do
  * nothing else while it blocks, and pays tokens for every payload it gets back.
- * A backgrounded process pays neither: it sleeps for free, and the client's own
- * shell facility does the notifying when it exits.
+ * A backgrounded process still sleeps for free, and the client's own shell
+ * facility does the notifying when it exits.
  *
- * So the whole contract is the exit code plus one line per task. Anything more
- * would put the cost back.
+ * What it does now cost is the reading. Silence was free but it was also
+ * useless: a human ten minutes into a blank terminal cannot tell a working task
+ * from a wedged one, and neither can an agent tailing the log. So events go out
+ * as they happen — one line each, the plumbing folded away — and whoever reads
+ * that log back pays for those lines. Deliberate, and still bounded: the exit
+ * code alone carries the news for anything that only reads `$?`.
  */
 export const DEFAULT_WATCH_TIMEOUT_MS = 30 * 60_000;
 const MAX_WATCH_TIMEOUT_MS = 86_400_000;
 /** Long enough to carry a real question, short enough to stay one line. */
 const MAX_DETAIL = 200;
+/**
+ * What a watcher came for: that the task is alive, what it is waiting on, and
+ * what went wrong. Lifecycle and error rows carry exactly that. Every other
+ * kind is the worker doing its job — the files it read, the commands it ran,
+ * its prose, its token tickers — and nobody tails a task to read its keystrokes.
+ */
+const STREAMED_KINDS = new Set(["lifecycle", "error"]);
 /** Enough to tell a fan-out's tasks apart without wrapping the line. */
 const MAX_TITLE = 80;
 
@@ -95,8 +106,8 @@ function parseDuration(value: string): number | undefined {
 
 /**
  * One line per task that settled: the id, the state, and the question or error
- * if there is one. A task that is still running prints nothing — the point of
- * the command is that silence is free.
+ * if there is one. A task that is still running gets no line from here; what it
+ * is doing arrives as event lines instead.
  */
 export function watchLine(task: Task): string {
   const detail = task.state === "needs_input" ? task.question : task.error;
@@ -145,17 +156,70 @@ export async function runWatch(
     return 2;
   }
 
-  let waited;
-  try {
-    // `until: "attention"` is the whole reason a long deadline is safe: the wait
-    // ends the instant a task needs someone, not when the clock runs out.
-    waited = await waitForTasks(parsed.taskIds, parsed.timeoutMs, undefined, undefined, "attention");
-  } catch (error) {
-    err(String(error instanceof Error ? error.message : error));
-    return 2;
+  // One deadline for the whole command rather than one per wait: a task that
+  // keeps emitting must not be able to push the finish line back forever.
+  const deadline = Date.now() + parsed.timeoutMs;
+  // Only a fan-out has to be told whose event this is; a single watch knows.
+  const labelled = parsed.taskIds.length > 1;
+  const pending = new Set(parsed.taskIds);
+  // Where the log stands at attach time. Starting from zero instead would
+  // replay the whole trace, which runs to thousands of rows on a long task and
+  // is what `inspect` is for; a watcher came for what happens next.
+  let cursor = store.latestTaskEventId(parsed.taskIds, true);
+  let settledCount = 0;
+
+  while (pending.size > 0) {
+    // What is left of the budget, so the loop can never outlive `--timeout`.
+    // `parseDuration` caps that at a day, well inside the range of the timer
+    // the waiter arms with it.
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+
+    let waited;
+    try {
+      // `until: "progress"` is what turns the one blocking wait into a stream:
+      // it comes back on the next event as well as on a question or a terminal
+      // state, so a long deadline is still safe.
+      waited = await waitForTasks([...pending], remaining, undefined, cursor, "progress");
+    } catch (error) {
+      err(String(error instanceof Error ? error.message : error));
+      return 2;
+    }
+
+    for (const event of waited.events) {
+      // Skipped events move the cursor too. Leaving one behind would make the
+      // next wait return on it at once, and the loop would spin on a row it has
+      // already decided not to print.
+      cursor = Math.max(cursor, event.id);
+      // A step boundary or a quiet heartbeat is plumbing even though it is
+      // lifecycle, so `minor` has to clear as well as the kind.
+      if (STREAMED_KINDS.has(event.kind) && !event.minor) out(eventLine(event, labelled));
+    }
+    cursor = Math.max(cursor, waited.cursor);
+    // More rows than one batch carries: go straight back for the rest instead
+    // of waiting, and hold the settle line until the trace behind it is out.
+    if (waited.hasMore) continue;
+
+    for (const task of waited.tasks) {
+      if (!pending.has(task.id) || !settled(task.state)) continue;
+      // Dropping it from the wait set is what keeps the loop asleep. The waiter
+      // returns the instant any of its ids needs attention, so a settled id left
+      // in would come back immediately forever while its siblings still run.
+      pending.delete(task.id);
+      settledCount += 1;
+      out(watchLine(task));
+    }
   }
 
-  const news = waited.tasks.filter((task) => settled(task.state));
-  for (const task of news) out(watchLine(task));
-  return news.length > 0 ? 0 : 1;
+  return settledCount > 0 ? 0 : 1;
+}
+
+/**
+ * An event as one line: the summary the trace already renders, collapsed onto a
+ * single line and cut to the width a settled line uses. The id goes in front
+ * only for a fan-out, which is the only case that cannot tell otherwise.
+ */
+function eventLine(event: { taskId: string; summary: string }, withTaskId: boolean): string {
+  const summary = event.summary.replace(/\s+/g, " ").trim().slice(0, MAX_DETAIL);
+  return withTaskId ? `${event.taskId.slice(0, 8)} ${summary}` : summary;
 }

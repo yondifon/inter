@@ -4,7 +4,7 @@ import { homedir, tmpdir } from "node:os";
 import { isAbsolute, relative, resolve } from "node:path";
 import { abortedTurn, canResumeSession, commandFor, finalText, resumeCommandFor, sessionIdFrom, writeTargetsFrom } from "./adapters";
 import { loadConfig, profileEnv } from "./config";
-import { taskEventView } from "./events";
+import { taskEventView, type TaskEventView } from "./events";
 import {
   continuationPrompt,
   interpretWorkerOutcome,
@@ -15,6 +15,7 @@ import {
 import { handoffBrief } from "./handoff-brief";
 import { normalizeTaskScope, sandboxedCommand, scopeCoversPath, scopeRefusedWrite } from "./task-scope";
 import { workerPath } from "./worker-path";
+import { captureWorkerIdentity } from "./worker-identity";
 import { deniedScopePaths, promptReadPaths } from "./prompt-paths";
 import { stateStore, type StateStore, type TaskListQuery } from "./store";
 import { promptWithMemories } from "./memories";
@@ -160,13 +161,29 @@ export function getTask(id: string): Task | undefined {
   return stateStore().getTask(id);
 }
 
+/// The event shape the waiter returns, plus what a reader needs to decide
+/// whether a row is worth showing: `kind`, the classification `taskEventView`
+/// already made, and `minor`, its flag for plumbing. `kind` is always there
+/// because every caller has to test it; `minor` only when true, so a caller
+/// that renders everything regardless pays nothing for a flag it never reads.
+export interface WaitedTaskEvent {
+  id: number;
+  taskId: string;
+  type: string;
+  state: Task["state"];
+  at: string;
+  kind: TaskEventView["kind"];
+  summary: string;
+  minor?: boolean;
+}
+
 export async function waitForTasks(
   taskIds: string[],
   timeoutMs = 30_000,
   signal?: AbortSignal,
   afterCursor?: number,
   until?: WaitUntil,
-): Promise<TaskWaitResult> {
+): Promise<Omit<TaskWaitResult, "events"> & { events: WaitedTaskEvent[] }> {
   const waited = await taskWaiter.wait(taskIds, timeoutMs, signal, afterCursor, until);
   const rows = stateStore().listTaskEventsForTasks(taskIds, afterCursor ?? 0, 101, true);
   const config = await loadConfig();
@@ -181,9 +198,11 @@ export async function waitForTasks(
       type: event.type,
       state: event.state,
       at: event.createdAt,
+      kind: view?.kind ?? "raw",
       summary: view
         ? `${view.title}${view.detail ? `: ${view.detail}` : ""}`.slice(0, 500)
         : event.type,
+      ...(view?.minor ? { minor: true } : {}),
     };
   });
   return {
@@ -563,9 +582,17 @@ async function runTask(
           });
         }, 10_000);
       }
+      // Stamp the row before reading a byte of output. The child is detached, so
+      // from here it can outlive this broker; if the broker dies in the next
+      // instant, this stamp is the only way its successor can tell that the
+      // process is still out there writing to the user's tree.
+      const identity = captureWorkerIdentity(child.pid);
+      stateStore().recordTaskWorker(task.id, identity);
       appendTaskEvent(task.id, "worker_spawned", task.state, {
         provider: profile.provider,
         model: task.model,
+        pid: child.pid,
+        ...(identity ? {} : { workerIdentity: "unavailable" }),
         ...(resumeWith ? { resumedSession: resumeWith } : {}),
       });
       let attemptEvents = 0;
@@ -770,6 +797,10 @@ async function runTask(
     // thrown spawn error. Anywhere else and a run the provider already billed
     // for reports no spend at all.
     stateStore().recordTaskCost(task.id, runCost.costUsd, runCost.turns);
+    // The child is done, so its identity must not outlive it: the pid is now
+    // free for the OS to hand to someone else, and a stale stamp is exactly
+    // what would make the next boot probe a stranger's process.
+    stateStore().recordTaskWorker(task.id, undefined);
     if (heartbeat) clearInterval(heartbeat);
     if (active?.timeout) clearTimeout(active.timeout);
     if (active?.forceKill) clearTimeout(active.forceKill);

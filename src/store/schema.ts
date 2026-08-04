@@ -122,6 +122,10 @@ export function migrateDatabase(db: Database): { needsSessionBackfill: boolean }
     ["effort", "TEXT"],
     ["tldr", "TEXT"],
     ["title", "TEXT"],
+    // Who this task's worker process is, while it has one. Written at spawn and
+    // cleared when the child exits, so a row still carrying one after a restart
+    // is the only evidence a detached worker may have outlived the broker.
+    ["worker_json", "TEXT"],
   ] as const) {
     if (!taskColumns.has(column)) {
       db.exec(`ALTER TABLE tasks ADD COLUMN ${column} ${type}`);
@@ -160,6 +164,7 @@ export function migrateDatabase(db: Database): { needsSessionBackfill: boolean }
     [7, "task archives"],
     [8, "scope grants, shipped prompts, attempts and cost"],
     [9, "task titles"],
+    [10, "task worker identity"],
   ] as const) {
     db.query("INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)")
       .run(version, name);

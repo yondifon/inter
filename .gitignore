@@ -30,6 +30,7 @@ DerivedData/
 # Output of delegated field-test runs, not part of the product
 examples/
 .inter-test/
+tests/.probe/
 
 # Scratch and planning
 .plans/
