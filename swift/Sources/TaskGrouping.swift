@@ -12,6 +12,7 @@ struct TaskProject: Identifiable, Hashable {
 enum TaskGrouping: String, CaseIterable, Identifiable {
     case parent
     case project
+    case status
     case none
 
     var id: Self { self }
@@ -20,6 +21,7 @@ enum TaskGrouping: String, CaseIterable, Identifiable {
         switch self {
         case .parent: "Parent task"
         case .project: "Project"
+        case .status: "Status"
         case .none: "Nothing"
         }
     }
@@ -74,6 +76,8 @@ enum TaskOrganizer {
             return bucket(scoped) { ($0.cwd, projectName($0.cwd)) }
         case .parent:
             return parentGroups(scoped)
+        case .status:
+            return statusGroups(scoped)
         }
     }
 
@@ -134,6 +138,27 @@ enum TaskOrganizer {
             buckets[id, default: []].append(task)
         }
         return order.map { TaskGroup(id: $0, title: titles[$0], tasks: buckets[$0] ?? []) }
+    }
+
+    /// Wants a person first, live work next, the settled ledger after, unknown last.
+    private static let statusOrder: [TaskState] = [
+        .needsInput, .blocked,
+        .running, .queued, .answered,
+        .completed, .failed, .cancelled,
+        .unknown,
+    ]
+
+    /// Buckets by state in the fixed order above, so a state nobody has right now
+    /// costs no heading and the rows keep the store's newest-first order.
+    private static func statusGroups(_ tasks: [TaskSnapshot]) -> [TaskGroup] {
+        var buckets: [TaskState: [TaskSnapshot]] = [:]
+        for task in tasks {
+            buckets[TaskState(task.state), default: []].append(task)
+        }
+        return statusOrder.compactMap { state in
+            guard let rows = buckets[state], !rows.isEmpty else { return nil }
+            return TaskGroup(id: state.rawValue, title: state.label, tasks: rows)
+        }
     }
 
     /// Rows to draw for a group. Only a group with a heading can be collapsed —

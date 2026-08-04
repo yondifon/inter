@@ -505,7 +505,7 @@ private struct TaskRow: View {
             }
         }
         .padding(.vertical, 3)
-        .help(task.prompt)
+        .help(task.hoverText)
         .accessibilityLabel("\(title). \(state.label). \(worker), \(task.model).")
     }
 

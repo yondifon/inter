@@ -57,6 +57,25 @@ struct Profile: Codable, Identifiable, Hashable {
     }
 
     var resolvedModel: String { model ?? provider.defaultModel }
+
+    /// The provider's resume line with this profile's env assignments in front —
+    /// a pinned config dir is where the sessions actually live, so the bare line
+    /// would reopen the wrong context. Empty env leaves the line unchanged.
+    func resumeCommand(session: String) -> String? {
+        guard let command = provider.resumeCommand(session: session) else { return nil }
+        let prefix = env.sorted { $0.key < $1.key }
+            .map { "\($0.key)=\(shellAssignment($0.value))" }
+            .joined(separator: " ")
+        return prefix.isEmpty ? command : "\(prefix) \(command)"
+    }
+}
+
+/// Bare when the value is one safe word, double-quoted otherwise. Quotes must
+/// not defeat `$HOME` expansion — a pinned config dir usually starts with it.
+private func shellAssignment(_ value: String) -> String {
+    value.range(of: #"[^A-Za-z0-9_~$./:@%,=+-]"#, options: .regularExpression) == nil
+        ? value
+        : "\"\(value)\""
 }
 
 struct TaskSnapshot: Codable, Identifiable, Hashable {
@@ -66,6 +85,9 @@ struct TaskSnapshot: Codable, Identifiable, Hashable {
     /// Reasoning level the run was dispatched with. Absent when no level was set.
     var effort: String? = nil
     var prompt: String
+    /// Caller's one-line plain-language summary, written for the list where the
+    /// full prompt is too long. Absent on tasks predating the field.
+    var tldr: String? = nil
     /// Short human label, max 60 chars. Absent on tasks predating the field.
     var title: String? = nil
     var cwd: String
@@ -104,6 +126,16 @@ struct TaskSnapshot: Codable, Identifiable, Hashable {
             return prompt.split(whereSeparator: \.isNewline).first.map(String.init) ?? "Untitled task"
         }
         return label
+    }
+
+    /// Caller's one-liner when there is one, else the prompt — a row hover
+    /// would otherwise show nothing for tasks predating the field.
+    var hoverText: String {
+        let summary = tldr?.trimmingCharacters(in: .whitespaces)
+        guard let summary, !summary.isEmpty else {
+            return prompt
+        }
+        return summary
     }
 }
 

@@ -78,20 +78,34 @@ struct TaskDetail: View {
             .padding(.bottom, 16)
             .frame(maxWidth: .infinity)
 
-            ScrollView {
-                sectionContent
-                    .frame(maxWidth: 980 * uiScale)
-                    .padding(24)
-                    .frame(maxWidth: .infinity)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(spacing: 0) {
+                        jumpMarker("top")
+                        sectionContent
+                            .frame(maxWidth: 980 * uiScale)
+                            .padding(24)
+                            .frame(maxWidth: .infinity)
+                        jumpMarker("bottom")
+                    }
+                }
+                // Native scroller behaviour — the indicator surfaces while scrolling
+                // and fades when idle, so a long trace gives position feedback
+                // without a permanent rail.
+                .scrollIndicators(.automatic)
+                .id("\(task.id)-\(section.rawValue)")
+                // Scrolling to a sentinel at the end of the list put the view past the
+                // content whenever the rows under it had not been measured yet — the
+                // panel opened blank, and nothing re-clamped it. The anchor asks for
+                // the same thing against the real content size, so it cannot overshoot,
+                // and it keeps holding the tail as events stream in.
+                .defaultScrollAnchor(followsTail && section == .activity ? .bottom : .top)
+                .overlay(alignment: .bottomTrailing) {
+                    ScrollJumpControl(proxy: proxy)
+                        .padding(.trailing, 16 * uiScale)
+                        .padding(.bottom, 16 * uiScale)
+                }
             }
-            .scrollIndicators(.never)
-            .id("\(task.id)-\(section.rawValue)")
-            // Scrolling to a sentinel at the end of the list put the view past the
-            // content whenever the rows under it had not been measured yet — the
-            // panel opened blank, and nothing re-clamped it. The anchor asks for
-            // the same thing against the real content size, so it cannot overshoot,
-            // and it keeps holding the tail as events stream in.
-            .defaultScrollAnchor(followsTail && section == .activity ? .bottom : .top)
         }
         .background(Surface.content)
         .task(id: task.id) {
@@ -191,14 +205,14 @@ struct TaskDetail: View {
                 CopyIconButton(
                     text: resumeCommand,
                     label: "Copy resume command — \(resumeCommand)",
-                    symbol: "arrow.clockwise"
+                    symbol: "doc.on.clipboard"
                 )
             }
             if canResume {
-                IconButton(symbol: "arrow.clockwise.circle", label: "Resume task") { resumeAction() }
+                IconButton(symbol: "arrow.clockwise", label: "Resume task") { resumeAction() }
             }
             if canCancel {
-                IconButton(symbol: "xmark.circle", label: "Cancel task", tint: AnyShapeStyle(.red)) {
+                IconButton(symbol: "xmark.octagon", label: "Cancel task", tint: AnyShapeStyle(.red)) {
                     confirmingCancel = true
                 }
             }
@@ -241,7 +255,7 @@ struct TaskDetail: View {
     /// offered for it — same rule the broker applies before resuming a session.
     private var resumeCommand: String? {
         guard let sessionId, let worker, worker.command == nil else { return nil }
-        return worker.provider.resumeCommand(session: sessionId)
+        return worker.resumeCommand(session: sessionId)
     }
 
     private var sessionId: String? {
@@ -324,6 +338,14 @@ struct TaskDetail: View {
         }
     }
 
+    /// Zero-height anchor at the content's edge, the jump control's target. A
+    /// marker is just a measured view, so a jump asks the scroller to clamp to
+    /// the same bounds a hand scroll would — and a tap fires only when the pane
+    /// is on screen, never on open or as events stream in.
+    private func jumpMarker(_ id: String) -> some View {
+        Color.clear.frame(height: 0).id(id).accessibilityHidden(true)
+    }
+
     private var worker: Profile? {
         store.profiles.first { $0.id == task.profileId }
     }
@@ -385,6 +407,28 @@ struct TaskDetail: View {
         var known = Set(events.map(\.id))
         events.append(contentsOf: incoming.filter { known.insert($0.id).inserted })
         events.sort { $0.id < $1.id }
+    }
+}
+
+/// Floating top/bottom jump control over the trace. Always visible — the trace's
+/// length moves as events stream in, so an overflow gate would flicker across
+/// the whole run; the pill stays put so the reader always knows where it is.
+private struct ScrollJumpControl: View {
+    let proxy: ScrollViewProxy
+
+    @Environment(\.uiScale) private var uiScale
+
+    var body: some View {
+        HStack(spacing: 2 * uiScale) {
+            IconButton(symbol: "arrow.up.to.line", label: "Jump to top") {
+                withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("top", anchor: .top) }
+            }
+            IconButton(symbol: "arrow.down.to.line", label: "Jump to bottom") {
+                withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
+            }
+        }
+        .padding(3 * uiScale)
+        .background(Surface.panel, in: RoundedRectangle(cornerRadius: Radius.medium))
     }
 }
 

@@ -203,8 +203,8 @@ enum TaskState: String {
     }
 
     /// Only these states earn their state name in a dense list; a check already
-    /// says "completed".
-    var wantsLabelInList: Bool { self != .completed }
+    /// says "completed", and the pulse already says "running".
+    var wantsLabelInList: Bool { self != .completed && self != .running }
 
     var isTerminal: Bool {
         [.needsInput, .answered, .blocked, .completed, .failed, .cancelled].contains(self)

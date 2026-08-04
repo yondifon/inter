@@ -3,7 +3,7 @@ import XCTest
 @testable import Inter
 
 final class TaskGroupingTests: XCTestCase {
-    private func task(_ id: String, cwd: String, parent: String? = nil, prompt: String = "prompt", title: String? = nil) -> TaskSnapshot {
+    private func task(_ id: String, cwd: String, parent: String? = nil, prompt: String = "prompt", title: String? = nil, state: String = "completed") -> TaskSnapshot {
         TaskSnapshot(
             id: id,
             profileId: "worker",
@@ -11,7 +11,7 @@ final class TaskGroupingTests: XCTestCase {
             prompt: prompt,
             title: title,
             cwd: cwd,
-            state: "completed",
+            state: state,
             createdAt: "2026-07-29T10:00:00Z",
             updatedAt: "2026-07-29T10:00:00Z",
             output: "",
@@ -93,6 +93,87 @@ final class TaskGroupingTests: XCTestCase {
         )
         XCTAssertEqual(groups.map(\.title), ["site"])
         XCTAssertEqual(groups[0].tasks.map(\.id), ["2"])
+    }
+
+    func testStatusGroupsComeOutInFixedOrder() {
+        let groups = TaskOrganizer.organize(
+            tasks: [
+                task("1", cwd: inter, state: "failed"),
+                task("2", cwd: inter, state: "running"),
+                task("3", cwd: inter, state: "completed"),
+                task("4", cwd: inter, state: "needs_input"),
+                task("5", cwd: inter, state: "blocked"),
+                task("6", cwd: inter, state: "queued"),
+                task("7", cwd: inter, state: "answered"),
+                task("8", cwd: inter, state: "cancelled"),
+                task("9", cwd: inter, state: "garbage"),
+            ],
+            project: nil,
+            grouping: .status
+        )
+        XCTAssertEqual(
+            groups.map(\.title),
+            ["Needs input", "Blocked", "Running", "Queued", "Answered", "Completed", "Failed", "Cancelled", "Unknown"],
+            "status groups follow the fixed order, not first appearance"
+        )
+    }
+
+    func testStatusGroupingSkipsAbsentStates() {
+        let groups = TaskOrganizer.organize(
+            tasks: [
+                task("1", cwd: inter, state: "running"),
+                task("2", cwd: inter, state: "completed"),
+                task("3", cwd: inter, state: "completed"),
+            ],
+            project: nil,
+            grouping: .status
+        )
+        XCTAssertEqual(groups.map(\.title), ["Running", "Completed"])
+        XCTAssertEqual(
+            groups.flatMap { $0.tasks }.count, 3,
+            "a state nobody is in must not spend a heading on an empty group"
+        )
+    }
+
+    func testStatusGroupingKeepsTheStoresOrderInsideEachGroup() {
+        let groups = TaskOrganizer.organize(
+            tasks: [
+                task("1", cwd: inter, state: "completed"),
+                task("2", cwd: inter, state: "running"),
+                task("3", cwd: inter, state: "completed"),
+                task("4", cwd: inter, state: "running"),
+            ],
+            project: nil,
+            grouping: .status
+        )
+        XCTAssertEqual(groups[0].tasks.map(\.id), ["1", "3"], "newest-first order survives bucketing")
+        XCTAssertEqual(groups[1].tasks.map(\.id), ["2", "4"])
+    }
+
+    func testStatusGroupingComposesWithTheProjectFilter() {
+        let groups = TaskOrganizer.organize(
+            tasks: [
+                task("1", cwd: inter, state: "failed"),
+                task("2", cwd: site, state: "failed"),
+                task("3", cwd: inter, state: "running"),
+            ],
+            project: inter,
+            grouping: .status
+        )
+        XCTAssertEqual(groups.map(\.title), ["Running", "Failed"], "filtering runs before grouping")
+        XCTAssertEqual(groups.map { $0.tasks.map(\.id) }, [["3"], ["1"]])
+    }
+
+    func testStatusGroupIDIsTheRawState() {
+        let groups = TaskOrganizer.organize(
+            tasks: [task("1", cwd: inter, state: "needs_input")],
+            project: nil,
+            grouping: .status
+        )
+        XCTAssertEqual(
+            groups.map(\.id), ["needs_input"],
+            "the id comes from the state, so a collapse key survives refreshes"
+        )
     }
 
     func testSiblingsShareTheirParentsGroup() {
