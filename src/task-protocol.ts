@@ -1,11 +1,28 @@
 import type { CompletionCode, TaskCompletion, TaskScope } from "./types";
 
-const NEEDS_INPUT = /(?:^|\r?\n)[\t ]*(?:INTER_NEEDS_INPUT|NEEDS_INPUT)\s*:\s*([^\r\n]+)[\t ]*(?:\r?\n[\t ]*)*$/i;
+// Models format their sign-off. Bold, backticks, a bullet, a block quote or a
+// heading in front of the marker used to read as "no marker at all", which
+// parked finished work in blocked/unverified — most often on the smaller,
+// markdown-heavy models, which are exactly the ones told to end with a literal
+// line. Accept the decoration here; strip it off the captures below.
+const LEAD = String.raw`(?:^|\r?\n)[\t ]*(?:[>#*_\-~\`]+[\t ]*)*`;
+const NEEDS_INPUT = new RegExp(
+  String.raw`${LEAD}(?:INTER_NEEDS_INPUT|NEEDS_INPUT)\s*:\s*([^\r\n]+)[\t ]*(?:\r?\n[\t ]*)*$`,
+  "i",
+);
 // Line-anchored but not end-anchored: workers often append a summary after the
 // marker, and that must not turn a done task into blocked/unverified. The line
 // anchor keeps instruction echoes ("end with: INTER_RESULT: completed") inert.
-const COMPLETED = /(?:^|\r?\n)[\t ]*INTER_RESULT\s*:\s*completed[\t ]*(?=\r?\n|$)/i;
-const BLOCKED = /(?:^|\r?\n)[\t ]*INTER_BLOCKED\s*:\s*([a-z_]+)(?:\s*[:|]\s*(.+))?[\t ]*(?:\r?\n[\t ]*)*$/i;
+// The trailing group also allows the full stop a model adds when it writes the
+// marker as a sentence.
+const COMPLETED = new RegExp(
+  String.raw`${LEAD}INTER_RESULT\s*:\s*completed[\t ]*(?:[*_~\`.]+[\t ]*)*(?=\r?\n|$)`,
+  "i",
+);
+const BLOCKED = new RegExp(
+  String.raw`${LEAD}INTER_BLOCKED\s*:\s*([a-z_]+)(?:\s*[:|]\s*(.+))?[\t ]*(?:\r?\n[\t ]*)*$`,
+  "i",
+);
 const PERMISSION_BLOCK = /\b(?:awaiting|need(?:ing)?|requires?) (?:your )?(?:permission|approval)\b|\bcannot proceed\b.*\bpermission\b/i;
 
 export interface WorkerOutcome {
@@ -65,7 +82,10 @@ export function continuationPrompt(original: string, question: string, answer: s
 }
 
 export function needsInputQuestion(output: string): string | undefined {
-  return output.match(NEEDS_INPUT)?.[1]?.trim() || undefined;
+  // QUESTION_DECOR also closes the bold a model opened before the marker.
+  // The blocked reason deliberately keeps its trailing characters: reasons end
+  // in globs like "docs/**", and stripping those would corrupt the path.
+  return output.match(NEEDS_INPUT)?.[1]?.replace(QUESTION_DECOR, "").trim() || undefined;
 }
 
 // Trailing markdown decoration and closing punctuation around the "?", e.g.
