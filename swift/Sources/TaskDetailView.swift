@@ -481,6 +481,8 @@ private struct ActivityBlockView: View {
             ActivitySignalCard(event: event)
         case .receipt(let event, let thinkingTokens):
             ActivityReceiptCard(event: event, thinkingTokens: thinkingTokens)
+        case .handoff(let boundary):
+            ActivityHandoffCard(boundary: boundary)
         }
     }
 }
@@ -709,6 +711,71 @@ private struct ActivitySignalCard: View {
         case "Heartbeat": "zzz"
         default: "exclamationmark.triangle"
         }
+    }
+}
+
+/// A task handed off to another profile collapses every run before the current
+/// one into a single row. Tapping expands it to reveal each leg with its own
+/// boundary line.
+private struct ActivityHandoffCard: View {
+    let boundary: HandoffBoundary
+    @State private var expanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button(action: { withAnimation(.easeOut(duration: 0.15)) { expanded.toggle() } }) {
+                HStack(alignment: .firstTextBaseline, spacing: 9) {
+                    Image(systemName: "arrow.triangle.branch")
+                        .scaledFont(.caption, weight: .semibold)
+                        .foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Handed off").scaledFont(.callout, weight: .medium)
+                        Text(summary).scaledFont(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 12)
+                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                        .scaledFont(.caption2, weight: .semibold)
+                        .foregroundStyle(.tertiary)
+                }
+                .padding(.vertical, 10)
+                .padding(.horizontal, 14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Surface.panel, in: RoundedRectangle(cornerRadius: Radius.medium))
+            }
+            .buttonStyle(.plain)
+
+            if expanded {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(Array(boundary.earlierRuns.enumerated()), id: \.offset) { _, run in
+                        if let endedBy = run.endedBy {
+                            HStack(spacing: 8) {
+                                Rectangle().fill(Color(nsColor: .separatorColor)).frame(height: 1)
+                                Text(endedBy.label)
+                                    .scaledFont(.caption, design: .monospaced)
+                                    .foregroundStyle(.tertiary)
+                                    .lineLimit(1)
+                                    .layoutPriority(1)
+                                Rectangle().fill(Color(nsColor: .separatorColor)).frame(height: 1)
+                            }
+                            .padding(.horizontal, 14)
+                        }
+                        ForEach(run.blocks) { block in
+                            ActivityBlockView(block: block)
+                        }
+                    }
+                }
+                .padding(.top, 6)
+                .padding(.leading, 14)
+            }
+        }
+    }
+
+    private var summary: String {
+        let count = boundary.earlierRuns.count
+        let runWord = count == 1 ? "run" : "runs"
+        let eventWord = boundary.hiddenEventCount == 1 ? "event" : "events"
+        return "\(boundary.chain) · \(count) earlier \(runWord) · \(boundary.hiddenEventCount) \(eventWord)"
     }
 }
 

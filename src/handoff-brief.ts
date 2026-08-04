@@ -124,6 +124,7 @@ function transcript(events: TaskEvent[], provider: Provider): TranscriptLine[] {
   // line is still the newest one — skipped events push nothing, so a message
   // following one still belongs to the message before it.
   let previousMessage: TaskEventView | undefined;
+  const seenCalls = new Set<string>();
   for (const event of events) {
     if (!event.type.startsWith("agent.") && event.type !== "scope_refusal") continue;
     const view = taskEventView(event, provider);
@@ -153,10 +154,33 @@ function transcript(events: TaskEvent[], provider: Provider): TranscriptLine[] {
     // trace marks them minor for exactly that reason.
     if (view.minor) continue;
     if (view.kind === "tool" || view.kind === "file" || view.kind === "command") {
-      lines.push({ kind: "tool", text: join(view.title, detail) });
+      const text = join(view.title, detail);
+      if (repeatsCall(view, text, seenCalls, lines.at(-1))) continue;
+      if (view.actionId) seenCalls.add(view.actionId);
+      lines.push({ kind: "tool", text });
     }
   }
   return lines;
+}
+
+/**
+ * Inter stores several rows per tool call — the agent's own echo of the call, a
+ * pre-hook, a post-hook — and each renders the same line, which is where three
+ * quarters of a real brief went. Every provider tags those rows with one action
+ * id, so the id is the call's identity: rows sharing it are one call, while a
+ * worker reading the same file twice gets two ids and keeps both lines. Without
+ * an id the floor is the line just before, which only folds a repeat that is
+ * already adjacent. A failed row is never folded away: the failure is the point
+ * of that row, and the call's earlier rows say nothing about it.
+ */
+function repeatsCall(
+  view: TaskEventView,
+  text: string,
+  seen: Set<string>,
+  last?: TranscriptLine,
+): boolean {
+  if (view.phase === "failed") return false;
+  return view.actionId ? seen.has(view.actionId) : last?.kind === "tool" && last.text === text;
 }
 
 function streamed(view: TaskEventView): boolean {

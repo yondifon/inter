@@ -46,11 +46,21 @@ function says(text: string): TaskEvent {
   return event({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text }] } });
 }
 
-function calls(name: string, input: Record<string, unknown>): TaskEvent {
+function calls(name: string, input: Record<string, unknown>, id?: string): TaskEvent {
   return event({
     type: "assistant",
-    message: { role: "assistant", content: [{ type: "tool_use", name, input }] },
+    message: {
+      role: "assistant",
+      content: [{ type: "tool_use", name, input, ...(id ? { id } : {}) }],
+    },
   });
+}
+
+/** The hook rows Claude emits around a call the assistant already echoed. */
+function hooks(name: string, input: Record<string, unknown>, id: string): TaskEvent[] {
+  return ["PreToolUse", "PostToolUse"].map((hook) =>
+    event({ hook_event_name: hook, tool_name: name, tool_input: input, tool_use_id: id }, "agent.hook")
+  );
 }
 
 describe("handoff brief", () => {
@@ -122,6 +132,41 @@ describe("handoff brief", () => {
 
     expect(brief.tier).toBe("digest");
     expect(brief.prompt.split("Read file: …/project/src/store.ts")).toHaveLength(2);
+  });
+
+  test("folds one tool call's rows into one line, and keeps two real reads as two", () => {
+    const input = { file_path: "/root/project/src/model-router.ts" };
+    const brief = handoffBrief(task(), [
+      // One call, as Inter stores it: the assistant's echo plus its hook rows.
+      calls("Read", input, "toolu_1"),
+      ...hooks("Read", input, "toolu_1"),
+      says("The router falls back to the profile default."),
+      // A second read of the same file later in the run is real signal, not a
+      // repeat: its own call id, its own line.
+      calls("Read", input, "toolu_2"),
+      ...hooks("Read", input, "toolu_2"),
+    ], "claude");
+
+    expect(brief.tier).toBe("verbatim");
+    // Six rows in, two lines out.
+    expect(brief.prompt.split("[tool] Read file: …/project/src/model-router.ts")).toHaveLength(3);
+  });
+
+  test("keeps a failed call's row even though the call already has a line", () => {
+    const input = { file_path: "/root/project/docs/reviews/store.md" };
+    const brief = handoffBrief(task(), [
+      calls("Write", input, "toolu_9"),
+      event({
+        hook_event_name: "PostToolUseFailure",
+        tool_name: "Write",
+        tool_input: input,
+        tool_use_id: "toolu_9",
+        error: "EPERM: operation not permitted",
+      }, "agent.hook"),
+    ], "claude");
+
+    // Folding this away would leave the next worker believing the write landed.
+    expect(brief.prompt).toContain("EPERM: operation not permitted");
   });
 
   test("rejoins a reply the provider streamed a chunk at a time", () => {

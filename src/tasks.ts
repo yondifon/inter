@@ -776,24 +776,66 @@ function tail(value: string, limit: number): string {
   return value.length <= limit ? value : value.slice(-limit);
 }
 
+/**
+ * The states a dead run can be continued from. The store pins the same set in
+ * SQL on the write itself; this is the copy the entry points check, stated once
+ * so `resume` and `handoff` cannot drift apart.
+ */
+const RESUMABLE_STATES: Task["state"][] = ["failed", "cancelled", "blocked"];
+
+function requireTask(id: string): Task {
+  const task = stateStore().getTask(id);
+  if (!task) throw new Error(unknownTaskMessage(id));
+  return task;
+}
+
+/**
+ * A task that exists and is in a state a continuation verb can act on. `verb`
+ * names the operation in the refusal, which is the only thing `resume` and
+ * `handoff` legitimately differ on here.
+ */
+function requireContinuableTask(id: string, verb: "resumed" | "handed off"): Task {
+  const task = requireTask(id);
+  if (!RESUMABLE_STATES.includes(task.state)) {
+    throw new Error(`task cannot be ${verb} from state ${task.state}: ${id}`);
+  }
+  return task;
+}
+
+/**
+ * The profile a continuation will reopen the session on, proven able to reopen
+ * it. The structural limitation is checked before the missing session id: a
+ * profile that can never capture a session would otherwise surface the
+ * misleading "no captured session" message. `hint` is the tail of that message
+ * for the caller that has more to say about it.
+ */
+async function requireSessionProfile(
+  task: Task,
+  verb: "reply to" | "resume",
+  hint = "",
+): Promise<Profile> {
+  const profile = (await loadConfig()).profiles.find((item) => item.id === task.profileId);
+  if (!profile || !canResumeSession(profile)) {
+    throw new Error(sessionResumeUnsupported(task.profileId, profile));
+  }
+  if (!task.sessionId) {
+    throw new Error(`task has no captured session to ${verb}: ${task.id}${hint}`);
+  }
+  return profile;
+}
+
 export async function reply(
   id: string,
   answer: string,
   options: ReplyOptions = {},
 ): Promise<Task> {
-  const old = stateStore().getTask(id);
-  if (!old) throw new Error(unknownTaskMessage(id));
+  const old = requireTask(id);
   if (old.state !== "needs_input") {
     throw new Error(old.state === "blocked"
       ? `task does not need input: ${id} — state is blocked; use resume with your answer as the instruction`
       : `task does not need input: ${id} (state: ${old.state})`);
   }
-  const config = await loadConfig();
-  const profile = config.profiles.find((item) => item.id === old.profileId);
-  if (!profile || !canResumeSession(profile)) {
-    throw new Error(sessionResumeUnsupported(old.profileId, profile));
-  }
-  if (!old.sessionId) throw new Error(`task has no captured session to reply to: ${id}`);
+  const profile = await requireSessionProfile(old, "reply to");
   const prompt = continuationPrompt(
     old.prompt,
     old.question ?? "What input is required?",
@@ -817,24 +859,12 @@ export async function resumeTask(
   instruction?: string,
   options: ResumeOptions = {},
 ): Promise<Task> {
-  const old = stateStore().getTask(id);
-  if (!old) throw new Error(unknownTaskMessage(id));
-  if (!["failed", "cancelled", "blocked"].includes(old.state)) {
-    throw new Error(`task cannot be resumed from state ${old.state}: ${id}`);
-  }
-  // Check the structural limitation before the missing session id: a profile
-  // that can never capture a session would otherwise surface the misleading
-  // "no captured session" message.
-  const config = await loadConfig();
-  const profile = config.profiles.find((item) => item.id === old.profileId);
-  if (!profile || !canResumeSession(profile)) {
-    throw new Error(sessionResumeUnsupported(old.profileId, profile));
-  }
-  if (!old.sessionId) {
-    throw new Error(
-      `task has no captured session to resume: ${id} — the worker exited before the provider created a session; delegate a fresh task instead`,
-    );
-  }
+  const old = requireContinuableTask(id, "resumed");
+  const profile = await requireSessionProfile(
+    old,
+    "resume",
+    " — the worker exited before the provider created a session; delegate a fresh task instead",
+  );
   validateTimeoutMs(options.timeoutMs);
   // A replacement scope is a fresh statement of what this cwd may touch, so it
   // becomes the grant later delegations inherit.
@@ -872,11 +902,7 @@ export async function handoffTask(
   profileId: string,
   options: HandoffOptions = {},
 ): Promise<Task> {
-  const old = stateStore().getTask(id);
-  if (!old) throw new Error(unknownTaskMessage(id));
-  if (!["failed", "cancelled", "blocked"].includes(old.state)) {
-    throw new Error(`task cannot be handed off from state ${old.state}: ${id}`);
-  }
+  const old = requireContinuableTask(id, "handed off");
   if (profileId === old.profileId) {
     throw new Error(
       `handoff needs a different profile: task ${id} is already on ${profileId} — use resume to continue on the same account and provider session`,
@@ -943,8 +969,7 @@ function sessionResumeUnsupported(profileId: string, profile?: Profile): string 
 }
 
 export async function cancelTask(id: string, reason = "cancelled by caller", timedOut = false): Promise<Task> {
-  const task = stateStore().getTask(id);
-  if (!task) throw new Error(unknownTaskMessage(id));
+  const task = requireTask(id);
   if (task.state === "cancelled") return task;
   const completion = {
     blocked: true,

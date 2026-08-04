@@ -320,4 +320,153 @@ final class ActivityStoryTests: XCTestCase {
         XCTAssertEqual(story.blocks.count, 1)
         XCTAssertEqual(work(story.blocks[0]).map(\.id), [1, 2])
     }
+
+    // MARK: - Handoff boundaries
+
+    private func handoffEvent(
+        _ id: Int,
+        detail: String? = "opencode → codex",
+        source: String = "broker",
+        createdAt: String = "2026-07-30T15:00:00.000Z"
+    ) -> TaskEventSnapshot {
+        TaskEventSnapshot(
+            id: id, taskId: "task", source: source, kind: "lifecycle", phase: "info",
+            title: "Handed off to another profile", detail: detail, presentation: nil,
+            rawText: nil, createdAt: createdAt, minor: nil, actionId: nil
+        )
+    }
+
+    /// A trace with no handoff must produce the same blocks as before — no
+    /// handoff row, no behavioural change.
+    func testNoHandoffLeavesTraceUnchanged() {
+        let story = ActivityStory.compose([
+            event(1, kind: "command", title: "Bash", detail: "ls"),
+            event(2, kind: "usage", title: "Run summary",
+                  presentation: TaskEventPresentationSnapshot(type: "usage", costUsd: 0.01, turns: 1)),
+        ])
+        let kinds = story.blocks.map { block -> String in
+            switch block {
+            case .chapter: "chapter"
+            case .reasoning: "reasoning"
+            case .signal: "signal"
+            case .receipt: "receipt"
+            case .handoff: "handoff"
+            }
+        }
+        XCTAssertEqual(kinds, ["chapter", "receipt"])
+    }
+
+    /// One handoff splits the trace: the prior run collapses into a single row
+    /// and the current run stays visible.
+    func testOneHandoffCollapsesPriorRun() {
+        let story = ActivityStory.compose([
+            event(1, kind: "command", title: "Bash", detail: "ls"),
+            event(2, kind: "file", title: "Read file", detail: "a.rs"),
+            handoffEvent(3, detail: "opencode → codex"),
+            event(4, kind: "command", title: "Bash", detail: "cargo test"),
+            event(5, kind: "usage", title: "Run summary",
+                  presentation: TaskEventPresentationSnapshot(type: "usage", costUsd: 0.05, turns: 3)),
+        ])
+        // First block is the handoff boundary, followed by the current run's blocks.
+        guard case .handoff(let boundary) = story.blocks.first else {
+            return XCTFail("expected handoff block, got \(String(describing: story.blocks.first))")
+        }
+        XCTAssertEqual(boundary.earlierRuns.count, 1)
+        XCTAssertEqual(boundary.hiddenEventCount, 2) // both pre-handoff events, though they fold to one chapter
+        XCTAssertEqual(boundary.chain, "OpenCode → Codex")
+        let afterHandoff = story.blocks.dropFirst()
+        // The current run has a chapter (event 4) and a receipt (event 5).
+        XCTAssertEqual(afterHandoff.count, 2)
+        guard case .chapter(_, let rows) = afterHandoff.first else {
+            return XCTFail("expected chapter, got \(String(describing: afterHandoff.first))")
+        }
+        XCTAssertEqual(rows.compactMap { if case .work(let e) = $0 { e.id } else { nil } }, [4])
+    }
+
+    /// Three handoffs chain every hop into the collapsed line and hide all
+    /// earlier runs.
+    func testThreeHandoffsChainAllHops() {
+        let story = ActivityStory.compose([
+            event(1, kind: "file", title: "Read file", detail: "x.rs"),
+            handoffEvent(2, detail: "opencode → codex"),
+            event(3, kind: "command", title: "Bash", detail: "make"),
+            handoffEvent(4, detail: "codex → antigravity"),
+            event(5, kind: "file", title: "Edit file", detail: "y.rs"),
+            event(6, kind: "command", title: "Bash", detail: "npm test"),
+            handoffEvent(7, detail: "antigravity → pi"),
+            event(8, kind: "message", title: "Agent message", detail: "done"),
+            event(9, kind: "usage", title: "Run summary",
+                  presentation: TaskEventPresentationSnapshot(type: "usage", costUsd: 0.12, turns: 2)),
+        ])
+        guard case .handoff(let boundary) = story.blocks.first else {
+            return XCTFail("expected handoff block first, got \(String(describing: story.blocks.first))")
+        }
+        XCTAssertEqual(boundary.earlierRuns.count, 3)
+        XCTAssertEqual(boundary.chain, "OpenCode → Codex → Antigravity → Pi")
+        // The current run (after the last handoff) has the message and the receipt.
+        let current = story.blocks.dropFirst()
+        XCTAssertEqual(current.count, 2)
+    }
+
+    /// A malformed handoff detail must not crash — the hop degrades to the raw
+    /// string.
+    func testMalformedHandoffDetailDoesNotCrash() {
+        let story = ActivityStory.compose([
+            event(1, kind: "command", title: "Bash", detail: "ls"),
+            handoffEvent(2, detail: "garbage — no arrow here"),
+            event(3, kind: "file", title: "Read file", detail: "a.rs"),
+        ])
+        guard case .handoff(let boundary) = story.blocks.first else {
+            return XCTFail("expected handoff block")
+        }
+        XCTAssertEqual(boundary.earlierRuns.count, 1)
+        XCTAssertTrue(boundary.chain.contains("garbage — no arrow here"))
+    }
+
+    /// A nil detail on a handoff event must not crash.
+    func testNilHandoffDetailDoesNotCrash() {
+        let story = ActivityStory.compose([
+            event(1, kind: "command", title: "Bash", detail: "ls"),
+            handoffEvent(2, detail: nil),
+            event(3, kind: "file", title: "Read file", detail: "a.rs"),
+        ])
+        guard case .handoff(let boundary) = story.blocks.first else {
+            return XCTFail("expected handoff block")
+        }
+        XCTAssertEqual(boundary.earlierRuns.count, 1)
+    }
+
+    /// Expanded view: each earlier run carries the hop that ended it.
+    func testEarlierRunsCarryTheirEndingHop() {
+        let story = ActivityStory.compose([
+            event(1, kind: "file", title: "Read file", detail: "a.rs"),
+            handoffEvent(2, detail: "opencode → codex"),
+            event(3, kind: "command", title: "Bash", detail: "make"),
+            handoffEvent(4, detail: "codex → antigravity"),
+            event(5, kind: "message", title: "Agent message", detail: "done"),
+        ])
+        guard case .handoff(let boundary) = story.blocks.first else {
+            return XCTFail("expected handoff block")
+        }
+        XCTAssertEqual(boundary.earlierRuns.count, 2)
+        XCTAssertEqual(boundary.earlierRuns[0].endedBy?.label, "OpenCode → Codex")
+        XCTAssertEqual(boundary.earlierRuns[1].endedBy?.label, "Codex → Antigravity")
+        XCTAssertEqual(boundary.earlierRuns[0].blocks.count, 1)
+        XCTAssertEqual(boundary.earlierRuns[1].blocks.count, 1)
+    }
+
+    /// Technical events from earlier runs are collected across all runs.
+    func testHandoffCollectsTechnicalFromAllRuns() {
+        let story = ActivityStory.compose([
+            event(1, kind: "lifecycle", title: "Worker started"),
+            event(2, kind: "file", title: "Read file", detail: "a.rs"),
+            handoffEvent(3, detail: "opencode → codex"),
+            event(4, kind: "lifecycle", title: "Handoff brief built", detail: "verbatim · 1234 chars"),
+            event(5, kind: "lifecycle", title: "Worker started"),
+            event(6, kind: "command", title: "Bash", detail: "ls"),
+        ])
+        XCTAssertTrue(story.technical.contains { $0.id == 1 }) // Worker started from run 0
+        XCTAssertTrue(story.technical.contains { $0.id == 4 }) // Handoff brief from current run
+        XCTAssertTrue(story.technical.contains { $0.id == 5 }) // Worker started from current run
+    }
 }

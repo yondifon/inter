@@ -20,15 +20,20 @@ enum ActivityStory {
 
     static func compose(_ rawEvents: [TaskEventSnapshot]) -> Composition {
         let events = foldActions(rawEvents)
+        let boundaries = events.enumerated().filter { $0.element.title == "Handed off to another profile" }
+        if boundaries.isEmpty { return composeFlat(events) }
+        return composeWithHandoffs(events, boundaries: boundaries)
+    }
+
+    /// The current compose loop, unchanged. Extracted so every run — the
+    /// original and each handoff leg — goes through the same shaping rules.
+    private static func composeFlat(_ events: [TaskEventSnapshot]) -> Composition {
         var blocks: [ActivityBlock] = []
         var technical: [TaskEventSnapshot] = []
         var chapter: [ChapterRow] = []
         var pulse: [TaskEventSnapshot] = []
         let receiptID = events.last { $0.kind == "usage" }?.id
         let stallID = events.last { isStalledHeartbeat($0) }?.id
-        // Reasoning tokens are only ever reported as a per-turn counter that
-        // restarts, so the run total has to be accumulated from the deltas and
-        // stamped on the receipt once every pulse has been counted.
         var thinkingTokens = 0
         var receiptIndex: Int?
 
@@ -46,9 +51,6 @@ enum ActivityStory {
                 updates: pulse.count,
                 seconds: seconds(from: first.createdAt, to: last.createdAt)
             )
-            // Thinking between two calls belongs to the run they are part of.
-            // Ending the chapter for it cut a stretch of work into a card per
-            // call, which is how a trace of 80 rows came to be 38 cards.
             if chapter.isEmpty { blocks.append(.reasoning(line)) } else { chapter.append(.reasoning(line)) }
             pulse = []
         }
@@ -58,19 +60,12 @@ enum ActivityStory {
                 pulse.append(event)
                 continue
             }
-            // An event nobody sees must not break a run somebody does: a
-            // heartbeat between two thinking ticks would otherwise split one
-            // pulse line in two.
             if isTechnical(event), event.id != receiptID {
                 technical.append(event)
                 continue
             }
             flushPulse()
             if isStalledHeartbeat(event) {
-                // A stall is a live condition, not history. Only the newest
-                // tick earns a strip; the earlier ones repeat the same fact
-                // with a smaller number, and a stall the worker already broke
-                // out of is not worth interrupting the trace for.
                 if event.id == stallID {
                     flushChapter()
                     blocks.append(.signal(event))
@@ -80,13 +75,9 @@ enum ActivityStory {
                 continue
             }
             if event.kind == "usage" {
-                // Only the final usage event settles the run; earlier per-turn
-                // receipts repeat the same shape with smaller numbers.
                 if event.id == receiptID {
                     flushChapter()
                     receiptIndex = blocks.count
-                    // A provider that states the run's reasoning total on the
-                    // receipt itself needs no summing.
                     blocks.append(.receipt(event, thinkingTokens: event.presentation?.tokensThinking ?? 0))
                 } else {
                     technical.append(event)
@@ -98,9 +89,6 @@ enum ActivityStory {
                 blocks.append(.signal(event))
                 continue
             }
-            // One action often arrives several times — pre-hook, post-hook,
-            // and the provider's own echo of the same call. Keep the last of a
-            // same-shaped run: it carries the settled phase and exit state.
             if case .work(let last)? = chapter.last, sameShape(last, event) {
                 chapter[chapter.count - 1] = .work(event)
             } else {
@@ -114,6 +102,40 @@ enum ActivityStory {
             blocks[index] = .receipt(event, thinkingTokens: thinkingTokens)
         }
         return Composition(blocks: blocks, technical: technical)
+    }
+
+    /// Splits the stream at every `handed_off` event. Everything before the
+    /// last boundary becomes a single collapsible row; the tail is the current
+    /// run and renders as it would for a task that was never handed off.
+    private static func composeWithHandoffs(
+        _ events: [TaskEventSnapshot],
+        boundaries: [(Int, TaskEventSnapshot)]
+    ) -> Composition {
+        let hops = boundaries.map { Hop.from($0.1.detail) }
+        let chain = Hop.chain(hops)
+        var start = 0
+        var runs: [(hop: Hop?, events: [TaskEventSnapshot])] = []
+        for (idx, _) in boundaries {
+            runs.append((hop: nil, events: Array(events[start..<idx])))
+            start = idx + 1
+        }
+        runs.append((hop: nil, events: Array(events[start...])))
+        // Tag each earlier run with the handoff that closed it.
+        for i in 0..<(runs.count - 1) {
+            runs[i].hop = hops[i]
+        }
+        let composed = runs.map { composeFlat($0.events) }
+        let earlier = zip(runs.dropLast(), composed.dropLast()).map { run, comp in
+            HandoffRun(endedBy: run.hop, blocks: comp.blocks)
+        }
+        let current = composed.last?.blocks ?? []
+        let hiddenEventCount = runs.dropLast().reduce(0) { $0 + $1.events.count }
+        let allTechnical = composed.flatMap(\.technical)
+        var blocks: [ActivityBlock] = [.handoff(HandoffBoundary(
+            chain: chain, earlierRuns: earlier, hiddenEventCount: hiddenEventCount
+        ))]
+        blocks.append(contentsOf: current)
+        return Composition(blocks: blocks, technical: allTechnical)
     }
 
     /// Claude streams a cumulative thinking-token counter; each tick is one
@@ -234,7 +256,7 @@ enum ActivityStory {
     /// in the header, and archiving is something the reader did, not the worker.
     private static let bookkeeping: Set<String> = [
         "Task queued", "Worker started", "Worker spawned", "Task completed",
-        "Session Captured", "Archived",
+        "Session Captured", "Archived", "Handoff brief built",
     ]
 
     private static func isTechnical(_ event: TaskEventSnapshot) -> Bool {
@@ -260,6 +282,7 @@ enum ActivityBlock: Identifiable {
     case reasoning(ActivityStory.ReasoningPulse)
     case signal(TaskEventSnapshot)
     case receipt(TaskEventSnapshot, thinkingTokens: Int)
+    case handoff(HandoffBoundary)
 
     var id: Int {
         switch self {
@@ -267,8 +290,59 @@ enum ActivityBlock: Identifiable {
         case .reasoning(let pulse): pulse.id
         case .signal(let event): event.id
         case .receipt(let event, _): event.id
+        case .handoff: 0
         }
     }
+}
+
+/// One `from → to` pair parsed from a `handed_off` detail string like
+/// `opencode → codex`. Both sides are mapped to their display labels, and the
+/// raw profile ids stay reachable. When the arrow or the prefix is missing the
+/// hop degrades to the raw string without crashing.
+struct Hop {
+    let fromId: String
+    let toId: String
+    let fromLabel: String
+    let toLabel: String
+    let display: String
+
+    /// Displays the hop readably: `OpenCode → Codex`.
+    var label: String { "\(fromLabel) → \(toLabel)" }
+
+    fileprivate static func from(_ detail: String?) -> Hop {
+        guard let detail, let arrow = detail.range(of: " → ") else {
+            let fallback = detail ?? "Unknown profile"
+            return Hop(fromId: fallback, toId: fallback, fromLabel: fallback, toLabel: fallback, display: fallback)
+        }
+        let from = String(detail[..<arrow.lowerBound])
+        let to = String(detail[arrow.upperBound...])
+        let fromLabel = Provider(rawValue: from)?.label ?? from
+        let toLabel = Provider(rawValue: to)?.label ?? to
+        return Hop(fromId: from, toId: to, fromLabel: fromLabel, toLabel: toLabel,
+                   display: "\(fromLabel) → \(toLabel)")
+    }
+
+    /// Chains consecutive hops: `OpenCode → Codex → Antigravity → Pi`.
+    fileprivate static func chain(_ hops: [Hop]) -> String {
+        guard let first = hops.first else { return "" }
+        let tos = hops.map(\.toLabel)
+        return "\(first.fromLabel) → \(tos.joined(separator: " → "))"
+    }
+}
+
+/// One run — the original or a handoff leg — and the handoff that closed it.
+struct HandoffRun {
+    let endedBy: Hop?
+    let blocks: [ActivityBlock]
+}
+
+/// Everything the handoff row needs to render itself collapsed and expanded.
+struct HandoffBoundary {
+    let chain: String
+    let earlierRuns: [HandoffRun]
+    /// Raw events hidden, not blocks — the row promises the user a count of
+    /// what happened, and blocks are already-collapsed chapters.
+    let hiddenEventCount: Int
 }
 
 /// What a chapter is made of: the work, and the thinking that happened between
