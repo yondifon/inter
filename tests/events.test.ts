@@ -985,4 +985,100 @@ describe("task event views", () => {
     expect(view.detail).toContain("invalid x-api-key");
     expect(view.presentation?.tokensIn).toBe(100);
   });
+
+  test("renders a flat pi message_end's usage row", () => {
+    // Verbatim from a real run's event inspector: the openai-completions
+    // adapter hoists role, usage and stopReason to the top level. `input`
+    // excludes the cache read (1938 + 15104 + 113 = totalTokens 17155).
+    const view = taskEventView({
+      id: 3, taskId: "task", type: "agent.event", state: "running",
+      payload: {
+        type: "message_end",
+        role: "assistant",
+        stopReason: "toolUse",
+        model: "deepseek-v4-flash",
+        usage: {
+          cacheRead: 15104,
+          cacheWrite: 0,
+          input: 1938,
+          output: 113,
+          reasoning: 30,
+          totalTokens: 17155,
+        },
+      },
+      createdAt: "now",
+    }, "pi");
+    expect(view.kind).toBe("usage");
+    expect(view.title).toBe("Turn summary");
+    expect(view.presentation).toMatchObject({
+      type: "usage",
+      tokensIn: 1938,
+      tokensOut: 113,
+      tokensCached: 15104,
+      tokensThinking: 30,
+    });
+  });
+
+  test("recognizes a flat pi user echo as a prompt, not an agent message", () => {
+    const view = taskEventView({
+      id: 4, taskId: "task", type: "agent.event", state: "running",
+      payload: { type: "message_end", role: "user", content: [{ type: "text", text: "Reply with exactly: ok" }] },
+      createdAt: "now",
+    }, "pi");
+    expect(view.title).toBe("Prompt received");
+  });
+});
+
+  test("presents the flat message_end shape pi actually emits", () => {
+    // Verbatim from a real run, read out of the app's event inspector: the
+    // openai-completions adapter hoists `role` and `usage` to the top level,
+    // unlike the nested `message` shape the documented wire contract uses.
+    const view = taskEventView({
+      id: 2, taskId: "task", type: "agent.event", state: "running",
+      payload: {
+        api: "openai-completions",
+        model: "deepseek-v4-flash",
+        provider: "opencode-go",
+        rawStopReason: "tool_calls",
+        responseId: "073984d3-a055-4e04-90fe-73944037863f",
+        role: "assistant",
+        stopReason: "toolUse",
+        type: "message_end",
+        usage: {
+          cacheRead: 15104,
+          cacheWrite: 0,
+          input: 1938,
+          output: 113,
+          reasoning: 30,
+          totalTokens: 17155,
+        },
+      },
+      createdAt: "now",
+    }, "pi");
+    expect(view.kind).toBe("usage");
+    expect(view.title).toBe("Turn summary");
+    // totalTokens 17155 = input 1938 + cacheRead 15104 + output 113, exactly,
+    // so pi's `input` already excludes the cache read (unlike codex).
+    expect(view.presentation).toMatchObject({
+      type: "usage",
+      tokensIn: 1938,
+      tokensOut: 113,
+      tokensCached: 15104,
+      tokensThinking: 30,
+    });
+  });
+
+  test("renders a flat pi user echo as a prompt, not an agent message", () => {
+    const view = taskEventView({
+      id: 1, taskId: "task", type: "agent.event", state: "running",
+      payload: {
+        type: "message_end",
+        role: "user",
+        content: [{ type: "text", text: "Reply with exactly: ok" }],
+      },
+      createdAt: "now",
+    }, "pi");
+    expect(view.kind).toBe("lifecycle");
+    expect(view.title).toBe("Prompt received");
+  });
 });

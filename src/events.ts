@@ -467,9 +467,12 @@ function piEvent(
 
   // pi echoes the prompt back as a user message and opens every assistant reply
   // with an empty one. Neither is the agent talking, and without a branch here
-  // both render as "Agent message".
+  // both render as "Agent message". The openai-completions adapter hoists the
+  // message fields (`role`, `usage`) to the top level while the documented wire
+  // contract nests them under `message`; real traces show the flat shape, so it
+  // is read first and the nested one kept as the fallback.
   if (type === "message_start" || type === "message_end") {
-    const role = string(object(payload.message).role);
+    const role = string(payload.role) ?? string(object(payload.message).role);
     if (role === "user") {
       return { ...base, kind: "lifecycle", phase: "info", title: "Prompt received",
         minor: true, ...raw };
@@ -481,24 +484,35 @@ function piEvent(
   }
 
   if (type === "message_end") {
+    // The openai-completions adapter hoists the message fields (`role`, usage,
+    // `stopReason`) to the top level; the documented wire contract nests them
+    // under `message`. Real traces show the flat shape, so it is read first and
+    // the nested one kept as the fallback.
     const message = object(payload.message);
-    if (message.role !== "assistant") return undefined;
-    const usage = object(message.usage);
-    const error = string(message.errorMessage);
+    const role = string(payload.role) ?? string(message.role);
+    if (role !== "assistant") return undefined;
+    const usage = Object.keys(object(payload.usage)).length ? object(payload.usage) : object(message.usage);
+    const error = string(payload.errorMessage) ?? string(message.errorMessage);
     // json mode exits 0 whatever happened, so the stop reason is the only place
     // a refusal or an abort is reported.
     const failed = error !== undefined ||
-      ["error", "aborted"].includes(string(message.stopReason) ?? "");
+      ["error", "aborted"].includes(string(payload.stopReason) ?? string(message.stopReason) ?? "");
+    // pi's `input` already excludes the cache read: a real run reports
+    // input 1938 + cacheRead 15104 + output 113 = totalTokens 17155, exactly.
+    // Nothing to subtract here, unlike codex whose input_tokens includes the
+    // cached part. `reasoning` sits inside `input` (30 of the 1938).
+    const cached = Number(usage.cacheRead ?? 0) + Number(usage.cacheWrite ?? 0);
     const presentation: TaskEventPresentation = {
       type: "usage",
       ...(typeof usage.input === "number" ? { tokensIn: usage.input } : {}),
       ...(typeof usage.output === "number" ? { tokensOut: usage.output } : {}),
-      ...(usage.cacheRead ? { tokensCached: Number(usage.cacheRead) } : {}),
+      ...(cached ? { tokensCached: cached } : {}),
+      ...(typeof usage.reasoning === "number" ? { tokensThinking: usage.reasoning } : {}),
       ...(error ? { level: "error" as const, text: error } : {}),
     };
     return { ...base, kind: failed ? "error" : "usage", phase: failed ? "failed" : "completed",
       title: failed ? "Turn failed" : "Turn summary",
-      detail: joinDetail(string(message.model), error), presentation, ...raw };
+      detail: joinDetail(string(payload.model) ?? string(message.model), error), presentation, ...raw };
   }
 
   if (type === "agent_settled") {

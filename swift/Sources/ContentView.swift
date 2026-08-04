@@ -36,7 +36,9 @@ struct ContentView: View {
                         }
                     }
                 } header: {
-                    SectionLabel(text: "Workers")
+                    SidebarSectionLabel(text: "Workers")
+                        .padding(.top, 2)
+                        .padding(.bottom, 2)
                 }
                 Section {
                     if visibleTasks.isEmpty {
@@ -50,7 +52,7 @@ struct ContentView: View {
                                     count: group.tasks.count,
                                     collapsed: collapsedGroups.contains(group.id)
                                 ) { toggleCollapse(group.id) }
-                                    .padding(.top, 4)
+                                    .padding(.top, 8)
                                     .help(group.id)
                             }
                             ForEach(TaskOrganizer.visibleTasks(in: group, collapsed: collapsedGroups)) { task in
@@ -80,10 +82,12 @@ struct ContentView: View {
                     }
                 } header: {
                     HStack(spacing: 6) {
-                        SectionLabel(text: activeProjectName ?? (showArchivedTasks ? "Archived tasks" : "Recent tasks"))
+                        SidebarSectionLabel(text: activeProjectName ?? (showArchivedTasks ? "Archived tasks" : "Recent tasks"))
                         Spacer(minLength: 0)
                         if !store.tasks.isEmpty { projectMenu }
                     }
+                    .padding(.top, 10)
+                    .padding(.bottom, 2)
                 }
                 Section {
                     if store.memoryProjects.isEmpty {
@@ -95,7 +99,9 @@ struct ContentView: View {
                         }
                     }
                 } header: {
-                    SectionLabel(text: "Projects")
+                    SidebarSectionLabel(text: "Projects")
+                        .padding(.top, 10)
+                        .padding(.bottom, 2)
                 }
             }
             .listStyle(.sidebar)
@@ -109,7 +115,7 @@ struct ContentView: View {
             .navigationSplitViewColumnWidth(min: 240, ideal: 260)
             // Graphite-style selection. The system accent turns a scanned list into
             // a blue slab; a neutral fill keeps the type as the loudest thing.
-            .tint(Color(nsColor: .systemGray))
+            .tint(Color(nsColor: .quaternaryLabelColor))
             .toolbar {
                 ToolbarItem {
                     Button("Install MCP", systemImage: "link.badge.plus") {
@@ -285,16 +291,19 @@ struct ContentView: View {
     /// part of the current selection. No word next to it: the light is either on or
     /// it is not, and hover or VoiceOver says which.
     private var brokerIndicator: some View {
-        HStack(spacing: 0) {
-            PulsingDot(color: statusColor, diameter: 7 * uiScale, beats: broker.status != .stopped)
-                .frame(width: 24 * uiScale, height: 24 * uiScale)
-                .contentShape(.rect)
-                .help(statusText)
-                .accessibilityLabel(statusText)
-            Spacer(minLength: 0)
+        VStack(spacing: 0) {
+            Divider().opacity(0.5)
+            HStack(spacing: 0) {
+                PulsingDot(color: statusColor, diameter: 7 * uiScale, beats: broker.status != .stopped)
+                    .frame(width: 24 * uiScale, height: 24 * uiScale)
+                    .contentShape(.rect)
+                    .help(statusText)
+                    .accessibilityLabel(statusText)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
         }
-        .padding(.horizontal, 6)
-        .padding(.bottom, 2)
     }
 
     private var statusText: String {
@@ -421,12 +430,12 @@ private struct TaskGroupHeader: View {
 
     var body: some View {
         Button(action: toggle) {
-            HStack(spacing: 5) {
+            HStack(spacing: 6) {
                 Image(systemName: "chevron.down")
                     .scaledFont(.caption2, weight: .semibold)
                     .foregroundStyle(.tertiary)
                     .rotationEffect(.degrees(collapsed ? -90 : 0))
-                SectionLabel(text: title)
+                SidebarSectionLabel(text: title)
                 Spacer(minLength: 0)
                 Text("\(count)")
                     .scaledFont(.caption2, design: .monospaced)
@@ -446,21 +455,21 @@ private struct WorkerRow: View {
     @Environment(\.uiScale) private var uiScale
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 9) {
             ProviderLogo(provider: profile.provider, size: 15 * uiScale)
                 .accessibilityHidden(true)
                 .frame(width: 18 * uiScale, alignment: .center)
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(profile.label).scaledFont(.body).lineLimit(1)
                 Text(profile.resolvedModel).scaledFont(.caption, design: .monospaced)
-                    .foregroundStyle(.secondary).lineLimit(1)
+                    .foregroundStyle(.tertiary).lineLimit(1)
             }
             Spacer(minLength: 0)
             if !profile.enabled {
                 Text("Off").scaledFont(.caption2).foregroundStyle(.tertiary)
             }
         }
-        .padding(.vertical, 3)
+        .padding(.vertical, 5)
         .opacity(profile.enabled ? 1 : 0.5)
     }
 }
@@ -470,20 +479,20 @@ private struct ProjectRow: View {
     @Environment(\.uiScale) private var uiScale
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 9) {
             Image(systemName: "folder")
                 .scaledFont(.callout)
                 .foregroundStyle(.secondary)
                 .accessibilityHidden(true)
                 .frame(width: 18 * uiScale, alignment: .center)
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(project.name).scaledFont(.body).lineLimit(1)
                 Text("\(project.count) memor\(project.count == 1 ? "y" : "ies")")
                     .scaledFont(.caption, design: .monospaced)
-                    .foregroundStyle(.secondary).lineLimit(1)
+                    .foregroundStyle(.tertiary).lineLimit(1)
             }
         }
-        .padding(.vertical, 3)
+        .padding(.vertical, 5)
         .help(project.cwd)
     }
 }
@@ -494,17 +503,17 @@ private struct TaskRow: View {
     @Environment(\.uiScale) private var uiScale
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 9) {
             StateMarker(state: state)
                 .frame(width: 18 * uiScale, alignment: .center)
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(title).scaledFont(.body).lineLimit(1)
                 Text(meta)
                     .scaledFont(.caption, design: .monospaced)
-                    .foregroundStyle(.secondary).lineLimit(1)
+                    .foregroundStyle(.tertiary).lineLimit(1)
             }
         }
-        .padding(.vertical, 3)
+        .padding(.vertical, 5)
         .help(task.hoverText)
         .accessibilityLabel("\(title). \(state.label). \(worker), \(task.model).")
     }

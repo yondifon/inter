@@ -21,8 +21,8 @@ enum Surface {
     static let panel = Color(nsColor: panelColor)
     static let sunken = Color.primary.opacity(0.05)
 
-    static let sidebarColor = neutral(light: 0.925, dark: 0.105)
-    static let contentColor = neutral(light: 0.965, dark: 0.140)
+    static let sidebarColor = neutral(light: 0.957, dark: 0.118)
+    static let contentColor = neutral(light: 0.980, dark: 0.150)
     static let panelColor = neutral(light: 1.000, dark: 0.180)
 
     private static func neutral(light: CGFloat, dark: CGFloat) -> NSColor {
@@ -133,6 +133,19 @@ struct SectionLabel: View {
             .scaledFont(.caption2, weight: .semibold, design: .monospaced)
             .tracking(0.6)
             .foregroundStyle(.tertiary)
+    }
+}
+
+/// Sidebar group heading. The sidebar is a place you scan, not read, so its
+/// headings drop the machine-facing mono voice `SectionLabel` uses and sit
+/// quietly in the system face.
+struct SidebarSectionLabel: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .scaledFont(.caption, weight: .medium)
+            .foregroundStyle(.secondary)
     }
 }
 

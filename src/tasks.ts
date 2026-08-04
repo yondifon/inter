@@ -96,6 +96,49 @@ export function runCostFrom(payload: Record<string, unknown>): { costUsd?: numbe
   };
 }
 
+/**
+ * Adds one provider event's reported spend to a run's running total. claude et
+ * al. state the whole run's spend once on their final receipt, which replaces
+ * the total; pi states it per assistant message instead — every `message_end`
+ * carries that message's share at `usage.cost.total` and nothing on the wire
+ * reports the run total — so the shares accumulate, and no single message's
+ * value may stand in for the run's.
+ */
+export function accumulateRunCost(
+  current: { costUsd?: number; turns?: number },
+  payload: Record<string, unknown>,
+): { costUsd?: number; turns?: number } {
+  const reported = runCostFrom(payload);
+  if (reported.costUsd !== undefined || reported.turns !== undefined) return reported;
+  const share = piMessageCostFrom(payload);
+  return share === undefined ? current : { ...current, costUsd: (current.costUsd ?? 0) + share };
+}
+
+/// pi's per-message spend: each assistant `message_end` carries that message's
+/// usage, and `cost.total` under it is the message's cost. The
+/// openai-completions adapter hoists `usage` to the top level; the documented
+/// wire contract nests it under `message`, kept as the fallback.
+function piMessageCostFrom(payload: Record<string, unknown>): number | undefined {
+  if (payload.type !== "message_end") return undefined;
+  const usage = piUsageFrom(payload);
+  const cost = usage.cost && typeof usage.cost === "object" && !Array.isArray(usage.cost)
+    ? usage.cost as Record<string, unknown>
+    : {};
+  return numberOr(cost.total);
+}
+
+function piUsageFrom(payload: Record<string, unknown>): Record<string, unknown> {
+  const flat = payload.usage;
+  if (flat && typeof flat === "object" && !Array.isArray(flat)) return flat as Record<string, unknown>;
+  const message = payload.message;
+  const nested = message && typeof message === "object" && !Array.isArray(message)
+    ? (message as Record<string, unknown>).usage
+    : undefined;
+  return nested && typeof nested === "object" && !Array.isArray(nested)
+    ? nested as Record<string, unknown>
+    : {};
+}
+
 function numberOr(...values: unknown[]): number | undefined {
   for (const value of values) if (typeof value === "number" && Number.isFinite(value)) return value;
   return undefined;
@@ -576,10 +619,10 @@ async function runTask(
             lastPiFlushAt = Date.now();
           }
           appendTaskEvent(task.id, `agent.${kind}`, task.state, compactPayload(payload));
-          // The run reports its own spend once, near the end; a retry inside
-          // this same run replaces it rather than adding to it.
-          const reported = runCostFrom(payload);
-          if (reported.costUsd !== undefined || reported.turns !== undefined) runCost = reported;
+          // A run's spend arrives either once, near the end, as a receipt that
+          // replaces the total (claude's `total_cost_usd` on `result`), or — on
+          // pi — as one `usage.cost.total` per `message_end`, which adds to it.
+          runCost = accumulateRunCost(runCost, payload);
           eventCount++;
           attemptEvents++;
           // The sandbox refuses out-of-scope writes inside the worker, where
