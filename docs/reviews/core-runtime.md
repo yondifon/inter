@@ -40,7 +40,7 @@ finish({ reason: attention ? "attention" : "progress", tasks, cursor });
 
 ### 2. `store.ts` is six repositories plus a schema engine in one file — High
 **Where:** `src/store.ts:860-1185` (schema), `src/store.ts:1235-1390` (row mappers)
-**Problem:** `StateStore` owns profiles, scope grants, memories, tasks, task events, and profile failures — that part is defensible; they share one connection and one `transaction` helper. What does not belong is the 326-line schema engine wedged into the middle: `configure` (860), `migrate` (867-1051), `backfillTaskSessionIds` (1053-1080), `widenProviderCheck` (1083-1122), `migrateTaskContract` (1124-1185). `migrate` alone is 185 lines of DDL, `PRAGMA table_info` probing, a column drop, and eight near-identical `INSERT OR IGNORE INTO schema_migrations` calls (1013-1039). Two of those methods duplicate the same `PRAGMA foreign_keys = OFF` / `BEGIN IMMEDIATE` / try / `COMMIT` / `ROLLBACK` / `finally` table-rebuild dance (1088-1121 and 1125-1184) without using the class's own `transaction` helper.
+**Problem:** `StateStore` owns profiles, scope grants, memories, tasks, task events, and profile failures — that part is defensible; they share one connection and one `transaction` helper. What does not belong is the 326-line schema engine wedged into the middle: `configure` (860), `migrate` (867-1051), `backfillTaskSessionIds` (1053-1078), `widenProviderCheck` (1083-1122), `migrateTaskContract` (1124-1185). `migrate` alone is 185 lines of DDL, `PRAGMA table_info` probing, a column drop, and eight near-identical `INSERT OR IGNORE INTO schema_migrations` calls (1012-1039). Two of those methods duplicate the same `PRAGMA foreign_keys = OFF` / `BEGIN IMMEDIATE` / try / `COMMIT` / `ROLLBACK` / `finally` table-rebuild dance (1088-1121 and 1125-1184) without using the class's own `transaction` helper.
 **Why it matters:** Schema changes and query changes are independent reasons to change. Today a one-line query edit means opening the same file as a 60-line table rebuild that can lose data if mishandled, and anyone reading `store.ts` to answer "what does `listTaskSummaries` return" scrolls past 320 lines that cannot answer it.
 **Fix:** Move the schema work to `src/store/schema.ts` as free functions over a `Database`:
 
@@ -62,7 +62,7 @@ Then move the row mappers (`profileFromRow`, `taskFromRow`, `scopeGrantFromRow`,
 **Effort:** M
 
 ### 3. The lifecycle state sets are written out four times, and the TS and Swift definitions already disagree — High
-**Where:** `src/task-waiter.ts:125-128`, `src/public-task.ts:162-165`, `src/tasks.ts:991-995`, `swift/Sources/DesignSystem.swift:220-222`
+**Where:** `src/task-waiter.ts:125-128`, `src/public-task.ts:174-177`, `src/tasks.ts:1016-1019`, `swift/Sources/DesignSystem.swift:209-211`
 **Problem:** The same five-state set — `needs_input`, `blocked`, `completed`, `failed`, `cancelled` — is spelled out three times in TypeScript under three different names:
 
 ```ts
@@ -73,14 +73,14 @@ function needsAttention(task: Task): boolean {
 }
 ```
 ```ts
-// public-task.ts:162
+// public-task.ts:174
 function settled(state: TaskState): boolean {
   return state === "completed" || state === "failed" || state === "cancelled" ||
     state === "blocked" || state === "needs_input";
 }
 ```
 ```ts
-// tasks.ts:991 — inline, inside update()
+// tasks.ts:1016 — inline, inside update()
 if (
   task.state === "needs_input" || task.state === "blocked" ||
   task.state === "completed" || task.state === "failed" || task.state === "cancelled"
@@ -92,7 +92,7 @@ if (
 The Swift equivalent is a different set:
 
 ```swift
-// DesignSystem.swift:220
+// DesignSystem.swift:209
 var isTerminal: Bool {
     [.needsInput, .answered, .blocked, .completed, .failed, .cancelled].contains(self)
 }
@@ -100,7 +100,7 @@ var isTerminal: Bool {
 
 Swift counts `answered` as terminal; TypeScript does not. That difference is currently inert only because no code path ever writes the `answered` state (see finding 16) — it is a latent disagreement, not a live bug.
 
-The resumable set is further along the same road. `failed, cancelled, blocked` is now written out six times: as a TypeScript array at `store.ts:528`, `store.ts:590`, `tasks.ts:822`, and `tasks.ts:877`, and as SQL at `store.ts:540` and `store.ts:603`. Three of those six arrived with `handoffTask`, which copied `resumeTask`'s guard rather than sharing it — the duplication is not historical, it is actively reproducing.
+The resumable set is further along the same road. `failed, cancelled, blocked` is now written out five times: as a TypeScript array at `store.ts:528`, `store.ts:590`, and the shared `RESUMABLE_STATES` const at `tasks.ts:784`, and as SQL at `store.ts:540` and `store.ts:603`. Three of those six arrived with `handoffTask`, which copied `resumeTask`'s guard rather than sharing it — the duplication is not historical, it is actively reproducing.
 **Why it matters:** Three copies of one predicate is three places to edit and two places to forget. The rule "a task in one of these states wakes every waiter" is load-bearing for `wait`, and it is currently discoverable only by reading three unrelated files.
 **Fix:** Put the sets next to the type they constrain, in `types.ts`:
 
@@ -112,12 +112,12 @@ export function isSettled(state: TaskState): boolean {
 }
 ```
 
-`needsAttention(task)` becomes `isSettled(task.state)`, `settled` in `public-task.ts` is deleted for `isSettled`, `tasks.ts:991` becomes `if (isSettled(task.state))`, and the four resumable arrays (`store.ts:528`, `store.ts:590`, `tasks.ts:822`, `tasks.ts:877`) all read `RESUMABLE_STATES`. Leave the three SQL literals (`store.ts:425`, `540`, `603`) as SQL — do not generate `IN` clauses from the constants. The string is clearer, and the `CHECK(state IN (…))` constraints at `store.ts:897` and `1135` already pin the same vocabulary at the schema level, so a mismatch surfaces as a constraint failure rather than silently.
+`needsAttention(task)` becomes `isSettled(task.state)`, `settled` in `public-task.ts` is deleted for `isSettled`, `tasks.ts:1016` becomes `if (isSettled(task.state))`, and the four resumable arrays (`store.ts:528`, `store.ts:590`, `tasks.ts:784`, `tasks.ts:784`) all read `RESUMABLE_STATES`. Leave the three SQL literals (`store.ts:425`, `540`, `603`) as SQL — do not generate `IN` clauses from the constants. The string is clearer, and the `CHECK(state IN (…))` constraints at `store.ts:898` and `1136` already pin the same vocabulary at the schema level, so a mismatch surfaces as a constraint failure rather than silently.
 **Risk:** none in TypeScript — same predicate, same states, verified against `tests/task-waiter.test.ts` and `tests/public-task.test.ts`. Leave the Swift enum alone in this pass; just make the TS side single-sourced so the drift becomes a one-line comparison.
 **Effort:** S
 
 ### 4. `TaskField` resolves to `string`, so the `fields` contract type-checks nothing — High
-**Where:** `src/public-task.ts:15-16`, `src/public-task.ts:45-49`, `src/cli.ts:68`
+**Where:** `src/public-task.ts:15-16`, `src/public-task.ts:48-50`, `src/cli.ts:66-69` — LIKELY FIXED: verify before working this finding
 **Problem:**
 
 ```ts
@@ -154,8 +154,8 @@ That one clause is what stops `routing: ["profileId", "model", "efort"]` from co
 **Effort:** S
 
 ### 5. `handoff` was built by copying `reply` and `resume` instead of sharing with them — High
-**Where:** `src/tasks.ts:779-796`, `815-841`, `870-899`; `src/store.ts:513-566` vs `570-628`
-**Problem:** The three continuation entry points now repeat the same four validation steps, and the newest one repeated them again rather than extracting them. `reply` (785-796) and `resumeTask` (821-832) contain a character-for-character identical block:
+**Where:** `src/tasks.ts:827-855`, `857-888`, `900-957`; `src/store.ts:513-563` vs `570-628` — LIKELY FIXED: verify before working this finding
+**Problem:** The three continuation entry points now repeat the same four validation steps, and the newest one repeated them again rather than extracting them. `reply` (832-838) and `resumeTask` (862-868) contain a character-for-character identical block:
 
 ```ts
 const config = await loadConfig();
@@ -165,9 +165,9 @@ if (!profile || !canResumeSession(profile)) {
 }
 ```
 
-followed by a `!old.sessionId` throw that differs only in the verb — `"…to reply to: ${id}"` (796) versus `"…to resume: ${id}"` (835). The `getTask` + `unknownTaskMessage` pair appears four times (785, 821, 876, 947). The resumable-state guard appears at 822 and 877. The replacement-scope line is identical at 841 and 899 apart from which profile id it names.
+followed by a `!old.sessionId` throw that differs only in the verb — `"…to reply to: ${id}"` versus `"…to resume: ${id}"` (now a single `requireSessionProfile`, `tasks.ts:812-825`, taking the verb as its parameter). The `getTask` + `unknownTaskMessage` pair appears four times (832, 862, 905, 971). The resumable-state guard appears at 799. The replacement-scope line is identical at 851 and 923 apart from which profile id it names.
 
-In the store the same story repeats one layer down: `resumeTask` (513-566) and `handoffTask` (570-628) are the same shape end to end — `current`-state probe, `closeAttempt`, an `UPDATE` whose first two lines (`SET state = 'queued', output = '', error = NULL, question = NULL, completion_json = NULL, attempts_json = ?`) are identical, the same `AND state IN ('failed', 'cancelled', 'blocked')`, the same `changes !== 1` throw, an `addTaskEvent`, and the same dead flag-and-rethrow epilogue from finding 8.
+In the store the same story repeats one layer down: `resumeTask` (513-563) and `handoffTask` (570-628) are the same shape end to end — `current`-state probe, `closeAttempt`, an `UPDATE` whose first two lines (`SET state = 'queued', output = '', error = NULL, question = NULL, completion_json = NULL, attempts_json = ?`) are identical, the same `AND state IN ('failed', 'cancelled', 'blocked')`, the same `changes !== 1` throw, an `addTaskEvent`, and the same dead flag-and-rethrow epilogue from finding 8.
 **Why it matters:** This is the clearest measurable signal in the review: the most recent feature in the repo grew the duplication rather than paying it down. The next continuation verb will copy `handoffTask`, and by then the "load a task and check it can continue" rule will live in four places with four slightly different error strings.
 **Fix:** Extract the two genuinely shared preludes in `tasks.ts` — nothing in the store.
 
@@ -192,7 +192,7 @@ async function requireSessionProfile(task: Task, verb: "reply to" | "resume"): P
 `resumeTask`'s longer message ("the worker exited before the provider created a session; delegate a fresh task instead") is worth keeping, so pass the whole suffix rather than a verb if that reads better — but pass *something*, do not fork the function. `handoffTask` uses `requireTask` and the finding-3 `RESUMABLE_STATES` guard, and keeps its own profile lookup, which is legitimately different: it resolves the *destination* profile and checks `enabled`, not `canResumeSession`.
 
 Deliberately **not** recommended: merging `store.resumeTask` and `store.handoffTask` into one parameterised writer. Their `SET` clauses diverge on five columns (`profile_id`, `model`, `effort`, `session_id`, `timeout_ms`, `allow_questions`), and two readable `UPDATE` statements beat one statement assembled from fragments. Fix findings 3 and 8 and what remains of the overlap is honest difference.
-**Risk:** none — pure extraction of identical code. The error strings must come out byte-identical; `tests/task-lifecycle.integration.test.ts:147-157` matches on `/custom command; provider sessions are never captured/`.
+**Risk:** none — pure extraction of identical code. The error strings must come out byte-identical; `tests/task-lifecycle.integration.test.ts:163` matches on `/custom command; provider sessions are never captured/`.
 **Effort:** M
 
 ### 6. The stdout line handler's `catch {}` swallows database failures, not just unparseable lines — High
@@ -242,7 +242,7 @@ Keep `prompt` — `promptPreview` needs it, and `substr(prompt, 1, N)` is not pr
 **Effort:** S
 
 ### 8. Three store methods carry an unreachable failure path — Medium
-**Where:** `src/store.ts:439-468` (`answerTask`), `523-561` (`resumeTask`), `575-626` (`handoffTask`)
+**Where:** `src/store.ts:434-470` (`answerTask`), `513-563` (`resumeTask`), `570-628` (`handoffTask`)
 **Problem:** All three follow this shape:
 
 ```ts
@@ -345,7 +345,7 @@ Rewrite the 25 sites through it — a small `counts(pairs)` builder that skips `
 **Effort:** M
 
 ### 11. `runTask`'s failure path re-reads the task row five times and the event log three times — Medium
-**Where:** `src/tasks.ts:549, 559, 566, 576, 618` and `src/tasks.ts:676, 693, 736`
+**Where:** `src/tasks.ts:549, 559, 566, 576, 618` and `src/tasks.ts:674, 690, 929`
 **Problem:** Two patterns, one cause. Five sites answer a single boolean with a full row read:
 
 ```ts
@@ -354,21 +354,21 @@ stateStore().getTask(task.id)?.state !== "cancelled"
 
 `getTask` selects every column and `JSON.parse`s the scope, the completion, and up to ten attempt bodies (`store.ts:630-635`, `1285-1318`) — to compare one string. This is the same waste finding 1 identifies in the poll loop, on a different path.
 
-Then on the failure path, `withScopeSuggestion` (676) and `lastWorkerErrorDetail` (693) run back to back and each calls `listTaskEvents(task.id)` — default limit 5,001 — so the whole event history is read and parsed twice. `handoffTask` makes a third such read at 903. And `withScopeSuggestion` does this:
+Then on the failure path, `withScopeSuggestion` (674) and `lastWorkerErrorDetail` (690) run back to back and each calls `listTaskEvents(task.id)` — default limit 5,001 — so the whole event history is read and parsed twice. `handoffTask` makes a third such read at 929. And `withScopeSuggestion` does this:
 
 ```ts
 const payloads = stateStore().listTaskEvents(task.id)
   .map((event) => JSON.stringify(event.payload));
 ```
 
-`listTaskEvents` already `JSON.parse`d each payload (720); this stringifies them straight back so `deniedScopePaths` can take `string[]`. A parse-then-stringify round trip over the full history, per failed task.
+`listTaskEvents` already `JSON.parse`d each payload (712-720); this stringifies them straight back so `deniedScopePaths` can take `string[]`. A parse-then-stringify round trip over the full history, per failed task.
 **Why it matters:** It reads as if nobody has a cost model for one line, which invites more of the same — and a long reply/resume/handoff chain is exactly where the event count gets large.
 **Fix:** The state probe from finding 1 (`taskStates`, or a single-id `taskState`) serves all five call sites; swap them. For the event log, hoist one `listTaskEvents` call in `runTask` and pass the array to both helpers, and change `deniedScopePaths` (`prompt-paths.ts`) to accept `Record<string, unknown>[]` so the round trip disappears.
 **Risk:** behavior-adjacent. The state-probe swap is a pure narrowing of an existing read. Sharing one event array between the two helpers is safe only because neither mutates it and both run in the same synchronous stretch — confirm that before applying, and note `scopeInheritanceWarning` (216) now does `[...listTaskEvents(id)].reverse()`, so it copies before reversing and must keep doing so if it ever shares the array.
 **Effort:** M
 
 ### 12. `store.ts` duplicates the task-event mapper and three row-type literals — Medium
-**Where:** `src/store.ts:712-720` against `1382-1389`; type literals at `698-705`, `732-739`, `1375-1381`; memory literals at `276`, `285`, `1236`
+**Where:** `src/store.ts:712-720` against `1374-1390`; type literals at `698-705`, `731-738`, `1374-1381`; memory literals at `275-277`, `284-286`, `1235-1237`
 **Problem:** `listTaskEvents` maps its rows inline:
 
 ```ts
@@ -378,20 +378,20 @@ return rows.map((row) => ({
 }));
 ```
 
-`taskEventFromRow` (1382-1389) has a byte-identical body, and `listTaskEventsForTasks` already uses it (via `.map(taskEventFromRow)`). The row type is written out three times as an inline structural literal — 698-705, 732-739, and as `taskEventFromRow`'s parameter at 1375-1381:
+`taskEventFromRow` (1374-1390) has a byte-identical body, and `listTaskEventsForTasks` already uses it (via `.map(taskEventFromRow)`). The row type is written out three times as an inline structural literal — 698-705, 731-738, and as `taskEventFromRow`'s parameter at 1374-1381:
 
 ```ts
 { id: number; task_id: string; event_type: string; state: TaskState; payload: string; created_at: string }
 ```
 
-The memory row type is written out three times the same way (276, 285, 1236), while `TaskRow` (31) and `ScopeGrantRow` (1320) are properly declared once each — so the file already knows the right pattern and applies it inconsistently.
+The memory row type is written out three times the same way (275-277, 284-286, 1235-1237), while `TaskRow` (31) and `ScopeGrantRow` (1320) are properly declared once each — so the file already knows the right pattern and applies it inconsistently.
 **Why it matters:** Six edit sites when a column is added, and no compiler help if one is missed: structural literals are independent, so they drift silently rather than failing to compile.
 **Fix:** Declare `interface TaskEventRow` and `interface MemoryRow` next to `TaskRow` and `ScopeGrantRow`, use them at all six query sites, and replace `listTaskEvents`'s inline map with `.map(taskEventFromRow)`.
 **Risk:** none.
 **Effort:** S
 
 ### 13. `WaitTaskView` re-declares `TaskSummary`, and the 240-char preview rule exists twice — Medium
-**Where:** `src/public-task.ts:103-126`, `src/public-task.ts:167-169`, `src/store.ts:1353`
+**Where:** `src/public-task.ts:115-138`, `src/public-task.ts:179-181`, `src/store.ts:1353`
 **Problem:** `WaitTaskView` spells out 20 fields across 24 lines. Field for field, it is exactly:
 
 ```ts
@@ -402,7 +402,7 @@ export type WaitTaskView = Omit<TaskSummary, "sessionId">
 Separately, the caller-visible truncation rule is written twice with no shared owner:
 
 ```ts
-// public-task.ts:168
+// public-task.ts:180
 return prompt.replace(/\s+/g, " ").trim().slice(0, 240);
 ```
 ```ts
@@ -433,18 +433,18 @@ listScopeGrants(): ScopeGrant[] {
 **Effort:** S
 
 ### 15. The lifecycle integration tests are the only coverage for reply, resume, handoff and cancel, and nothing in the repo runs them — Medium
-**Where:** `tests/task-lifecycle.integration.test.ts:9`, `tests/task-scope.test.ts:212`
+**Where:** `tests/task-lifecycle.integration.test.ts:17`, `tests/task-scope.test.ts:212`
 **Problem:** `const integrationTest = process.env.INTER_SANDBOX_INTEGRATION === "1" ? test : test.skip;`
 
 The gate itself is justified — every spawn goes through `sandboxedCommand`, which does not work nested inside another sandbox. But nothing sets the variable: not `package.json`, not the `Makefile`, not the README. The only other mention anywhere in the repo is `examples/incident-room/AGENT-NOTES.md`. So `bun test` reports `312 pass, 17 skip`, and those 17 — 12 lifecycle plus 5 scope — are the only coverage that exists for cancel, timeout, reply, resume, `resume_session_mismatch`, `resume_failed`, the Antigravity bootstrap retry, and the `PWD` guarantee. In the default suite, `runTask`'s only exercised path is the `command: ["true"]` noop in `tests/tasks.test.ts`.
 **Why it matters:** The most intricate ~270 lines in the codebase have coverage nobody is going to remember to invoke, and `handoff` has just been added on top of them. A named script is the difference between "gated" and "abandoned".
-**Fix:** Add `"test:integration": "INTER_SANDBOX_INTEGRATION=1 bun test"` to `package.json` scripts, and one line in the README saying when to run it and why it is gated. Separately, some of what is currently gated needs no sandbox at all: the precondition errors in `reply` (785-796), `resumeTask` (821-837), and `handoffTask` (875-888) — unknown task, wrong state, same-profile handoff, disabled profile, missing session — are pure guard logic reachable through a `command` profile, and belong in the default suite. `handoffTask`'s "already on that profile" error (880-883) has no test at all.
+**Fix:** Add `"test:integration": "INTER_SANDBOX_INTEGRATION=1 bun test"` to `package.json` scripts, and one line in the README saying when to run it and why it is gated. Separately, some of what is currently gated needs no sandbox at all: the precondition errors in `reply` (832-838), `resumeTask` (862-868), and `handoffTask` (905-914) — unknown task, wrong state, same-profile handoff, disabled profile, missing session — are pure guard logic reachable through a `command` profile, and belong in the default suite. `handoffTask`'s "already on that profile" error (906-910) has no test at all.
 **Risk:** none.
 **Effort:** S
 
 ### 16. `"answered"` is a task state no code path can produce — Low
-**Where:** `src/types.ts:6`, `src/store.ts:897` and `1135`, `src/tasks.ts:975`, `src/cli.ts:48`
-**Problem:** `answerTask` writes `state = 'queued'` (`store.ts:449`) and passes `"answered"` only as the *event type*, with `"queued"` as the state. Nothing anywhere assigns `state = "answered"`. So the ladder arm at `tasks.ts:975` is unreachable:
+**Where:** `src/types.ts:14`, `src/store.ts:898` and `1136`, `src/tasks.ts:1000`, `src/cli.ts:48`
+**Problem:** `answerTask` writes `state = 'queued'` (`store.ts:444`) and passes `"answered"` only as the *event type*, with `"queued"` as the state. Nothing anywhere assigns `state = "answered"`. So the ladder arm at `tasks.ts:1000` is unreachable:
 
 ```ts
 : task.state === "answered" ? "answered"
@@ -452,12 +452,12 @@ The gate itself is justified — every spawn goes through `sandboxedCommand`, wh
 
 both `CHECK(state IN (…))` constraints permit a value no writer writes, `cli.ts:48` exposes it as a queryable filter that can never match, and `TaskState` models a state the machine does not have. The only thing keeping it alive is `tests/task-waiter.test.ts`, which constructs the state by hand. It is also the exact state Swift's `isTerminal` counts and TypeScript's predicates do not (finding 3).
 **Why it matters:** A union that permits an impossible state means every `switch` over it grows a branch nobody can reach through the real API — and it is already the source of one live TS/Swift disagreement.
-**Fix:** Decide, do not drift. Either remove `"answered"` from `TaskState`, both `CHECK` constraints, `cli.ts:48`, `tasks.ts:975`, and the Swift enum together; or keep it and write one comment on `types.ts:6` saying it is reserved and why, then delete the unreachable ladder arm regardless.
+**Fix:** Decide, do not drift. Either remove `"answered"` from `TaskState`, both `CHECK` constraints, `cli.ts:48`, `tasks.ts:1000`, and the Swift enum together; or keep it and write one comment on `types.ts:14` saying it is reserved and why, then delete the unreachable ladder arm regardless.
 **Risk:** behavior-adjacent for the removal — the `CHECK` constraint is in a live schema and Swift decodes the string, so both sides must land together. The comment-only option carries no risk.
 **Effort:** S
 
 ### 17. `TaskWaiter.wait` writes its wake decision twice — Low
-**Where:** `src/task-waiter.ts:52-63` and `88-112`
+**Where:** `src/task-waiter.ts:58-63` and `88-112`
 **Problem:** The pre-check at 58-63 and the `onChange` body at 94-95 encode the same two decisions — attention wins, then progress past the cursor — and `onChange()` is then invoked synchronously at 112, so both code paths evaluate on every call. The cursor expression `Math.max(afterCursor ?? 0, this.getCursor(ids))` appears three times: as the `cursor()` closure at 57, inline at 93, and inline again at 110.
 **Why it matters:** A change to the wake rule has to be made in two places that look different enough to miss one, and finding 1 wants to change exactly that rule.
 **Fix:** One private method, called by both:
@@ -471,7 +471,7 @@ Keep the pre-check as a fast path that avoids constructing the promise — just 
 **Effort:** S
 
 ### 18. `warningsFor` computes the inheritance warning twice — Low
-**Where:** `src/cli.ts:568-570`
+**Where:** `src/cli.ts:569-570`
 **Problem:**
 
 ```ts
@@ -494,7 +494,7 @@ The `!` disappears as a side effect, which is the tell that the original was wor
 **Effort:** S
 
 ### 19. `publicTask` is a dead export kept alive only by its own test — Low
-**Where:** `src/public-task.ts:18-21`, `tests/public-task.test.ts:62, 290-291`
+**Where:** `src/public-task.ts:29-32`, `tests/public-task.test.ts:62, 290-291` — LIKELY FIXED: verify before working this finding
 **Problem:** No file in `src/` calls `publicTask`. Its sibling `publicTaskSummary` is live (`cli.ts`), and `publicAttempt` (33) is live inside `taskView`. The only references to `publicTask` are three assertions in `public-task.test.ts`, so the test suite is the sole reason it still exists — and "never emits `sessionId`" is already covered properly against `taskView`, which is what callers actually receive.
 **Why it matters:** It is a second, unenforced answer to "what is safe to return to a caller", sitting next to the enforced one. The `fields` design deliberately replaced it; leaving it exported invites someone to use it and ship the whole `Task`.
 **Fix:** Delete `publicTask`. Drop the assertion at 290-291 and rewrite line 62 (`publicTask(pollingTask()).shippedPrompt`) against `taskView(task, ["shippedPrompt"])`, which is the real path to that field.
@@ -503,16 +503,16 @@ The `!` disappears as a side effect, which is the tell that the original was wor
 
 ## Nits
 
-- `src/tasks.ts:693` — the function body opens on the signature line: `): { error?: string; last?: string } {  const events = …`. A stray join with two spaces; move it to its own line.
+- `src/tasks.ts:690` — the function body opens on the signature line: `): { error?: string; last?: string } {  const events = …`. A stray join with two spaces; move it to its own line.
 - `src/store.ts:1303` — `...(row.timeout_ms ? { timeoutMs: row.timeout_ms } : {})` tests a number for truthiness, while `cost_usd` and `turns` twelve lines later correctly test `=== null` (1314-1315). Harmless today because `validateTimeoutMs` rejects `0`, but inconsistent inside one function.
-- `src/store.ts:669-670` — `clauses.length > 0 ? … : ""` can never take the else branch: `archiveClause` is pushed unconditionally on line 669.
+- `src/store.ts:671` — `clauses.length > 0 ? … : ""` can never take the else branch: `archiveClause` is pushed unconditionally on line 670.
 - `src/store.ts:1370` — `archiveClause` returns the literal `"1 = 1"` for `"include"`. "No filter" is better expressed as `undefined` and dropped in TypeScript than as a tautology handed to SQLite.
-- `src/store.ts:1013-1039` — eight consecutive `INSERT OR IGNORE INTO schema_migrations` calls differing only in a version number and a name. One loop over a literal array of pairs.
+- `src/store.ts:1012-1039` — eight consecutive `INSERT OR IGNORE INTO schema_migrations` calls differing only in a version number and a name. One loop over a literal array of pairs.
 - `src/store.ts:60-63` — `TASK_COLUMNS` carries the indentation of the call site it was extracted from *inside* the template literal, so every query built from it emits ragged SQL.
 - `src/store.ts:748` — public `appendTaskEvent` is a one-line alias for private `addTaskEvent` (1216). Two verbs for one operation; keep the public name and rename the private one to match.
 - `src/store.ts:121` — `try { chmodSync(this.path, 0o600); } catch {}` silently drops a failure to lock down the database file. This is the one swallowed catch in the file with a security consequence; one `console.warn` is enough.
 - `src/task-protocol.ts:241` — `credits?error` reads like a typo. It is matching `CreditsError` with the separator absent. Five words of comment saves the next reader a double-take, or write it as `credits[ ]?error`.
-- `src/events.ts:971-983` — `presentationDetail`'s switch has no arm for `"usage"` or `"signal"` and no `default`. Correct today only because the return type admits `undefined`; a new presentation type renders blank rather than failing to compile.
+- `src/events.ts:971-989` — `presentationDetail`'s switch has no arm for `"usage"` or `"signal"` and no `default`. Correct today only because the return type admits `undefined`; a new presentation type renders blank rather than failing to compile.
 - `src/events.ts`, `src/types.ts`, `src/tasks.ts` and four others — 62 `///` doc comments, 39 of them in `events.ts`. That is Rust/Swift syntax; TypeScript tooling shows nothing on hover, and the same files use `/** */` elsewhere. Normalising is a find-and-replace that makes the comments visible where they are read.
 
 ## What is already good
@@ -520,7 +520,7 @@ The `!` disappears as a side effect, which is the tell that the original was wor
 Named specifically, so it is clear what not to touch:
 
 - **`src/task-protocol.ts` is the best file in the set.** Pure functions, no I/O, a flat guard-clause ladder in `interpretWorkerOutcome`, and every regex carries the reason it is shaped the way it is. The note explaining why `COMPLETED` is line-anchored but *not* end-anchored is exactly the comment that stops someone "simplifying" it into a bug. It needs nothing.
-- **The why-comments throughout.** `store.ts:65-67` (heartbeats must not advance the cursor), `store.ts:1080-1082` (a `CHECK` cannot be altered, so a table rebuild is the only fix), `tasks.ts` on pi's O(n²) payloads with the measured 827 KB, the per-variable justification of the worker `env` block, `events.ts` on "Reasoning" not "Thinking". This density of *why* is rare. Preserve every one of them through any refactor — and note the same discipline carried into `handoffTask`'s doc comment (860-869), which explains why a handoff cannot reuse a session at all.
+- **The why-comments throughout.** `store.ts:65-67` (heartbeats must not advance the cursor), `store.ts:1080-1082` (a `CHECK` cannot be altered, so a table rebuild is the only fix), `tasks.ts` on pi's O(n²) payloads with the measured 827 KB, the per-variable justification of the worker `env` block, `events.ts` on "Reasoning" not "Thinking". This density of *why* is rare. Preserve every one of them through any refactor — and note the same discipline carried into `handoffTask`'s doc comment (890-899), which explains why a handoff cannot reuse a session at all.
 - **Optimistic concurrency on the task row.** `saveTask`'s `expectedStates` guard, with a test proving a worker completion cannot overwrite a cancellation. The whole cancel-during-run race rests on this and it is correctly done.
 - **The migration tests.** They build genuinely old schemas by hand — including the pre-`pi` `CHECK` constraint — and reopen them. These can fail, which is the only property that matters in a migration test.
 - **The attempts ring buffer.** `MAX_ATTEMPTS` with `closeAttempt`, and a test that drives 14 runs and asserts *which end* got dropped.

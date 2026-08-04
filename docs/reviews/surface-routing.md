@@ -71,7 +71,7 @@ if (import.meta.main) {
 ```
 
 Then split `handleRequest` by resource (`routes/tasks.ts`, `routes/profiles.ts`, `routes/state.ts`) with
-a small matcher, and test each with a constructed `Request`. `mcpHandler` (`:72-75`) moves next to
+a small matcher, and test each with a constructed `Request`. `mcpHandler` (`:76-79`) moves next to
 `createMcpServer`.
 
 **Risk:** none — pure relocation. The `--stdio` gate moving inside `import.meta.main` is the only
@@ -85,17 +85,17 @@ semantic change, and it is the intended one (importing the module must not serve
 
 **Problem:** The handler maps every task through
 `profile && task.output ? { ...task, output: finalText(profile, task.output) } : task`. But `task.output`
-is *already* the parsed answer: `src/tasks.ts:569-570` computes `finalText(profile, stdout)` and passes
-it into `interpretWorkerOutcome`, whose `outcome.output` is what `update()` persists (`src/tasks.ts:582-588`),
-and `src/store.ts` only ever writes `task.output` or `''` (`:331, :398, :444, :527`). So on every poll
+is *already* the parsed answer: `src/tasks.ts:585` computes `finalText(profile, stdout)` and passes
+it into `interpretWorkerOutcome`, whose `outcome.output` is what `update()` persists (`src/tasks.ts:607-616`),
+and `src/store.ts` only ever writes `task.output` or `''` (`:331, :398, :444, :534, :596`). So on every poll
 this does a linear `profiles.find` per task plus a per-line `JSON.parse` scan of the whole output, for up
-to 200 tasks, at 2 s from the app (`swift/Sources/ProfileStore.swift:20`) and 1 s from the channel
+to 200 tasks, at 2 s from the app (`swift/Sources/ProfileStore.swift:17`) and 1 s from the channel
 (`src/channel.ts:23`). Worse than wasted: it is not a no-op. For claude profiles `finalText` walks lines
-from the end and returns the first `result` string it finds (`src/adapters.ts:212-219`), and for
+from the end and returns the first `result` string it finds (`src/adapters.ts:214-223`), and for
 codex/opencode/antigravity it returns the first `text`/`message`/`content`/`result.response` it finds
-(`:249-263`) — so a worker whose answer *contains* a JSON line gets a different `output` from
+(`:252-268`) — so a worker whose answer *contains* a JSON line gets a different `output` from
 `/api/state` than from `inspect` or `wait`. For `pi` profiles the function returns `raw.trim()`
-(`:246`), so this route silently trims and the DB does not.
+(`:249`), so this route silently trims and the DB does not.
 
 **Why it matters:** Two surfaces disagree about the same field, in the route that drives the whole GUI,
 and the cost is paid on every poll forever.
@@ -120,7 +120,7 @@ text first and returning `400 {"error":"invalid JSON body"}` (`:288-293`) — th
 `POST /api/profiles` is worse: it has no `try` at all, so every message `normalizeProfile` takes the
 trouble to write — `"invalid provider"`, `"label is required"` (`src/profile-input.ts:7-11`) — is
 returned as a 500 with no body. The app then throws a generic `CocoaError`
-(`swift/Sources/ProfileStore.swift:52`), so the user is told nothing about what was wrong with the
+(`swift/Sources/ProfileStore.swift:45`), so the user is told nothing about what was wrong with the
 profile they just typed.
 
 **Why it matters:** The GUI's profile form cannot report why a save failed. It is the most user-visible
@@ -152,7 +152,7 @@ the correction.
 - `scope` is handed to `delegate` unvalidated. The only thing standing between a malformed body and a
   crash is the hand-rolled runtime guard in `src/task-scope.ts:183` (`scope.${kind} must be an array`) —
   a check whose existence is the proof this layer does not validate.
-- `allowQuestions` is consumed as `options.allowQuestions !== false` (`src/tasks.ts:242`), so the string
+- `allowQuestions` is consumed as `options.allowQuestions !== false` (`src/tasks.ts:259`), so the string
   `"false"` enables questions.
 - A `null` body reaches `body.profile` inside the `try` and returns
   `400 {"error":"TypeError: null is not an object …"}`.
@@ -178,8 +178,8 @@ the changelog.
 ### 5. Provider knowledge is spread over nine files, and four of them fail silently for a new provider — High
 
 **Where:** `src/types.ts:1`, `src/cli.ts:200`, `src/cli.ts:536`, `src/profile-input.ts:6`,
-`src/task-scope.ts:435-460`, `src/profile-discovery.ts:12-52`, `src/models.ts:43-65`, `src/usage.ts:123-137`,
-`src/adapters.ts:19-152`
+`src/task-scope.ts:433-462`, `src/profile-discovery.ts:12-53`, `src/models.ts:42-68`, `src/usage.ts:122-137`,
+`src/adapters.ts:19-155`
 
 **Problem:** 33 `provider === "…"` comparisons across six files, three `switch (profile.provider)`
 blocks, and four separately maintained five-element provider lists. TypeScript catches only two of
@@ -199,7 +199,7 @@ them: `commandFor` and `usage.collect` are declared to return a value, so a non-
 
 `src/profile-discovery.ts:40` also holds a second copy of the provider→binary mapping
 (`item.provider === "antigravity" ? "agy" : item.provider`), the first being the literal `"agy"` in
-`adapters.ts:50` and `:115`.
+`adapters.ts:50` and `:118`.
 
 **Why it matters:** Adding a provider today means finding nine files by grep, four of which give no
 compile error and one of which grants the wrong config directory. See the assessment section below for
@@ -256,7 +256,7 @@ function errorResponse(error: unknown): Response {
 ```
 
 and `Response.json({ error: "not found" }, { status: 404 })` for the fallthrough. The store's own
-messages are already the right vocabulary (`src/store.ts:468, 554, 612`; `src/tasks.ts:299-308`).
+messages are already the right vocabulary (`src/store.ts:468, 561, 626`; `src/tasks.ts:316-323`).
 
 **Risk:** behavior-adjacent — some responses change 400→404/500. That is the point; the GUI only
 branches on `< 300` (`swift/Sources/ProfileStore.swift:52, 71`).
@@ -265,7 +265,7 @@ branches on `< 300` (`swift/Sources/ProfileStore.swift:52, 71`).
 
 ### 7. `TaskField` is not a union — it is `string`, so every `fields` default is unchecked — Medium
 
-**Where:** `src/public-task.ts:15-16`; consumers at `src/cli.ts:51-68`
+**Where:** `src/public-task.ts:15-16`; consumers at `src/cli.ts:58-69` — LIKELY FIXED: verify before working this finding
 
 **Problem:** `export const TASK_FIELD_KEYS = [...Object.keys(TASK_FIELD_GROUPS), "all"] as const;` —
 `Object.keys` returns `string[]`, so the const assertion yields `readonly [...string[], "all"]` and
@@ -277,7 +277,7 @@ typechecks clean under `--strict`. Downstream, `DEFAULT_DELEGATE_FIELDS`, `DEFAU
 `z.enum(TASK_FIELD_KEYS)` sees the real values — so this is latent, not broken.
 
 *(Recheck 2026-08-04: an earlier draft of this finding also cited `fields.includes("all" as TaskField)`
-as needing a cast. That cast is gone — `public-task.ts:46` now reads `fields.includes("all")`. The
+as needing a cast. That cast is gone — `public-task.ts:60` now reads `fields.includes("all")`. The
 `TaskField`-is-`string` defect itself is unchanged.)*
 
 **Why it matters:** The `fields` selector is the newest and most caller-visible contract on the MCP
@@ -302,13 +302,13 @@ compile error here — and the `k is TaskField` predicate at `cli.ts:68` can go 
 
 ### 8. `scopeRefusedWrite` and `scopeCoversPath` hold the same matcher twice — Medium
 
-**Where:** `src/task-scope.ts:160-164` vs `:170-174`; also `:255-257` vs `:340-342`
+**Where:** `src/task-scope.ts:148-166` vs `:168-175`; also `:255-258` vs `:340-342`
 
 **Problem:** The two predicates are character-for-character identical — same `rule === "**"` case, same
 `/\/\*\*$/` strip, same `resolved === base || within(base, resolved)`. `scopeRefusedWrite` differs from
 `scopeCoversPath` only in the always-writable prefix check above it (`:155-159`). Separately, the
 `claude-${process.getuid()}` temp-path block is duplicated verbatim between `runtimeReadPaths`
-(`:255-257`) and `runtimeWritePaths` (`:340-342`).
+(`:255-258`) and `runtimeWritePaths` (`:340-342`).
 
 **Why it matters:** A fix to scope matching has to be made twice, and both are load-bearing for the
 sandbox refusal path. Both are tested (`tests/task-scope.test.ts:378-410`), so the dedup is verifiable.
@@ -379,7 +379,7 @@ either drop the useless size check or enforce a byte budget while reading.
 
 ### 11. `/api/state` truncates at 200 tasks with no indicator, and the app asks for archived rows too — Medium
 
-**Where:** `src/tasks.ts:78-80`, `src/store.ts:566-575`, `src/cli.ts:91-107`, `swift/Sources/ProfileStore.swift:27-29`
+**Where:** `src/tasks.ts:93-95`, `src/store.ts:638-647`, `src/cli.ts:91-107`, `swift/Sources/ProfileStore.swift:25-26`
 
 **Problem:** `listTasks` hardcodes `stateStore().listTasks(200, archived)` with
 `ORDER BY updated_at DESC, id DESC LIMIT 200`. The app polls `state?archived=include` every 2 s, so on a
@@ -391,7 +391,7 @@ task rows (prompt + shippedPrompt + output + attempts) *and* silently caps them.
 no explanation, and the fix for the payload size has to address the cap in the same change or it will
 look like data loss.
 
-**Fix:** Return `listTaskSummaries` (`src/types.ts:125` already defines exactly the right shape) plus
+**Fix:** Return `listTaskSummaries` (`src/types.ts:146-167` already defines exactly the right shape) plus
 `{ total, hasMore }`, and add `GET /api/tasks/:id` for the detail the drawer needs. Make the limit a
 parameter of `listTasks` with the default stated at the route, not buried in `tasks.ts`.
 
@@ -460,8 +460,8 @@ if (policy instanceof RoutingPolicyError) return [policy.message];
 ...(scopeInheritanceWarning(task) ? [scopeInheritanceWarning(task)!] : []),
 ```
 
-Each call runs `stateStore().listTaskEvents(task.id)` (`src/tasks.ts:199`), which is up to 5 001 rows
-JSON-parsed out of SQLite (`src/store.ts:625-648`) — done twice on every delegate.
+Each call runs `stateStore().listTaskEvents(task.id)` (`src/tasks.ts:216`), which is up to 5 001 rows
+JSON-parsed out of SQLite (`src/store.ts:697-720`) — done twice on every delegate.
 
 **Fix:** `const inherited = scopeInheritanceWarning(task);` then
 `...(inherited ? [inherited] : [])`. The `!` disappears with it.
@@ -472,7 +472,7 @@ JSON-parsed out of SQLite (`src/store.ts:625-648`) — done twice on every deleg
 
 ### 15. `chooseModel` takes seven positional parameters, four optional — Medium
 
-**Where:** `src/model-router.ts:78-86`; smell visible at `tests/model-router.test.ts:97-105, 176-192, 204-224`
+**Where:** `src/model-router.ts:78-86`; smell visible at `tests/model-router.test.ts:97-104, 175-190, 204-223`
 
 **Problem:** `chooseModel(prompt, models, profiles, options = {}, statuses = [], policy?, usage = [])`.
 The tests show the cost: `chooseModel("Rename …", models, profiles, {}, [], undefined, [claudeNearLimit])`
@@ -511,7 +511,7 @@ const TIERS: Array<{ match: RegExp; quality: number; speed: number; heuristicCos
 ];
 ```
 
-`tests/model-router.test.ts:450-474` pins the current numbers and must keep passing unchanged — that is
+`tests/model-router.test.ts:449-473` pins the current numbers and must keep passing unchanged — that is
 the acceptance test for this refactor.
 
 **Risk:** none if the table preserves today's match order (first-match-wins, deepseek before flash).
@@ -548,7 +548,7 @@ refactor.
 
 ### 18. `publicTask` is exported, tested, and called from nothing — Low
 
-**Where:** `src/public-task.ts:18-21`; only callers `tests/public-task.test.ts:62, 290-291`
+**Where:** `src/public-task.ts:29-32`; only callers `tests/public-task.test.ts:62, 290-291` — LIKELY FIXED: verify before working this finding
 
 **Problem:** `cli.ts` imports `publicTaskSummary` and `taskView`, never `publicTask`. It is the
 pre-`fields` artifact: the whole point of `taskView` is that callers no longer receive the full record by
@@ -564,10 +564,10 @@ pinned by `"never emits sessionId under any fields value including all"`
 
 ### 19. `canResumeSession` duplicates `resumeCommandFor`'s provider list — Low
 
-**Where:** `src/adapters.ts:73-78` vs `:89-131`
+**Where:** `src/adapters.ts:79-81` vs `:83-136` — LIKELY FIXED: verify before working this finding
 
 **Problem:** The function enumerates all five providers, so today it is exactly `!profile.command`. The
-real gate for an unlisted provider is the `throw` at `:132`. Two lists, kept in sync by hand, neither
+real gate for an unlisted provider is the `throw` at `:135`. Two lists, kept in sync by hand, neither
 exhaustiveness-checked (the `throw` makes `resumeCommandFor`'s switch legal when non-exhaustive).
 
 **Fix:** Once the provider table from finding 5 exists, derive both from a `canResume` field. Not before.
@@ -593,7 +593,7 @@ two different answers, one of them indistinguishable from "this provider has no 
 
 ### 21. `POST /api/hooks/:id` accepts an unbounded body into the event log — Low
 
-**Where:** `src/cli.ts:171-181`; contrast `src/tasks.ts:17-18, 443-459`
+**Where:** `src/cli.ts:171-181`; contrast `src/tasks.ts:24-25, 459-472`
 
 **Problem:** The route validates only that the payload is a non-array object, then writes it straight
 into `task_events`. The stdout path feeding the same table caps a line at `MAX_EVENT_LINE` (64 KB), caps
@@ -621,15 +621,15 @@ keyed the same way. There is no `ProviderAdapter` type anywhere in `src/`.
 | File | What changes | Does TypeScript catch omission? |
 | --- | --- | --- |
 | `src/types.ts:1` | `Provider` union | — (this is the source) |
-| `src/adapters.ts:19, 90, 135, 210` | `commandFor`, `resumeCommandFor`, `sessionIdFrom`, `finalText` | **Yes** for `commandFor` (must return `string[]`); no for the others |
-| `src/adapters.ts:73-78` | `canResumeSession` list | No — returns `false`, resume silently unavailable |
-| `src/models.ts:43, 50-56, 59-65` | discovery command *and* parser, two aligned chains | No — falls through to the opencode parser |
-| `src/usage.ts:123` | `collect` | **Yes** — must return `ProfileUsage` |
-| `src/task-scope.ts:65-74, 255-263, 340, 435-460` | provider bootstrap rules, temp paths, `profileDataPaths` | No — and `profileDataPaths` silently grants Gemini's dirs |
+| `src/adapters.ts:19, 83, 138, 213` | `commandFor`, `resumeCommandFor`, `sessionIdFrom`, `finalText` | **Yes** for `commandFor` (must return `string[]`); no for the others |
+| `src/adapters.ts:79-81` | `canResumeSession` list | No — returns `false`, resume silently unavailable |
+| `src/models.ts:42, 50-56, 59-65` | discovery command *and* parser, two aligned chains | No — falls through to the opencode parser |
+| `src/usage.ts:122` | `collect` | **Yes** — must return `ProfileUsage` |
+| `src/task-scope.ts:65-74, 255-258, 340-342, 433-462` | provider bootstrap rules, temp paths, `profileDataPaths` | No — and `profileDataPaths` silently grants Gemini's dirs |
 | `src/profile-discovery.ts:12-31, 40, 49` | discovery table + the `agy` binary special case | No |
 | `src/cli.ts:200, 536` | two hand-written provider lists | No — silently rejected by PUT and by the `profiles` tool |
 | `src/profile-input.ts:6` | a third hand-written list | No — `Provider[]` does not require completeness |
-| `src/provider-defaults.ts:3` | default model | **Yes** — `Record<Provider, string>` |
+| `src/provider-defaults.ts:13` | default model | **Yes** — `Record<Provider, string>` |
 
 So four of the nine sites fail silently, and one of them (`profileDataPaths`) fails *wrongly* rather than
 merely incompletely: the unnamed `else` branch is antigravity, so a new provider inherits
@@ -643,7 +643,7 @@ it; `adapters.ts` gains one argv case; `models.ts` gains one parser. Everything 
 it is achievable without touching a single argv array.
 
 The `sessionIdFrom`/`finalText` pair is a different story: those are per-provider stream-shape parsers
-with hard-won comments (`adapters.ts:143-147, 222-225, 240-242`) and they are the load-bearing core.
+with hard-won comments (`adapters.ts:147-151, 226-229, 242-247`) and they are the load-bearing core.
 They would read better as a `Record<Provider, {sessionId, finalText}>` lookup, but the payoff is
 readability only. `RISKY — core behavior`; leave them.
 
@@ -651,18 +651,18 @@ readability only. `RISKY — core behavior`; leave them.
 
 - `src/cli.ts:252` and `:264` — `patchTaskId` and `cancelTaskId` compute the identical regex
   `/^\/api\/tasks\/([^/]+)$/` twice. Match once.
-- `src/cli.ts:62-65` — `DEFAULT_INSPECT_FIELDS` is defined by *excluding* names from a `Set<string>`;
+- `src/cli.ts:66-69` — `DEFAULT_INSPECT_FIELDS` is defined by *excluding* names from a `Set<string>`;
   rename a group and the exclusion silently stops matching, widening the default. List the seven wanted
   groups explicitly.
-- `src/cli.ts:516` — the `profiles` tool says "Bypass the five-minute cache"; the real TTLs are 30
+- `src/cli.ts:532-533` — the `profiles` tool says "Bypass the five-minute cache"; the real TTLs are 30
   minutes (`models.ts:4`) and 60 seconds (`usage.ts:6`). Wrong number in protected tool copy — flag it
   before editing.
 - `src/cli.ts:36` — `Number(Bun.env.INTER_PORT ?? 7331)`; `INTER_PORT=abc` makes `Bun.serve` throw at
   import with no diagnostic.
-- `src/cli.ts:580` — `publicProfile` is typed `(profile: Profile) => Profile` but returns masked env, so
+- `src/cli.ts:608-616` — `publicProfile` is typed `(profile: Profile) => Profile` but returns masked env, so
   the type says the secrets are real. Note in a doc comment at minimum; `PUT` at `:208` depends on the
   `"••••••••"` sentinel round-tripping, which is worth stating where the mask is produced.
-- `src/cli.ts:565` and `src/channel.ts:256` — the same four-line `result()` helper in two files. Share it.
+- `src/cli.ts:593` and `src/channel.ts:256` — the same four-line `result()` helper in two files. Share it.
 - `src/channel.ts:35-46` — `TaskView` re-declares nine `Task` fields with `state: string`, so a
   `TaskState` change never reaches it, and `eventContent`'s `default:` branch (`:143`) exists only to
   satisfy that looseness. `Pick<Task, "id"|"profileId"|"cwd"|"state"|"title"|"question"|"error"|"output"|"completion">`
@@ -676,13 +676,13 @@ readability only. `RISKY — core behavior`; leave them.
 - `src/profile-status.ts:28-42` — the injected-dependency object is the only DI seam in `src/`, exercised
   by exactly one test (`tests/profile-status.test.ts:109-129`). Keep it, and copy the pattern into
   `models.ts`/`usage.ts` rather than removing it.
-- `src/prompt-paths.ts:10-28` — `promptReadPaths` caps *found* paths at 50 but not tokens examined, so a
+- `src/prompt-paths.ts:10-34` — `promptReadPaths` caps *found* paths at 50 but not tokens examined, so a
   64 KB prompt can `statSync` every token containing `/` or `.`. Cap the token count too.
 - `src/routing-policy.ts:92-158` — hand-rolled validation where zod is already a dependency. Left as-is
   deliberately: the custom `RoutingPolicyError` messages (`invalid routing policy <path> at
   routes.build.allow[0].provider: …`) are better than what a zod mapping would produce, and
   `tests/routing-policy.test.ts:50` pins them. Noted so nobody "modernizes" it.
-- `src/memories.ts:50-59` and `src/tasks.ts:310-330` — two copies of the INTER_ROOTS containment check
+- `src/memories.ts:50-58` and `src/tasks.ts:332-342` — two copies of the INTER_ROOTS containment check
   with different error text. Share one `assertInsideRoots(cwd)`.
 
 ## What is already good
@@ -703,10 +703,10 @@ readability only. `RISKY — core behavior`; leave them.
   the runtime-path code should follow.
 - **`src/mcp-wait.ts`** — five lines, one clamp, three tests. Exactly the right size for what it does.
 - **`src/adapters.ts` argv construction** — every non-obvious flag carries the provider bug it works
-  around (`:29-30, 45-48, 55-60, 66-68, 120-123`). This is load-bearing knowledge that would be
+  around (`:29-30, 45-48, 55-60, 66-68, 123-126`). This is load-bearing knowledge that would be
   expensive to rediscover. Leave it alone.
-- **Comment culture generally** — comments explain *why*, not what: `models.ts:6-12`,
-  `task-scope.ts:55-58, 78-82`, `usage.ts:72-73`, `model-router.ts:149-150, 162-163`,
+- **Comment culture generally** — comments explain *why*, not what: `models.ts:7-12`,
+  `task-scope.ts:54-58, 78-82`, `usage.ts:70-71`, `model-router.ts:149-150, 162-163`,
   `bunfig.toml:2-6`. Rare and worth preserving under any refactor.
 - **`src/task-protocol.ts`'s marker regexes** — line-anchored but not end-anchored, with the reason
   ("workers often append a summary after the marker") stated at `:4-6`. Subtle and correct.

@@ -32,7 +32,7 @@ are worth fixing before any refactor: the JSONC sanitizer can silently corrupt a
 ## Findings
 
 ### 1. `sanitizeJSONC` strips commas inside string values, corrupting the config it rewrites — Critical
-**Where:** `swift/Sources/MCPConfigInjector.swift:101-127` (the regex at `:126`)
+**Where:** `swift/Sources/MCPConfigInjector.swift:101-138` (the comma logic at `:126-131`) — LIKELY FIXED: verify before working this finding
 **Problem:** The function walks the text with a string-aware loop to remove `//` comments, then throws
 that awareness away and applies `replacingOccurrences(of: #",\s*([}\]])"#, ..., options: .regularExpression)`
 to the *entire* document, including inside string literals. `\s` matches newlines, so any string value
@@ -58,12 +58,12 @@ testable without touching the install flow.
 ### 2. Activity trace freezes after an in-app Resume, and after a question is answered — High
 **Where:** `swift/Sources/TaskDetailView.swift:97-106` (break at `:102`)
 **Problem:** The event loop breaks when `TaskState(live).isTerminal`, and `isTerminal`
-(`DesignSystem.swift:220-222`) includes `.failed`, `.cancelled`, `.blocked` and `.needsInput` — exactly
+(`DesignSystem.swift:209-211`) includes `.failed`, `.cancelled`, `.blocked` and `.needsInput` — exactly
 the states from which the app itself restarts a run. `.task(id: task.id)` cannot re-fire, because the
 task id has not changed; `resetEventState()` and `loadEvents()` are only reachable from that `.task`
 block and from the Retry button, which is only visible when `loadFailed` is true. `!loading` in the break
 condition is always true after the first iteration, so it gates nothing.
-**Why it matters:** The Resume button lives in this very header (`:197-199`). Press it and the worker
+**Why it matters:** The Resume button lives in this very header (`:197-198`). Press it and the worker
 runs again for minutes while the Activity tab shows the old, settled trace with no indication it is
 stale. Same for a `needs_input` task answered by the calling agent. Recovery requires selecting another
 task and coming back.
@@ -89,7 +89,7 @@ task's `updatedAt` — roughly every 2s while anything is running. Each of those
   re-classifies the entire event array — thousands of events on a long run.
 - Every code fence re-runs `CodeStyle.highlighted` (`ReviewContent.swift:288`), a character-by-character
   scan, and every expanded row re-runs `EventExpansion(event:)` (`EventExpansion.swift:59`), which
-  re-parses the raw JSON payload and re-computes an O(n·m) LCS diff (`FileChange.swift:212-240`).
+  re-parses the raw JSON payload and re-computes an O(n·m) LCS diff (`FileChange.swift:211-240`).
 **Why it matters:** This is the app's hot path doing its heaviest work for no reason — the inputs did not
 change. It is also why the pure/impure split, which the repo otherwise gets right, does not pay off here.
 **Fix:** Memoize at the three call sites, keyed on the input that actually changes.
@@ -104,7 +104,7 @@ composition moves from render time to append time).
 **Effort:** M
 
 ### 4. A transient fetch failure erases an already-rendered trace — High
-**Where:** `swift/Sources/TaskDetailView.swift:284-303`, set at `:351-352,368-371`
+**Where:** `swift/Sources/TaskDetailView.swift:284-308`, set at `:351-352,370-371`
 **Problem:** `eventContent` tests `loading`, then `loadFailed`, then `events.isEmpty` — in that order —
 so once `loadFailed` is true the whole trace is replaced by a "Couldn't load activity." card even though
 `events` still holds every event already fetched. `loadEvents` sets `loadFailed = true` on any thrown
@@ -136,7 +136,7 @@ and every anchor below it moved. That is the maintenance cost, measured.
 - `ActivityTraceViews.swift` ← `:471-932`: `ActivityBlockView`, `ActivityChapterCard`, `ActivityWorkRow`,
   `ActivityReasoningRow`, `ActivitySignalCard`, `ActivityHandoffCard`, `ActivityReceiptCard`,
   `TaskEventPresentationView` (≈460 lines). Sits next to `ActivityStory.swift`, whose output it renders.
-- `TaskDetailChrome.swift` ← `:456-469` and `:933-1091`: `TaskPanel`, `TaskStateChip`, `TaskMetaChip`,
+- `TaskDetailChrome.swift` ← `:456-469` and `:935-1091`: `TaskPanel`, `TaskStateChip`, `TaskMetaChip`,
   `TaskSectionTabs`, `TaskFactRow` (≈160 lines).
 - `middleTruncated(_:maxChars:)` (`:954-960`) is a pure, tested, module-internal string function wedged
   between two view structs. It belongs in `DesignSystem.swift` next to the other shared primitives, not
@@ -150,14 +150,14 @@ What remains is a ~430-line `TaskDetailView.swift`: the section enum, `TaskDetai
 **Where:** `swift/Sources/ContentView.swift:219-225` and `swift/Sources/TaskDetailView.swift:253-260`
 **Problem:** The two predicate bodies are identical (`[.queued, .running, .needsInput, .blocked]` and
 `[.failed, .cancelled, .blocked]`), and the comment at `ContentView.swift:217-218` documents the
-duplication instead of removing it. `performCancel`/`performResume` (`ContentView.swift:227-241`,
-`TaskDetailView.swift:270-282`), the confirmation dialog and its message (`ContentView.swift:148-163`,
+duplication instead of removing it. `performCancel`/`performResume` (`ContentView.swift:227-242`,
+`TaskDetailView.swift:270-281`), the confirmation dialog and its message (`ContentView.swift:148-162`,
 `TaskDetailView.swift:108-115`) and the failure alert (`ContentView.swift:164-166`,
-`TaskDetailView.swift:123-125`) are likewise duplicated verbatim.
-**Why it matters:** These predicates mirror the broker's own transition rules — `src/tasks.ts:822` for
+`TaskDetailView.swift:124-126`) are likewise duplicated verbatim.
+**Why it matters:** These predicates mirror the broker's own transition rules — `src/tasks.ts:799` for
 resume. When the broker adds a state, two files must change in lockstep or a menu offers an action the
 broker rejects. Neither copy is tested.
-**Fix:** Put the rules where `TaskState` already lives (`DesignSystem.swift:154-223`) as
+**Fix:** Put the rules where `TaskState` already lives (`DesignSystem.swift:144-212`) as
 `var canCancel: Bool` / `var canResume: Bool`, and test them — they are pure and the repo's test style
 covers exactly this kind of mapping. Extract the shared dialog and alert into one
 `TaskActionDialogs(taskID:onCancel:)` view modifier used by both call sites, so the destructive copy has
@@ -166,7 +166,7 @@ one home.
 **Effort:** S
 
 ### 7. Dead published state and unread fields cost a decode every 2 seconds — Medium
-**Where:** `swift/Sources/ProfileStore.swift:9-12,32-36,153-166`; `swift/Sources/Models.swift:82-86`
+**Where:** `swift/Sources/ProfileStore.swift:7-33`; `swift/Sources/Models.swift:62-108` — LIKELY FIXED: verify before working this finding
 **Problem:** `profileFailures` and `grants` are decoded on every poll and never read by any view
 (verified by grep across `Sources/` and `Tests/`). `error` is assigned in eight places
 (`ProfileStore.swift:39,75,81,100,107,124,130,143,149,160,164`) and read nowhere — every view uses its own
@@ -186,20 +186,20 @@ in a comment naming what will read it; today nothing does.
 **Effort:** S
 
 ### 8. Wire enums arrive as bare `String` and behavior keys off human-readable titles — Medium
-**Where:** `swift/Sources/Models.swift:115-152`; switched at `swift/Sources/TaskDetailView.swift:586-594,
-606,632,862-919`, `swift/Sources/ActivityStory.swift:77,144,149,264,269`,
-`swift/Sources/EventExpansion.swift:18,34,46-47`
+**Where:** `swift/Sources/Models.swift:110-147`; switched at `swift/Sources/TaskDetailView.swift:586-593,
+608,631-633,863-919`, `swift/Sources/ActivityStory.swift:77,144,149,262,271`,
+`swift/Sources/EventExpansion.swift:16,34,46-47`
 **Problem:** `TaskEventSnapshot.kind`, `.phase`, `.source` and `TaskEventPresentationSnapshot.type`,
 `.level` are closed unions on the wire (`src/events.ts:4-48`) and plain `String` in Swift. There are
 fourteen string comparisons against them across four files; a typo compiles and silently renders nothing
-(`TaskEventPresentationView`'s `default: EmptyView()` at `:918-919` swallows it). Worse,
+(`TaskEventPresentationView`'s `default: EmptyView()` at `:962-963` swallows it). Worse,
 classification keys off *display titles* the server generates from `lifecycleTitle`/`humanize`
-(`src/events.ts:718-726,1044-1046`): `"Worker needs input"`, `"Heartbeat"`, `"Rate limit"`,
-`"API retry"`, `"Session Captured"`, `"Step Start"` (`ActivityStory.swift:147-156,250-265`;
-`TaskDetailView.swift:708-712`). Renaming a user-facing label on the broker silently reclassifies events
+(`src/events.ts:718-729,1044-1047`): `"Worker needs input"`, `"Heartbeat"`, `"Rate limit"`,
+`"API retry"`, `"Session Captured"`, `"Step Start"` (`ActivityStory.swift:147-152,250-271`;
+`TaskDetailView.swift:706-712`). Renaming a user-facing label on the broker silently reclassifies events
 in the app.
 **Why it matters:** The repo already solved this: `TaskState(_ raw: String)` decodes an unknown state to
-`.unknown` (`DesignSystem.swift:157`) rather than trusting the wire. That pattern was not applied to the
+`.unknown` (`DesignSystem.swift:147`) rather than trusting the wire. That pattern was not applied to the
 event types, which are the ones with fourteen call sites.
 **Fix:** Add `EventKind`, `EventPhase`, `PresentationType` as `String`-raw enums with an `unknown` case
 and the same `init(_ raw:)` fallback, expose them as computed properties over the stored strings so
@@ -231,24 +231,24 @@ in the clear. If `CREDENTIAL` should be secret, that belongs in the broker's reg
 **Effort:** S
 
 ### 10. Unreachable decode fallback, and `try?` hides why the trace failed to load — Medium
-**Where:** `swift/Sources/TaskDetailView.swift:354-365`
+**Where:** `swift/Sources/TaskDetailView.swift:354-364`
 **Problem:** `try? JSONDecoder().decode(TaskEventPage.self, ...)` discards the decode error; on `nil` the
 code falls through to decoding a bare `[TaskEventSnapshot]`. That fallback cannot be reached: the client
-always sends both `after` and `waitMs` (`:345-348`), and the broker returns the bare array only when
+always sends both `after` and `waitMs` (`:346-347`), and the broker returns the bare array only when
 *neither* is present (`src/cli.ts:160-161`). So a real `TaskEventPage` schema mismatch is swallowed by
 `try?`, then re-surfaces as the array decode throwing, and the user sees the generic "Couldn't load
 activity." while the loop retries every second forever.
 **Why it matters:** The one place a wire mismatch would be diagnosable throws the diagnosis away, and
 seven lines of compatibility code protect against a request this client never makes.
-**Fix:** `let page = try JSONDecoder().decode(TaskEventPage.self, from: data)` and delete `:359-365`.
+**Fix:** `let page = try JSONDecoder().decode(TaskEventPage.self, from: data)` and delete `:358-364`.
 If tolerance for an older broker is wanted, keep the fallback but capture the primary error and include
 it in the failure card rather than dropping it.
 **Risk:** behavior-adjacent (an older broker's array response would now fail loudly).
 **Effort:** S
 
 ### 11. Presentation logic is trapped inside private view structs, so none of it is testable — Medium
-**Where:** `swift/Sources/TaskDetailView.swift:630-640` (`chips`), `:840-853` (`stats`), `:582-595`
-(`blockPresentation`), `:693-714` (`severity`/`tint`/`symbol`), `:657-661` (`ActivityReasoningRow.label`)
+**Where:** `swift/Sources/TaskDetailView.swift:630-642` (`chips`), `:840-852` (`stats`), `:582-594`
+(`blockPresentation`), `:693-711` (`severity`/`tint`/`symbol`), `:657-663` (`ActivityReasoningRow.label`)
 **Problem:** These are pure functions of a `TaskEventSnapshot` — no view state, no environment — living as
 private computed properties on private views. `stats` alone has seven conditional appends, an ordering
 contract and a `prefix(6)` cap. `chips` encodes a real rule ("a command that ended the ordinary way says
@@ -268,7 +268,7 @@ function each. Test the suppression rules and the six-stat cap directly.
 **Effort:** M
 
 ### 12. Two implementations of the file-presentation row in one file — Medium
-**Where:** `swift/Sources/TaskDetailView.swift:605-625` and `:863-876`
+**Where:** `swift/Sources/TaskDetailView.swift:605-629` and `:863-876`
 **Problem:** `ActivityWorkRow.inlineContent` and `TaskEventPresentationView`'s `case "file"` both render
 a middle-truncated monospaced path followed by `[change, outcome]` chips. The chip construction is
 byte-identical in both — `.scaledFont(.caption, weight: .medium, design: .monospaced)`, `.lineLimit(1)`,
@@ -284,7 +284,7 @@ and `struct FilePresentationRow: View { let path: String?; let chips: [String] }
 ### 13. `ContentView` mixes three sidebar sections, the detail router, and all list preferences — Medium
 **Where:** `swift/Sources/ContentView.swift:26-306`
 **Problem:** `body` runs 142 lines with the task section nested six builders deep (`List` → `Section` →
-`ForEach(taskGroups)` → `ForEach(visibleTasks)` → `TaskRow` → `.contextMenu` → `Button`, `:41-87`).
+`ForEach(taskGroups)` → `ForEach(visibleTasks)` → `TaskRow` → `.contextMenu` → `Button`, `:42-80`).
 `ContentView` owns four `@AppStorage` keys, eight derived properties
 (`visibleTasks`, `projects`, `activeProjectName`, `grouping`, `collapsedGroups`, `taskGroups`,
 `listedTaskIDs`, `isFiltering`) and the filter menu — all of which belong to one of its three sections —
@@ -293,7 +293,7 @@ plus the profile-detail form, the env row and the enabled toggle.
 the worker form. The `@AppStorage` keys are the giveaway: they are the task list's private preferences
 sitting in the window's root view.
 **Fix:** Two extractions.
-- `TaskSidebarSection.swift` ← `:41-87`, `:170-204`, `:245-282`, `TaskRow` (`:491-527`),
+- `TaskSidebarSection.swift` ← `:42-80`, `:170-204`, `:243-280`, `TaskRow` (`:491-527`),
   `TaskGroupHeader` (`:416-442`). Owns the four `@AppStorage` keys and the eight derived properties; takes
   `tasks: [TaskSnapshot]`, `workerLabel: (String) -> String`, `selection: Binding<SidebarSelection?>` and
   the cancel/resume/archive callbacks.
@@ -304,10 +304,10 @@ sitting in the window's root view.
 **Effort:** M
 
 ### 14. `blockPresentation` guards on a condition it then re-tests — Low
-**Where:** `swift/Sources/TaskDetailView.swift:582-595`
+**Where:** `swift/Sources/TaskDetailView.swift:582-594`
 **Problem:** `guard !isQuote, let presentation = event.presentation else { return isQuote ? nil : fallbackDetail }`
 re-tests `isQuote` inside the `else` of a guard that already failed for one of two reasons, and
-`fallbackDetail` (`:597-600`) then re-tests `event.presentation == nil`, which is the only way it can be
+`fallbackDetail` (`:596-599`) then re-tests `event.presentation == nil`, which is the only way it can be
 reached. Three tests for two facts.
 **Fix:**
 ```swift
@@ -329,9 +329,9 @@ and delete `fallbackDetail`. Same output for every input.
 **Effort:** S
 
 ### 15. `Typeface` is a two-case switch with one reachable case — Low
-**Where:** `swift/Sources/DesignSystem.swift:40-50`
+**Where:** `swift/Sources/DesignSystem.swift:84-100` — LIKELY FIXED: verify before working this finding
 **Problem:** `Typeface.current` is `static let current: Typeface = .data`, so `Typeface.design(_:)` is a
-compile-time identity function and `.mono` is unreachable. Its only caller is `Font.scaled` (`:104`).
+compile-time identity function and `.mono` is unreachable. Its only caller is `Font.scaled` (`:84-100`).
 **Why it matters:** It reads as a runtime setting and is a constant — the comment describes a feature the
 type does not provide.
 **Fix:** Delete the enum and pass `design` straight through in `Font.scaled`. The design intent survives
@@ -340,9 +340,9 @@ as the comment. Restore it as a real setting only when something can change it.
 **Effort:** S
 
 ### 16. Archive/restore chooses its action from the sidebar filter, not the task — Low
-**Where:** `swift/Sources/ContentView.swift:73-76`
+**Where:** `swift/Sources/ContentView.swift:73-75`
 **Problem:** The menu item's title and effect come from `showArchivedTasks`, while
-`TaskDetail`'s equivalent button reads `task.archivedAt == nil` (`TaskDetailView.swift:208-213`). The two
+`TaskDetail`'s equivalent button reads `task.archivedAt == nil` (`TaskDetailView.swift:209-212`). The two
 agree only because `visibleTasks` filters on the same flag — until a poll lands between render and click,
 or another client archives the task.
 **Fix:** Use `task.archivedAt == nil` in both places. One fact, one source.
@@ -350,7 +350,7 @@ or another client archives the task.
 **Effort:** S
 
 ### 17. `installEverywhere` does synchronous file I/O on the main actor — Low
-**Where:** `swift/Sources/ContentView.swift:115-118`
+**Where:** `swift/Sources/ContentView.swift:115-117`
 **Problem:** The toolbar button synchronously creates directories, copies backups and writes four or more
 config files inside the button action, blocking the UI.
 **Fix:** `Task { let results = await Task.detached { MCPConfigInjector.installEverywhere(profiles:) }.value; installResults = results; showingInstall = true }`. `MCPConfigInjector` is a stateless enum, so
@@ -362,7 +362,7 @@ nothing else needs to move.
 **Where:** `swift/Tests/AppZoomTests.swift:106-115`
 **Problem:** The doc comment says "A 24pt icon target at 100% is the accessibility floor; it must not
 shrink below it when the user zooms out", and the assertion is `XCTAssertGreaterThanOrEqual(height, 20)`
-at scale 0.85 — where `IconButton`'s `24 * uiScale` (`DesignSystem.swift:311`) is 20.4. The floor is not
+at scale 0.85 — where `IconButton`'s `24 * uiScale` (`DesignSystem.swift:300`) is 20.4. The floor is not
 enforced; the test encodes the violation. `JSONTreeRow`'s disclosure button uses `20 * uiScale`
 (`ReviewContent.swift:420,426`), i.e. 17pt at minimum zoom, and is not covered at all.
 **Fix:** Decide which is true. Either clamp — `.frame(width: max(24, 24 * uiScale), ...)` in `IconButton`
@@ -373,28 +373,28 @@ minimum. Then give `JSONTreeRow`'s button `IconButton`'s metric so there is one 
 
 ## Wire-contract check
 
-`TaskEventSnapshot` and `TaskEventPresentationSnapshot` (`Models.swift:115-152`) match `TaskEventView`
+`TaskEventSnapshot` and `TaskEventPresentationSnapshot` (`Models.swift:110-147`) match `TaskEventView`
 and `TaskEventPresentation` (`src/events.ts:4-48`) field for field, including optionality. `Profile`,
 `ProfileFailureSnapshot`, `ScopeGrantSnapshot`, `TaskScopeSnapshot`, `MemorySnapshot` and
 `MemoryProjectSnapshot` all match their TS counterparts. Drift is confined to `TaskSnapshot`:
 
 | Field | Broker | `Models.swift` | Consequence |
 | --- | --- | --- | --- |
-| `tldr` | `Task.tldr?`, `TaskSummary.tldr?`, `waitTaskView` — documented "shown in the app's task list" (`types.ts:145-146`), and it rides every `wait` poll on purpose (`public-task.ts:143-145`) | **absent** | The caller's own one-line handle never reaches the UI. `displayLabel` (`Models.swift:106-112`) falls back from `title` straight to the prompt's first line. This is the one drift where the broker's contract explicitly names the app as the consumer. Fix: add `var tldr: String? = nil` and prefer `title ?? tldr ?? firstLine` in `displayLabel` — `TaskGroupingTests:195-206` already pins the `title`-wins and prompt-fallback ends, so a `tldr` case slots between them. |
-| `completion` (`code`, `blocked`, `reason`, `suggestedScope`) | always set with the terminal state (`tasks.ts:608-614`) | **absent** | `reason` survives via `task.error`, so nothing is lost for display. `suggestedScope` is: the broker computes a scope that would have survived the run's denials specifically so "resume is an approval, not a log-reading exercise" (`tasks.ts:671-674`), and the app's Resume button cannot see it. |
+| `tldr` | `Task.tldr?`, `TaskSummary.tldr?`, `waitTaskView` — documented "shown in the app's task list" (`types.ts:153-154`), and it rides every `wait` poll on purpose (`public-task.ts:155-157`) | **absent** | The caller's own one-line handle never reaches the UI. `displayLabel` (`Models.swift:101-107`) falls back from `title` straight to the prompt's first line. This is the one drift where the broker's contract explicitly names the app as the consumer. Fix: add `var tldr: String? = nil` and prefer `title ?? tldr ?? firstLine` in `displayLabel` — `TaskGroupingTests:195-206` already pins the `title`-wins and prompt-fallback ends, so a `tldr` case slots between them. |
+| `completion` (`code`, `blocked`, `reason`, `suggestedScope`) | always set with the terminal state (`tasks.ts:607-616`) | **absent** | `reason` survives via `task.error`, so nothing is lost for display. `suggestedScope` is: the broker computes a scope that would have survived the run's denials specifically so "resume is an approval, not a log-reading exercise" (`tasks.ts:670-673`), and the app's Resume button cannot see it. |
 | `scope`, `allowQuestions`, `timeoutMs`, `attempts` | on the wire for every task | **absent** | Never surfaced. `grants` is decoded instead and also unread (finding 7). |
-| `effort` | `Task.effort?` (`types.ts:125`) | present and rendered (`Models.swift:66-67`, header chip at `TaskDetailView.swift:177-183`) | No drift. Added after the first pass of this review; the pattern it follows — decode the optional, render a `TaskMetaChip`, absent means "caller set none" — is the one `tldr` should copy. |
+| `effort` | `Task.effort?` (`types.ts:132-133`) | present and rendered (`Models.swift:67`, header chip at `TaskDetailView.swift:180-181`) | No drift. Added after the first pass of this review; the pattern it follows — decode the optional, render a `TaskMetaChip`, absent means "caller set none" — is the one `tldr` should copy. |
 | `shippedPrompt`, `grantId` | on the wire | present, never read | Decoded and discarded every 2s (finding 7). |
-| `Profile.model` | required `string`; `normalizeProfile` and the PUT handler both substitute the provider default (`profile-input.ts:10`, `cli.ts:203-207`) | `String?` | Inbound, `nil` is unreachable — `resolvedModel` (`Models.swift:59`) exists to handle a case the broker cannot send. Outbound it is load-bearing: `ProfileFormView:41-47` uses `nil` to mean "use the provider default", and `Codable` omits the key so the broker fills it. Leave as is; the asymmetry is deliberate and worth the one-line comment it does not have. |
-| `TaskState.answered` | declared in `types.ts:6` and validated in `cli.ts:48`, but no code path ever assigns it — `answerTask` sets `state = 'queued'` and records an `answered` *event* (`store.ts:441-465`) | `case answered` with label, tint, dot and `isTerminal: true` (`DesignSystem.swift:155-222`) | Dead on both sides. The Swift mirror is faithful; the field is vestigial in the contract. Harmless except that `isTerminal` includes it (finding 2 territory). |
-| `BrokerState.memoryProjects` | always emitted (`cli.ts:105`) | `[MemoryProjectSnapshot]?` | Deliberate back-compat, documented at `Models.swift:167-169`. Correct. |
+| `Profile.model` | required `string`; `normalizeProfile` and the PUT handler both substitute the provider default (`profile-input.ts:10`, `cli.ts:203-207`) | `String?` | Inbound, `nil` is unreachable — `resolvedModel` (`Models.swift:59`) exists to handle a case the broker cannot send. Outbound it is load-bearing: `ProfileFormView:42-48` uses `nil` to mean "use the provider default", and `Codable` omits the key so the broker fills it. Leave as is; the asymmetry is deliberate and worth the one-line comment it does not have. |
+| `TaskState.answered` | declared in `types.ts:14` and validated in `cli.ts:48`, but no code path ever assigns it — `answerTask` sets `state = 'queued'` and records an `answered` *event* (`store.ts:458-464`) | `case answered` with label, tint, dot and `isTerminal: true` (`DesignSystem.swift:144-212`) | Dead on both sides. The Swift mirror is faithful; the field is vestigial in the contract. Harmless except that `isTerminal` includes it (finding 2 territory). |
+| `BrokerState.memoryProjects` | always emitted (`cli.ts:105`) | `[MemoryProjectSnapshot]?` | Deliberate back-compat, documented at `Models.swift:158-161`. Correct. |
 
 ## Nits
 
 - `swift/Sources/TaskDetailView.swift:97-98` — `.task(id: task.id)` and `resetEventState()` are both
   unreachable-on-change: `ContentView.swift:134` already applies `.id(task.id)`, so the view is recreated
   and `@State` starts at those exact defaults. Two mechanisms, one of which cannot fire.
-- `swift/Sources/CommandOutput.swift:24-26` — "the end of a run is what states the outcome, so the head
+- `swift/Sources/CommandOutput.swift:25-27` — "the end of a run is what states the outcome, so the head
   goes first" reads as *the head is kept*; the code drops the head (`:68` takes `.suffix`). Say "the head
   is dropped".
 - `swift/Tests/ReviewContentTests.swift:46-74` — `testOnlyKnownProtocolEventsAreTechnicalNoise` tests
@@ -406,7 +406,7 @@ and `TaskEventPresentation` (`src/events.ts:4-48`) field for field, including op
   three times; one `func failureTint(_ failed: Bool) -> AnyShapeStyle` helper covers all three.
 - `swift/Sources/DesignSystem.swift:4` — the doc comment promises "one hairline, one hit-target floor";
   neither is a token. `Color(nsColor: .separatorColor)` is written inline at `TaskDetailView.swift:568,753,759`
-  and the hit target at `:311`, `:937`, `ReviewContent.swift:420`.
+  and the hit target at `:300`, `:938-945`, `ReviewContent.swift:420`.
 - `swift/Sources/ContentView.swift:194-204` — `taskGroups` is recomputed by `listedTaskIDs` and again per
   `body`; `TaskOrganizer.organize` is cheap, but a single `let groups = taskGroups` at the top of `body`
   would make the dependency obvious.
@@ -428,7 +428,7 @@ and `TaskEventPresentation` (`src/events.ts:4-48`) field for field, including op
   "does this state deserve a word" rules, with a `.unknown` fallback so a new broker state cannot crash
   the sidebar. This is the pattern finding 8 asks to copy.
 - The comment culture generally. Comments explain the decision and the failure that motivated it
-  (`TaskDetailView.swift:89-94` on the scroll anchor, `DesignSystem.swift:282-284` on ending a repeating
+  (`TaskDetailView.swift:89-94` on the scroll anchor, `DesignSystem.swift:270-272` on ending a repeating
   animation, `Makefile:install` on retiring the stale broker). Preserve this when moving code.
 - `Package.swift` and the `Makefile` are minimal and do exactly one thing each.
 
