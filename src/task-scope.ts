@@ -157,21 +157,18 @@ export function scopeRefusedWrite(
     ...(scratchDir ? [scratchDir] : []),
   ];
   if (alwaysWritable.some((base) => resolved === base || within(base, resolved))) return undefined;
-  const allowed = scope.write.some((rule) => {
-    if (rule === "**") return resolved === cwd || within(cwd, resolved);
-    const base = resolve(cwd, rule.replace(/\/\*\*$/, ""));
-    return rule.endsWith("/**") ? resolved === base || within(base, resolved) : resolved === base;
-  });
-  return allowed ? undefined : resolved;
+  return scopeCoversPath(scope.write, cwd, target) ? undefined : resolved;
 }
 
 export function scopeCoversPath(rules: string[], cwd: string, target: string): boolean {
   const resolved = resolve(cwd, target);
-  return rules.some((rule) => {
-    if (rule === "**") return resolved === cwd || within(cwd, resolved);
-    const base = resolve(cwd, rule.replace(/\/\*\*$/, ""));
-    return rule.endsWith("/**") ? resolved === base || within(base, resolved) : resolved === base;
-  });
+  return rules.some((rule) => ruleCoversPath(rule, cwd, resolved));
+}
+
+function ruleCoversPath(rule: string, cwd: string, resolved: string): boolean {
+  if (rule === "**") return resolved === cwd || within(cwd, resolved);
+  const base = resolve(cwd, rule.replace(/\/\*\*$/, ""));
+  return rule.endsWith("/**") ? resolved === base || within(base, resolved) : resolved === base;
 }
 
 function within(base: string, target: string): boolean {

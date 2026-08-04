@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { normalizeTaskScope, sandboxedCommand, sandboxProfile, scopeRefusedWrite } from "../src/task-scope";
+import { normalizeTaskScope, sandboxedCommand, sandboxProfile, scopeCoversPath, scopeRefusedWrite } from "../src/task-scope";
 import type { Profile } from "../src/types";
 
 const roots: string[] = [];
@@ -407,5 +407,31 @@ describe("scopeRefusedWrite", () => {
     expect(scopeRefusedWrite("/tmp/x.txt", cwd, { read: [], write: [] })).toBeUndefined();
     expect(scopeRefusedWrite("/private/var/folders/ab/T/x", cwd, { read: [], write: [] })).toBeUndefined();
     expect(scopeRefusedWrite("/scratch/dir/x", cwd, { read: [], write: [] }, "/scratch/dir")).toBeUndefined();
+  });
+
+  test("scopeRefusedWrite and scopeCoversPath agree on the same rule", () => {
+    // Targets outside the always-writable temp set: a write is refused exactly
+    // when the scope does not cover it. A future drift between the two matchers
+    // fails here instead of silently granting or blocking one side.
+    const targets = [
+      "src/api.ts",
+      "docs/a.md",
+      "docs",
+      "docs/deep/leaf.txt",
+      "doc.md",
+      "../escape.txt",
+      "/Users/other/x",
+      "missing/path/future.txt",
+      ".config/dotfile",
+      "api.ts",
+      "api.ts.bak",
+    ];
+    for (const write of [["**"], ["docs/**"], ["docs"], ["api.ts"], ["docs/**", "api.ts"], [], ["missing"], ["docs/"]]) {
+      const scope = { read: ["**"] as string[], write };
+      for (const target of targets) {
+        expect(scopeCoversPath(write, cwd, target))
+          .toBe(scopeRefusedWrite(target, cwd, scope) === undefined);
+      }
+    }
   });
 });
