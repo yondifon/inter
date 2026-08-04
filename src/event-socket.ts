@@ -2,6 +2,7 @@ import { unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { databasePath, stateStore } from "./store";
 import { unknownTaskMessage, waitForTasks, type WaitedTaskEvent } from "./tasks";
+import { settled as settledState } from "./public-task";
 import type { Task, TaskState } from "./types";
 
 // ---- Frame types (EC-001) ----
@@ -347,6 +348,21 @@ export function startEventSocket(options: EventSocketOptions): EventSocketHandle
 
       // hasMore: go straight back for the next chunk without waiting.
       if (waited.hasMore) continue;
+
+      // A task in an attention state makes the waiter return instantly no
+      // matter the cursor, so leaving it in the set would turn this loop into
+      // a hot spin of empty batches — and a fan-out with one settled sibling
+      // would flood the stream for as long as the others run. Dropping settled
+      // ids mirrors the watch client's pending set, and only after the trace
+      // behind them is drained (the hasMore continue above). When none remain
+      // the client has everything it came for; the close is its move, because
+      // ending here would race the final batch's delivery.
+      const states = new Map(waited.tasks.map((task) => [task.id, task.state]));
+      state.taskIds = state.taskIds.filter((id) => {
+        const taskState = states.get(id);
+        return taskState === undefined || !settledState(taskState);
+      });
+      if (state.taskIds.length === 0) return;
     }
 
     // Cleanup: if the loop ended on its own (e.g. abort or write failure),

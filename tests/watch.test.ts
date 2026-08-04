@@ -6,6 +6,7 @@ import { closeStateStore, stateStore } from "../src/store";
 import { DEFAULT_WATCH_TIMEOUT_MS, parseWatchArgs, runWatch, watchCommand } from "../src/watch";
 import { startEventSocket } from "../src/event-socket";
 import { appendTaskEvent } from "../src/tasks";
+import { MCP_CONTRACT_VERSION } from "../src/version";
 import type { Task, TaskState } from "../src/types";
 
 let root: string;
@@ -427,7 +428,7 @@ describe("event socket watch", () => {
   beforeAll(() => {
     sockHandle = startEventSocket({
       path: sockPath(),
-      hello: { version: "0.0.0-test", mcpContractVersion: 21 },
+      hello: { version: "0.0.0-test", mcpContractVersion: MCP_CONTRACT_VERSION },
       keepaliveMs: 5_000,
     });
   });
@@ -591,7 +592,7 @@ describe("event socket watch", () => {
     // Restart the socket server for subsequent tests.
     sockHandle = startEventSocket({
       path: sockPath(),
-      hello: { version: "0.0.0-test", mcpContractVersion: 21 },
+      hello: { version: "0.0.0-test", mcpContractVersion: MCP_CONTRACT_VERSION },
       keepaliveMs: 5_000,
     });
   });
@@ -627,7 +628,7 @@ describe("event socket watch — deadline", () => {
         data(socket) {
           setTimeout(() => {
             try {
-              socket.write(JSON.stringify({ hello: { version: "0.0.0-test", mcpContractVersion: 21 } }) + "\n");
+              socket.write(JSON.stringify({ hello: { version: "0.0.0-test", mcpContractVersion: MCP_CONTRACT_VERSION } }) + "\n");
               socket.write(JSON.stringify({ events: [], tasks: [], cursor: 0, hasMore: false }) + "\n");
             } catch { /* test already moved on */ }
           }, 600);

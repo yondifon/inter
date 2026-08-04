@@ -485,6 +485,45 @@ describe("event socket server", () => {
 });
 
 /**
+ * A settled task puts the waiter in an attention state that returns instantly
+ * no matter the cursor. Before the server dropped settled ids from its wait
+ * set, that turned the loop into a hot spin — one empty batch per iteration,
+ * for as long as the client stayed connected, and a fan-out with one settled
+ * sibling flooded the stream while the others ran.
+ */
+describe("settled tasks leave the server wait set", () => {
+  test("a settled task yields one batch, then silence, and no server-side close", async () => {
+    const path = join(root, "h.sock");
+    const task = seedTask("completed");
+    const handle = startEventSocket({
+      path,
+      hello: { version: "0", mcpContractVersion: 21 },
+      // Long enough that any further batch inside the window is spin, not keepalive.
+      keepaliveMs: 60_000,
+    });
+    try {
+      const conn = await connect(path);
+      subscribe(conn, [task.id]);
+      await waitForFrames(conn, 2, 2_000);
+      // Let a spinning loop hang itself: at even 1ms per iteration this window
+      // would collect hundreds of extra batches.
+      await Bun.sleep(400);
+      const all = frames(conn);
+      // Hello plus exactly one batch carrying the settled task.
+      expect(all.length).toBe(2);
+      const batch = all[1] as unknown as BatchFrame;
+      expect(batch.tasks.some((t) => t.id === task.id && t.state === "completed")).toBe(true);
+      // The close is the client's move — the server must still be there.
+      const written = conn.socket.write("ignored\n");
+      expect(written).toBeGreaterThanOrEqual(0);
+      conn.socket.end();
+    } finally {
+      handle.stop();
+    }
+  });
+});
+
+/**
  * The client advances its death cursor as frames are ENQUEUED, and death drops
  * whatever is still queued — so `SocketStreamDeath.lastCursor` can point past
  * frames the consumer never saw. This test pins that semantic down: a consumer

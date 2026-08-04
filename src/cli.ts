@@ -484,7 +484,7 @@ async function createMcpServer(): Promise<McpServer> {
     await routeModel(prompt, { modelHint, preference, cwd }),
   ));
   server.registerTool("inspect", {
-    description: "Get one task's record: output, scope, grant, spend, and completion. By default the three heaviest fields (prompt, shippedPrompt and attempts) are opt-in — pass `fields: [\"all\"]` for the full snapshot. Use after wait reports something worth reading in full.",
+    description: "Get one task's record: output, scope, grant, spend, and completion. By default the three heaviest fields (prompt, shippedPrompt and attempts) are opt-in — pass `fields: [\"all\"]` for the full snapshot. The read that a settled watch line or a wait response hands off to.",
     inputSchema: z.object({
       taskId: z.string().describe("Inter task id returned by delegate, reply, or resume."),
       fields: taskFieldSchema,
@@ -495,7 +495,7 @@ async function createMcpServer(): Promise<McpServer> {
     return result(taskView(task, fields ?? DEFAULT_INSPECT_FIELDS));
   });
   server.registerTool("wait", {
-    description: "Check one to eight delegated tasks for new progress, a question, or completion. Blocks for real — up to 30s — and until: \"attention\" is the way to follow a task: it returns the moment the task asks a question or reaches a terminal state. Calling it again after it returns empty is the correct way to keep following, not a mistake. Returns only what moves — state, updatedAt, and how the run ended; pass `fields: [\"output\"]` to read a finished run without a second call. To follow a task without spending a turn on it at all, background the `" + watchCommand() + "` command instead. Heartbeats do not count as progress.",
+    description: "The right call for a short deliberate block: a sanity check right after dispatch, a reply-then-wait exchange, or a harness with no background shell. Checks one to eight delegated tasks for new progress, a question, or completion, and blocks for real — up to 30s regardless of what timeoutMs asks for. To actually follow a task, background `" + watchCommand() + "` in your own shell tool instead: it sleeps for free and reports the moment the task needs you, no turn spent watching it. When you do call wait, until: \"attention\" is what makes the block worth it — it returns the moment a task asks a question or reaches a terminal state, and calling it again after it returns empty is the correct way to keep checking, not a mistake. Returns only what moves — state, updatedAt, and how the run ended; pass `fields: [\"output\"]` to read a finished run without a second call. Heartbeats do not count as progress.",
     inputSchema: z.object({
       taskIds: z.array(z.string()).min(1).max(8)
         .describe("Inter task ids to check together."),
@@ -528,7 +528,7 @@ async function createMcpServer(): Promise<McpServer> {
     inputSchema: z.object({}),
   }, async () => result({ status: "ok", version: VERSION, mcpContractVersion: MCP_CONTRACT_VERSION }));
   server.registerTool("tasks", {
-    description: "Find recent delegated tasks by state, time, profile, or fan-out batch. Returns concise summaries for discovery; use inspect for one task in full, or wait to follow active work.",
+    description: "Find recent delegated tasks by state, time, profile, or fan-out batch. Returns concise summaries for discovery; use inspect for one task in full, or background watch to follow active work.",
     inputSchema: z.object({
       limit: z.number().int().min(1).max(100).default(20),
       state: taskStateSchema.optional().describe("Only tasks currently in this state."),

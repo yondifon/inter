@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { DELEGATE_DESCRIPTION, HANDOFF_DESCRIPTION, MCP_INSTRUCTIONS } from "../src/mcp-copy";
+import { watchCommand } from "../src/watch";
 
 describe("MCP consent copy", () => {
   test("states what leaves the machine and who approves it", () => {
@@ -42,11 +43,17 @@ describe("MCP consent copy", () => {
     expect(DELEGATE_DESCRIPTION).toContain("provider session IDs are private");
   });
 
-  test("tells callers to follow with wait rather than forget a task", () => {
+  test("tells callers to background watch rather than forget a task", () => {
+    // The default follow is a backgrounded `inter watch`, not a foreground
+    // wait loop — the command has to be the one `watchCommand()` derives,
+    // never a hardcoded literal that can drift from how this process started.
     expect(MCP_INSTRUCTIONS).toContain("Dispatch returns immediately");
-    expect(MCP_INSTRUCTIONS).toContain('until: "attention"');
-    expect(MCP_INSTRUCTIONS).toContain("return control");
+    expect(MCP_INSTRUCTIONS).toContain(watchCommand());
+    expect(MCP_INSTRUCTIONS).toContain("default to backgrounding");
+    expect(MCP_INSTRUCTIONS).toContain("short deliberate block");
     expect(DELEGATE_DESCRIPTION).toContain("Dispatch returns immediately");
+    expect(DELEGATE_DESCRIPTION).toContain(watchCommand());
+    expect(DELEGATE_DESCRIPTION).toContain("short deliberate block");
   });
 
   test("positions delegation for second opinions, capacity, and refused work", () => {

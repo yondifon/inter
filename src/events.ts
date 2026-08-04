@@ -135,6 +135,11 @@ export function taskEventView(event: TaskEvent, provider: Profile["provider"]): 
   const status = string(state.status) ?? string(subject.status);
   const tool = string(subject.tool) ?? string(subject.name) ?? string(state.tool);
   const normalizedTool = tool?.toLowerCase();
+  // Codex names the MCP server outside the tool name (`item.server`), unlike
+  // Claude's self-contained `mcp__server__function`. Folded into the title the
+  // same way, a failing call reads "Node Repl: Js failed" instead of just
+  // naming the generic tool ("Js failed") with no clue which server it hit.
+  const server = string(subject.server);
   const input = Object.keys(object(state.input)).length ? object(state.input) : object(subject.input);
   const presentation = toolPresentation(tool, input, firstString(state.title, subject.title), state) ??
     subjectPresentation(subjectType, subject);
@@ -150,6 +155,7 @@ export function taskEventView(event: TaskEvent, provider: Profile["provider"]): 
     subject.id, payload.tool_use_id,
   );
   const actionId = action ? { actionId: action } : {};
+  const meta = findToolMeta(payload, subject.id);
 
   if (subjectType.includes("error") || status === "failed" || status === "error") {
     const nested = object(subject.error);
@@ -157,7 +163,19 @@ export function taskEventView(event: TaskEvent, provider: Profile["provider"]): 
     // `state.error`; the reason is the point of the row, so it joins whatever
     // the arguments already said — same pairing as a failed hook.
     const error = firstString(nested.message, object(nested.data).message, subject.error, state.error);
-    return { ...base, kind: "error", phase: "failed", title: tool ? `${toolTitle(tool)} failed` : "Agent error",
+    // Codex reports two very different things through this same `error` item
+    // shape: a genuine abort (out of credits, a rejected request) and a
+    // notice the run carries on past (a deprecated config flag, a
+    // context-budget trim). Every distinct message seen in the corpus for
+    // this shape is one of the two notices below; anything else is treated
+    // as a real, terminal error, since missing a real failure is worse than
+    // one unnecessary alarm.
+    if (!tool && detail && /is deprecated|shortened to fit the/.test(detail)) {
+      return { ...base, kind: "lifecycle", phase: "info", title: "Agent notice", detail,
+        presentation: { type: "signal", level: "info", text: detail }, ...actionId, rawText };
+    }
+    return { ...base, kind: "error", phase: "failed",
+      title: tool ? `${qualifiedToolTitle(tool, server, meta)} failed` : "Agent error",
       detail: joinDetail(detail, error), ...actionId, rawText };
   }
   // Tool results echo work the matching tool event already reported, so the row
@@ -180,15 +198,27 @@ export function taskEventView(event: TaskEvent, provider: Profile["provider"]): 
   }
   // "Reasoning", not "Thinking": the trace collapses same-titled "Thinking"
   // ticker events into one pulse line, and prose must not be pulled into it.
-  // A block with no prose (redacted thinking carries only a signature) marks
-  // that the model paused, which is not worth a row.
+  // A block with no prose (redacted thinking carries only a signature) still
+  // marks that the model paused to reason — the pulse line and the token
+  // ticker already told the reader that in real time, so this block earns no
+  // new row of its own. It still needs a non-empty detail, though: a blank
+  // "Reasoning" title with nothing under it, even folded away, reads as a
+  // rendering bug rather than "nothing happened here worth a line".
   if (subjectType.includes("reason") || subjectType.includes("think")) {
-    return { ...base, kind: "reasoning", phase: statusPhase(status), title: "Reasoning", detail,
+    const redacted = subject.thinking === "" && !detail;
+    return { ...base, kind: "reasoning", phase: statusPhase(status), title: "Reasoning",
+      detail: detail ?? (redacted ? "Redacted" : undefined),
       ...(detail ? {} : { minor: true }), rawText };
   }
   if (subjectType.includes("command") || normalizedTool === "bash" || normalizedTool === "run_command") {
+    // Codex's command_execution items carry no tool name, so the previous
+    // `tool ?? "Command"` fallback titled every one of them "Command" — the
+    // reader had to open each row to tell them apart. Naming it "Bash" (via
+    // toolTitle, same as Claude's own Bash calls) also unifies opencode's
+    // split between lowercase "bash" (from the raw tool string on this path)
+    // and capitalized "Bash" (from toolTitle on the tool_execution_* path).
     return { ...base, kind: "command", phase: statusPhase(status),
-      title: tool ?? "Command", detail, presentation, ...actionId, rawText };
+      title: tool ? toolTitle(tool) : "Bash", detail, presentation, ...actionId, rawText };
   }
   if (subjectType.includes("file") || ["read", "write", "edit"].includes(normalizedTool ?? "")) {
     return { ...base, kind: "file", phase: statusPhase(status),
@@ -201,7 +231,8 @@ export function taskEventView(event: TaskEvent, provider: Profile["provider"]): 
     const toolDetail = presentationDetail(presentation) ?? compactOutput(string(state.output));
     if (tool || presentation || toolDetail) {
       return { ...base, kind: "tool", phase: statusPhase(status),
-        title: tool ? toolTitle(tool) : "Tool call", detail: toolDetail, presentation, ...actionId, rawText };
+        title: tool ? qualifiedToolTitle(tool, server, meta) : "Tool call",
+        detail: toolDetail, presentation, ...actionId, rawText };
     }
     // No name, no readable argument, no readable output: nothing to label.
     // Fall through so a label-less part stays in the raw fallback below
@@ -214,7 +245,14 @@ export function taskEventView(event: TaskEvent, provider: Profile["provider"]): 
     return { ...base, kind: "message", phase: statusPhase(status),
       title: "Agent message", detail, presentation, rawText };
   }
-  return { ...base, kind: "raw", phase: statusPhase(status), title: humanize(subjectType), detail, rawText };
+  // Codex's todo list and web search items fall through to here uncaught, and
+  // `presentation` was computed above (subjectPresentation already handles
+  // both) but never carried onto the row — the todo count showed with no
+  // chip behind it, and a search query was dropped outright since nothing
+  // upstream of this line reads `subject.query`. Both are fixed by simply
+  // returning what was already built instead of leaving it on the floor.
+  return { ...base, kind: "raw", phase: statusPhase(status), title: humanize(subjectType),
+    detail, presentation, rawText };
 }
 
 type EventBase = Pick<TaskEventView, "id" | "taskId" | "source" | "createdAt">;
@@ -258,6 +296,28 @@ function knownAgentEvent(
           servers ? `${servers} MCP server${servers === 1 ? "" : "s"}` : undefined,
           string(payload.permissionMode) ? `permission ${payload.permissionMode}` : undefined,
         ), ...raw };
+    }
+    // A claude worker spawning its own subagent (the `Task` tool) reports the
+    // spawn and its outcome as two system events, both tagged with the
+    // spawning call's `tool_use_id` — the trace folds them on that id into
+    // one row that opens here and settles to its final status below. Titled
+    // "Subagent…", never "Task queued"/"Task completed": those are the
+    // broker's own lifecycle rows for the delegated task itself, and reusing
+    // them would read as the wrong task finishing.
+    if (subtype === "task_started") {
+      const description = string(payload.description);
+      const taskType = string(payload.task_type);
+      const actionId = firstString(payload.tool_use_id, payload.toolUseId);
+      return { ...base, kind: "lifecycle", phase: "started", title: "Subagent started",
+        detail: joinDetail(description, taskType ? humanize(taskType) : undefined),
+        ...(actionId ? { actionId } : {}), ...raw };
+    }
+    if (subtype === "task_notification") {
+      const status = string(payload.status);
+      const actionId = firstString(payload.tool_use_id, payload.toolUseId);
+      return { ...base, kind: "lifecycle", phase: statusPhase(status),
+        title: `Subagent ${status ?? "updated"}`, detail: string(payload.summary),
+        ...(actionId ? { actionId } : {}), ...raw };
     }
     if (subtype === "api_retry") {
       const attempt = Number(payload.attempt ?? 0);
@@ -835,7 +895,53 @@ const TOOL_LABELS: Record<string, string> = {
   update_plan: "Plan update",
 };
 
-function toolTitle(tool: string): string {
+interface McpToolMeta {
+  displayName?: string;
+  serverDisplayName?: string;
+}
+
+/// A tool_use block's own `tool_use_meta` entry, keyed by the id it names —
+/// present only on the claude assistant message that made the call, never on
+/// the hook events reporting the same call. `subject.id` is that call's id
+/// for the shapes this function is fed (see the `action` id derivation
+/// above); other providers never populate `tool_use_meta`, so this quietly
+/// returns undefined for them.
+function findToolMeta(payload: Record<string, any>, id: unknown): McpToolMeta | undefined {
+  const key = string(id);
+  if (!key || !Array.isArray(payload.tool_use_meta)) return undefined;
+  const entry = payload.tool_use_meta.map(object).find((candidate) => candidate.id === key);
+  if (!entry) return undefined;
+  return { displayName: string(entry.display_name), serverDisplayName: string(entry.server_display_name) };
+}
+
+/// `mcp__<server>__<function>` humanized whole ("Mcp Inter Database Local
+/// Query") collapses three semantic parts — the MCP marker, the server, the
+/// function — into unreadable prose. Claude also ships a `tool_use_meta`
+/// entry with the names it already showed the user; prefer that when the
+/// caller has it. The hook events reporting the same call carry only the raw
+/// name, never the meta, so they fall back to parsing it — in the same
+/// "server: function" shape, so a live trace doesn't flip titles as the hook
+/// settles onto the row the assistant message opened.
+function mcpToolTitle(name: string, meta?: McpToolMeta): string {
+  if (meta?.displayName) {
+    return meta.serverDisplayName ? `${capitalize(meta.serverDisplayName)}: ${meta.displayName}` : meta.displayName;
+  }
+  const parts = name.split("__");
+  if (parts.length < 3) return humanize(name);
+  return `${humanize(parts[1]!)}: ${humanize(parts.slice(2).join("__"))}`;
+}
+
+/// Codex names an MCP call's server outside the tool name entirely
+/// (`item.server`), rather than folding it into the name the way Claude's
+/// `mcp__` prefix does — so the server is layered on here instead of inside
+/// `toolTitle`.
+function qualifiedToolTitle(tool: string, server?: string, meta?: McpToolMeta): string {
+  const title = toolTitle(tool, meta);
+  return server ? `${humanize(server)}: ${title}` : title;
+}
+
+function toolTitle(tool: string, meta?: McpToolMeta): string {
+  if (tool.startsWith("mcp__")) return mcpToolTitle(tool, meta);
   const normalized = tool.toLowerCase();
   const known = TOOL_LABELS[normalized];
   if (known) return known;
@@ -975,6 +1081,13 @@ function subjectPresentation(
   if (subjectType.includes("todo") && items.length) {
     const completed = items.filter((item) => object(item).completed === true).length;
     return { type: "todo", completed, total: items.length };
+  }
+  // Codex opens a web search with an empty `query` and fills it in on the
+  // completed item — the empty string is dropped like any other blank field,
+  // so the row still says nothing until the search actually names something.
+  if (subjectType.includes("web_search")) {
+    const query = firstString(subject.query);
+    if (query) return { type: "tool", text: truncate(query, 120) };
   }
   return undefined;
 }

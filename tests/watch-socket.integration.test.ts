@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { closeStateStore, stateStore } from "../src/store";
 import { startEventSocket, type EventSocketHandle } from "../src/event-socket";
+import { MCP_CONTRACT_VERSION } from "../src/version";
 import type { Task, TaskState } from "../src/types";
 
 /**
@@ -157,7 +158,7 @@ describe("watch over the event socket, end to end", () => {
   test("AC-001: socket mode streams and settles with no database at all", async () => {
     server = startEventSocket({
       path: sockPath,
-      hello: { version: "0.0.0-test", mcpContractVersion: 21 },
+      hello: { version: "0.0.0-test", mcpContractVersion: MCP_CONTRACT_VERSION },
       keepaliveMs: 1_000,
     });
     const task = seedTask("running");
@@ -203,7 +204,7 @@ describe("watch over the event socket, end to end", () => {
   test("AC-003: killing the server mid-run fails over with every line exactly once", async () => {
     server = startEventSocket({
       path: sockPath,
-      hello: { version: "0.0.0-test", mcpContractVersion: 21 },
+      hello: { version: "0.0.0-test", mcpContractVersion: MCP_CONTRACT_VERSION },
       keepaliveMs: 1_000,
     });
     const task = seedTask("running");

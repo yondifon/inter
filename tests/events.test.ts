@@ -1189,4 +1189,344 @@ describe("task event views", () => {
     expect(view.detail).toBe("3 items");
     expect(view.detail).not.toContain("[{");
   });
+
+  test("names a claude subagent spawn instead of folding it away blank", () => {
+    // Verbatim from a real run: a claude worker spawning its own subagent via
+    // the Task tool reports the spawn as a system event tagged with the
+    // calling tool_use_id — previously an unrecognized subtype, marked minor
+    // with no detail at all.
+    const view = taskEventView({
+      id: 60,
+      taskId: "task",
+      type: "agent.system",
+      state: "running",
+      payload: {
+        type: "system", subtype: "task_started",
+        task_id: "b6ti7qy50", tool_use_id: "toolu_01DPhvGCCNn7wEEhYhBKZNTr",
+        description: "Search for stale references to retired surface", task_type: "local_bash",
+      },
+      createdAt: "now",
+    }, "claude");
+    expect(view.kind).toBe("lifecycle");
+    expect(view.phase).toBe("started");
+    expect(view.title).toBe("Subagent started");
+    expect(view.title).not.toBe("Task queued");
+    expect(view.detail).toBe("Search for stale references to retired surface · Local Bash");
+    expect(view.actionId).toBe("toolu_01DPhvGCCNn7wEEhYhBKZNTr");
+    expect(view.minor).toBeUndefined();
+  });
+
+  test("names a claude subagent notification with its outcome and summary", () => {
+    const view = taskEventView({
+      id: 61,
+      taskId: "task",
+      type: "agent.system",
+      state: "running",
+      payload: {
+        type: "system", subtype: "task_notification",
+        task_id: "bdjwhal8o", tool_use_id: "toolu_01WzcJVHbHH8LLM15H2ioALZ",
+        status: "completed", output_file: "",
+        summary: "Count child_task_id occurrences in old compiled bundles",
+      },
+      createdAt: "now",
+    }, "claude");
+    expect(view.kind).toBe("lifecycle");
+    expect(view.phase).toBe("completed");
+    expect(view.title).toBe("Subagent completed");
+    expect(view.title).not.toBe("Task completed");
+    expect(view.detail).toBe("Count child_task_id occurrences in old compiled bundles");
+    expect(view.actionId).toBe("toolu_01WzcJVHbHH8LLM15H2ioALZ");
+    expect(view.minor).toBeUndefined();
+  });
+
+  test("names an MCP tool call from tool_use_meta instead of humanizing the raw name", () => {
+    // Verbatim from a real run: the assistant's tool_use block names the call
+    // `mcp__inter-database-local__query`, and claude ships a `tool_use_meta`
+    // entry alongside with the display names it actually showed the user.
+    const view = taskEventView({
+      id: 62,
+      taskId: "task",
+      type: "agent.assistant",
+      state: "running",
+      payload: {
+        type: "assistant",
+        message: {
+          model: "claude-opus-5", role: "assistant",
+          content: [{
+            type: "tool_use", id: "toolu_018e8vKc5LwEMYVmyq6pE6n6", name: "mcp__inter-database-local__query",
+            input: { sql: "select id, profile_id, state, length(prompt) from tasks where id like '82ade75a%'" },
+          }],
+        },
+        tool_use_meta: [{
+          id: "toolu_018e8vKc5LwEMYVmyq6pE6n6", display_name: "Query", server_display_name: "inter [database]",
+        }],
+      },
+      createdAt: "now",
+    }, "claude");
+    expect(view.kind).toBe("tool");
+    expect(view.title).toBe("Inter [database]: Query");
+    expect(view.title).not.toContain("Mcp Inter Database Local Query");
+    expect(view.detail).toBe(
+      "Sql: select id, profile_id, state, length(prompt) from tasks where id like '82ade75a…",
+    );
+    expect(view.actionId).toBe("toolu_018e8vKc5LwEMYVmyq6pE6n6");
+  });
+
+  test("parses an MCP tool name on the hook path, which never carries tool_use_meta", () => {
+    // The PreToolUse hook reporting the same call as the test above — same
+    // tool_use_id, but the hook payload never carries tool_use_meta, so the
+    // title must come from parsing `mcp__<server>__<function>` itself instead
+    // of falling back to the old humanized-whole-string title.
+    const view = taskEventView({
+      id: 63,
+      taskId: "task",
+      type: "agent.hook",
+      state: "running",
+      payload: {
+        hook_event_name: "PreToolUse",
+        tool_name: "mcp__inter-database-local__query",
+        tool_input: { sql: "select id, profile_id, state, length(prompt) from tasks where id like '82ade75a%'" },
+        tool_use_id: "toolu_018e8vKc5LwEMYVmyq6pE6n6",
+      },
+      createdAt: "now",
+    }, "claude");
+    expect(view.title).toBe("Inter Database Local: Query");
+    expect(view.title).not.toBe("Mcp Inter Database Local Query");
+    expect(view.actionId).toBe("toolu_018e8vKc5LwEMYVmyq6pE6n6");
+  });
+
+  test("marks redacted claude thinking with a non-empty detail instead of a blank row", () => {
+    // Verbatim from a real run: the thinking block's prose is stripped to
+    // just a signature. Previously this rendered `detail: undefined` with no
+    // way to tell "the model paused here" from "there is nothing to show".
+    const view = taskEventView({
+      id: 64,
+      taskId: "task",
+      type: "agent.assistant",
+      state: "running",
+      payload: {
+        type: "assistant",
+        message: {
+          model: "claude-sonnet-5", role: "assistant",
+          content: [{ type: "thinking", thinking: "", signature: "EpECCokBCBAYAipAzdc5E1e" }],
+        },
+      },
+      createdAt: "now",
+    }, "claude");
+    expect(view.kind).toBe("reasoning");
+    expect(view.title).toBe("Reasoning");
+    expect(view.detail).toBe("Redacted");
+    expect(view.minor).toBe(true);
+  });
+
+  test("titles a codex command by its tool instead of a bare \"Command\"", () => {
+    // Verbatim from a real run: codex's command_execution items carry no
+    // `tool`/`name` field at all, so `title: tool ?? "Command"` left every
+    // command row titled identically.
+    const view = taskEventView({
+      id: 65,
+      taskId: "task",
+      type: "agent.item.completed",
+      state: "running",
+      payload: {
+        item: {
+          id: "item_2", type: "command_execution",
+          command: "/bin/zsh -lc \"sed -n '1,240p' README.md\"",
+          exit_code: 0, status: "completed",
+        },
+      },
+      createdAt: "now",
+    }, "codex");
+    expect(view.kind).toBe("command");
+    expect(view.title).toBe("Bash");
+    expect(view.title).not.toBe("Command");
+  });
+
+  test("titles opencode's bash tool_use the same as its tool_execution_start counterpart", () => {
+    // Verbatim from a real run: the same bash call rendered lowercase "bash"
+    // (title: tool ?? "Command" reading the raw tool string) on this dispatch
+    // path, and capitalized "Bash" (via toolTitle) on the tool_execution_*
+    // path — one tool, two titles.
+    const view = taskEventView({
+      id: 66,
+      taskId: "task",
+      type: "agent.tool_use",
+      state: "running",
+      payload: {
+        type: "tool_use",
+        part: {
+          type: "tool", tool: "bash", callID: "call_01_D2dSAosk5AMHpRjTcPkU9052",
+          state: {
+            status: "completed",
+            input: { command: "ls docs/inter-test-app-reviews/ 2>/dev/null || echo \"no dir\"", workdir: "/repo" },
+          },
+        },
+      },
+      createdAt: "now",
+    }, "opencode");
+    expect(view.kind).toBe("command");
+    expect(view.title).toBe("Bash");
+  });
+
+  test("keeps a codex deprecation notice visible without reading as a terminal failure", () => {
+    // Verbatim from a real run: both distinct messages the "error" item shape
+    // actually carries in the corpus are non-blocking notices the run
+    // continues past, not aborts — yet both rendered kind: "error", phase:
+    // "failed", visually indistinguishable from a real crash.
+    const deprecation = taskEventView({
+      id: 67,
+      taskId: "task",
+      type: "agent.item.completed",
+      state: "running",
+      payload: {
+        item: {
+          id: "item_0", type: "error",
+          message: "`[features].collab` is deprecated. Use `[features].multi_agent` instead. "
+            + "(Enable it with `--enable multi_agent` or `[features].multi_agent` in config.toml. "
+            + "See https://developers.openai.com/codex/config-basic#feature-flags for details.)",
+        },
+      },
+      createdAt: "now",
+    }, "codex");
+    expect(deprecation.kind).toBe("lifecycle");
+    expect(deprecation.phase).toBe("info");
+    expect(deprecation.title).toBe("Agent notice");
+    expect(deprecation.presentation).toEqual({
+      type: "signal", level: "info", text: deprecation.detail!,
+    });
+
+    const budget = taskEventView({
+      id: 68,
+      taskId: "task",
+      type: "agent.item.completed",
+      state: "running",
+      payload: {
+        item: {
+          id: "item_1", type: "error",
+          message: "Skill descriptions were shortened to fit the 2% skills context budget. Codex can still "
+            + "see every skill, but some descriptions are shorter. Disable unused skills or plugins to leave "
+            + "more room for the rest.",
+        },
+      },
+      createdAt: "now",
+    }, "codex");
+    expect(budget.kind).toBe("lifecycle");
+    expect(budget.title).toBe("Agent notice");
+  });
+
+  test("still treats an unrecognized codex agent error as a real, terminal failure", () => {
+    // The notice allowlist is narrow by design — anything that doesn't match
+    // one of the two known non-blocking patterns must stay a real error, or a
+    // genuine abort (like the workspace running out of credits) would read as
+    // a harmless notice instead of the trace's stop sign.
+    const view = taskEventView({
+      id: 69,
+      taskId: "task",
+      type: "agent.item.completed",
+      state: "running",
+      payload: {
+        item: { id: "item_0", type: "error", message: "Your workspace is out of credits." },
+      },
+      createdAt: "now",
+    }, "codex");
+    expect(view.kind).toBe("error");
+    expect(view.phase).toBe("failed");
+    expect(view.title).toBe("Agent error");
+  });
+
+  test("names a failing codex MCP tool by its server, not just the generic tool", () => {
+    // Verbatim from a real run: a failed `js` call to the `node_repl` MCP
+    // server titled itself "Js failed" — the same generic title any other
+    // failing "js" tool would get, with no way to tell which server it was.
+    const view = taskEventView({
+      id: 70,
+      taskId: "task",
+      type: "agent.item.completed",
+      state: "running",
+      payload: {
+        item: {
+          id: "item_5", type: "mcp_tool_call", server: "node_repl", tool: "js",
+          arguments: { code: "var fs = ...", title: "Read Sites guidance" },
+          result: null, error: { message: "user cancelled MCP tool call" }, status: "failed",
+        },
+      },
+      createdAt: "now",
+    }, "codex");
+    expect(view.kind).toBe("error");
+    expect(view.title).toBe("Node Repl: Js failed");
+    expect(view.detail).toBe("user cancelled MCP tool call");
+  });
+
+  test("names a running codex MCP tool by its server the same way as its failure", () => {
+    const view = taskEventView({
+      id: 71,
+      taskId: "task",
+      type: "agent.item.started",
+      state: "running",
+      payload: {
+        item: {
+          id: "item_5", type: "mcp_tool_call", server: "node_repl", tool: "js",
+          arguments: { code: "var fs = ...", title: "Read Sites guidance" },
+          result: null, error: null, status: "in_progress",
+        },
+      },
+      createdAt: "now",
+    }, "codex");
+    expect(view.kind).toBe("tool");
+    expect(view.title).toBe("Node Repl: Js");
+  });
+
+  test("keeps a codex todo list's presentation instead of dropping it on the raw fallback", () => {
+    // Verbatim from a real run: `subjectPresentation` already builds a todo
+    // presentation for this shape, but the raw fallback branch that returns
+    // it never included `presentation` in the view — the count showed with
+    // no chip behind it.
+    const view = taskEventView({
+      id: 72,
+      taskId: "task",
+      type: "agent.item.updated",
+      state: "running",
+      payload: {
+        item: {
+          id: "item_5", type: "todo_list",
+          items: [
+            { text: "Create semantic Dispatch Board HTML and CSS", completed: true },
+            { text: "Write phase 1 report", completed: true },
+            { text: "Run targeted validation and verify scope", completed: true },
+          ],
+        },
+      },
+      createdAt: "now",
+    }, "codex");
+    expect(view.kind).toBe("raw");
+    expect(view.title).toBe("Todo List");
+    expect(view.detail).toBe("3 of 3 complete");
+    expect(view.presentation).toEqual({ type: "todo", completed: 3, total: 3 });
+  });
+
+  test("surfaces a codex web search's query instead of an empty row", () => {
+    // Verbatim from a real run: `item.query` was never read anywhere in the
+    // fallback path, so the row showed a bare "Web Search" title with no clue
+    // what was searched.
+    const view = taskEventView({
+      id: 73,
+      taskId: "task",
+      type: "agent.item.completed",
+      state: "running",
+      payload: {
+        item: {
+          id: "call_9hlKFhbRKGPBPENcNIRsmxgU", type: "web_search",
+          query: "https://raw.githubusercontent.com/vercel-labs/web-interface-guidelines/main/command.md",
+          action: { type: "other" },
+        },
+      },
+      createdAt: "now",
+    }, "codex");
+    expect(view.kind).toBe("raw");
+    expect(view.title).toBe("Web Search");
+    expect(view.detail).toBe("https://raw.githubusercontent.com/vercel-labs/web-interface-guidelines/main/command.md");
+    expect(view.presentation).toEqual({
+      type: "tool", text: "https://raw.githubusercontent.com/vercel-labs/web-interface-guidelines/main/command.md",
+    });
+  });
 });

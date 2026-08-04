@@ -4,4 +4,4 @@
  * in one module, so none of those surfaces can drift.
  */
 export const VERSION = "0.6.0";
-export const MCP_CONTRACT_VERSION = 21;
+export const MCP_CONTRACT_VERSION = 22;
