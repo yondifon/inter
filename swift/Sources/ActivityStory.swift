@@ -277,7 +277,7 @@ enum ActivityStory {
     }
 }
 
-enum ActivityBlock: Identifiable {
+enum ActivityBlock: Identifiable, Equatable {
     case chapter(id: Int, rows: [ChapterRow])
     case reasoning(ActivityStory.ReasoningPulse)
     case signal(TaskEventSnapshot)
@@ -299,7 +299,7 @@ enum ActivityBlock: Identifiable {
 /// `opencode → codex`. Both sides are mapped to their display labels, and the
 /// raw profile ids stay reachable. When the arrow or the prefix is missing the
 /// hop degrades to the raw string without crashing.
-struct Hop {
+struct Hop: Equatable {
     let fromId: String
     let toId: String
     let fromLabel: String
@@ -331,13 +331,13 @@ struct Hop {
 }
 
 /// One run — the original or a handoff leg — and the handoff that closed it.
-struct HandoffRun {
+struct HandoffRun: Equatable {
     let endedBy: Hop?
     let blocks: [ActivityBlock]
 }
 
 /// Everything the handoff row needs to render itself collapsed and expanded.
-struct HandoffBoundary {
+struct HandoffBoundary: Equatable {
     let chain: String
     let earlierRuns: [HandoffRun]
     /// Raw events hidden, not blocks — the row promises the user a count of
@@ -347,7 +347,7 @@ struct HandoffBoundary {
 
 /// What a chapter is made of: the work, and the thinking that happened between
 /// it. A pulse is a line inside the run, not a break in it.
-enum ChapterRow: Identifiable {
+enum ChapterRow: Identifiable, Equatable {
     case work(TaskEventSnapshot)
     case reasoning(ActivityStory.ReasoningPulse)
 

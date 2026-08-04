@@ -24,13 +24,12 @@ import { listProfileStatuses } from "./profile-status";
 import { listProfileUsage } from "./usage";
 import { stateStore } from "./store";
 import type { Profile, Provider, Task } from "./types";
-import { finalText } from "./adapters";
 import { taskEventView } from "./events";
 import { DELEGATE_DESCRIPTION, HANDOFF_DESCRIPTION, MCP_INSTRUCTIONS } from "./mcp-copy";
 import { defaultModelFor } from "./provider-defaults";
 import { normalizeProfile } from "./profile-input";
 import { deleteMemory, getMemory, listMemories, setMemory } from "./memories";
-import { publicTaskSummary, taskView, waitTaskView, TASK_FIELD_KEYS, type TaskField } from "./public-task";
+import { publicTaskSummary, taskView, waitTaskView, settled, TASK_FIELD_KEYS, type TaskField } from "./public-task";
 import { mcpWaitBlockMs } from "./mcp-wait";
 import { loadRoutingPolicy } from "./routing-policy";
 
@@ -54,6 +53,74 @@ const taskFieldSchema = z.array(z.enum(TASK_FIELD_KEYS)).optional()
     "the default, it does not add to it. `[\"all\"]` returns the full record. " +
     "Heavy groups that cost real context: `prompt`, `shippedPrompt`, `output`, `attempts`.",
   );
+
+// The delegate contract, described once. The MCP tool and the REST dispatch
+// body are the same inputs; one schema is what keeps the two surfaces from
+// drifting apart again.
+const delegateToolSchema = z.object({
+  profile: z.string().optional()
+    .describe("Profile id to run on. Omit for automatic routing; see profiles."),
+  model: z.string().min(1).max(200).optional()
+    .describe("Model id for that profile. Omit to use the profile's default."),
+  preference: z.enum(["balanced", "quality", "cost", "speed"]).optional()
+    .describe("Bias for automatic routing. Ignored when profile is set."),
+  prompt: z.string().min(1).max(64_000)
+    .describe("Structured markdown: Goal, Context, Scope, numbered Instructions, Guardrails, Output Format."),
+  cwd: z.string().min(1)
+    .describe("Absolute path the worker runs in. Scope and grants are keyed to it."),
+  parent: z.string().optional()
+    .describe("Task id of the first task in a fan-out, so the batch groups together."),
+  scope: scopeSchema.optional()
+    .describe(
+      "Paths the worker may touch, relative to cwd: literal file paths, dir/** for recursive, ** for the whole tree. " +
+      "Stating it records a grant on this cwd; omitting it reuses the newest grant, or falls back to ** and flags the task when none exists.",
+    ),
+  allowQuestions: z.boolean().default(true)
+    .describe("Whether the worker may pause in needs_input to ask. False makes it guess or stop."),
+  effort: z.enum(["minimal", "low", "medium", "high", "xhigh", "max"]).optional()
+    .describe(
+      "Reasoning effort for this run. Honoured by claude, codex, opencode, and pi; antigravity " +
+      "ignores it because its level is baked into the model id. Ladders differ per provider, " +
+      "so call profiles with include: [\"models\"] and read the model's efforts before choosing.",
+    ),
+  tldr: z.string().min(1).max(200).optional()
+    .describe(
+      "One plain sentence, in the user's terms, saying what the task will do and to what; the " +
+      "user reads it on the task list, not the prompt. No markdown, no file paths unless they " +
+      "are the point.",
+    ),
+  title: z.string().min(1).max(60)
+    .describe(
+      "Short imperative label, max 60 chars, what the task does, no markdown, " +
+      "readable at a glance in a sidebar.",
+    ),
+  timeoutMs: z.number().int().min(1).max(86_400_000).optional()
+    .describe("Hard runtime limit. The task lands in failed with code timeout."),
+  fields: taskFieldSchema,
+});
+
+// The REST body is the tool contract minus the MCP-only knobs. Two deliberate
+// differences: REST never auto-routed, so profile is required even though the
+// tool treats it as an optional hint, and the GUI is not the one writing
+// prompts, so title stays optional even though the tool requires it.
+const delegateBodySchema = delegateToolSchema
+  .omit({ preference: true, effort: true, fields: true })
+  .extend({
+    profile: z.string().min(1),
+    title: z.string().min(1).max(60).optional(),
+  });
+
+const profilePatchSchema = z.object({
+  enabled: z.boolean().optional(),
+  label: z.string().min(1).optional(),
+  provider: z.enum(["claude", "codex", "opencode", "antigravity", "pi"]).optional(),
+  model: z.string().min(1).max(200).optional(),
+  capabilities: z.array(z.string()).optional(),
+  // The app round-trips the masked values, and the masked sentinel must survive.
+  env: z.record(z.string(), z.union([z.string(), z.number()])).optional(),
+});
+
+const archiveBodySchema = z.object({ archived: z.boolean() });
 
 const DEFAULT_DELEGATE_FIELDS: TaskField[] = ["routing"];
 const DEFAULT_REPLY_FIELDS: TaskField[] = [];
@@ -92,10 +159,10 @@ Bun.serve({
       const config = await loadConfig();
       return Response.json({
         profiles: publicProfiles(config.profiles),
-        tasks: listTasks(archiveFilter(url.searchParams.get("archived"))).map((task) => {
-          const profile = config.profiles.find(({ id }) => id === task.profileId);
-          return profile && task.output ? { ...task, output: finalText(profile, task.output) } : task;
-        }),
+        // Output is already the parsed answer — finalText runs once, when the
+        // run is persisted — so re-deriving it here would only make this poll
+        // disagree with inspect and wait, on the hottest route in the broker.
+        tasks: listTasks(archiveFilter(url.searchParams.get("archived"))),
         // Why a provider is being avoided, and what each cwd is allowed to
         // touch — both cheap reads, both previously invisible in the app.
         profileFailures: stateStore().listProfileFailures(),
@@ -153,7 +220,7 @@ Bun.serve({
       if (!profile) return Response.json({ error: "unknown task profile" }, { status: 404 });
       const after = Math.max(0, Number(url.searchParams.get("after") ?? 0) || 0);
       const waitMs = Math.min(30_000, Math.max(0, Number(url.searchParams.get("waitMs") ?? 0) || 0));
-      if (after > 0 && waitMs > 0 && stateStore().latestTaskEventId([taskId]) <= after && task.state === "running") {
+      if (after > 0 && waitMs > 0 && stateStore().latestTaskEventId([taskId]) <= after && !settled(task.state)) {
         await waitForTasks([taskId], waitMs, request.signal, after);
       }
       const rows = stateStore().listTaskEvents(taskId, after);
@@ -172,7 +239,8 @@ Bun.serve({
     if (hookTaskId && request.method === "POST") {
       const task = getTask(decodeURIComponent(hookTaskId));
       if (!task) return Response.json({ error: "unknown task" }, { status: 404 });
-      const payload = await request.json();
+      const payload = await readJson(request);
+      if (payload === undefined) return invalidJsonBody();
       if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
         return Response.json({ error: "hook payload must be an object" }, { status: 400 });
       }
@@ -180,33 +248,44 @@ Bun.serve({
       return Response.json({});
     }
     if (url.pathname === "/api/profiles" && request.method === "POST") {
-      const config = await loadConfig();
-      const profile = normalizeProfile(await request.json());
-      if (config.profiles.some((item) => item.id === profile.id)) {
-        profile.id = `${profile.id}-${crypto.randomUUID().slice(0, 6)}`;
+      const body = await readJson(request);
+      if (body === undefined) return invalidJsonBody();
+      try {
+        const config = await loadConfig();
+        const profile = normalizeProfile(body);
+        if (config.profiles.some((item) => item.id === profile.id)) {
+          profile.id = `${profile.id}-${crypto.randomUUID().slice(0, 6)}`;
+        }
+        config.profiles.push(profile);
+        await saveConfig(config);
+        return Response.json(publicProfile(profile), { status: 201 });
+      } catch (error) {
+        // normalizeProfile's messages ("invalid provider", "label is required")
+        // are written for the user; a 500 would hide them behind the app's
+        // generic save failure.
+        return Response.json({ error: String(error) }, { status: 400 });
       }
-      config.profiles.push(profile);
-      await saveConfig(config);
-      return Response.json(publicProfile(profile), { status: 201 });
     }
     if (url.pathname.startsWith("/api/profiles/") && request.method === "PUT") {
       const config = await loadConfig();
       const id = decodeURIComponent(url.pathname.slice("/api/profiles/".length));
       const profile = config.profiles.find((item) => item.id === id);
       if (!profile) return Response.json({ error: "unknown profile" }, { status: 404 });
-      const patch = await request.json() as Partial<Profile>;
+      const body = await readJson(request);
+      if (body === undefined) return invalidJsonBody();
+      const parsed = profilePatchSchema.safeParse(body);
+      if (!parsed.success) return Response.json({ error: describeZodIssue(parsed.error) }, { status: 400 });
+      const patch = parsed.data;
       if (typeof patch.enabled === "boolean") profile.enabled = patch.enabled;
-      if (typeof patch.label === "string" && patch.label.trim()) profile.label = patch.label.trim();
-      if (patch.provider && ["claude", "codex", "opencode", "antigravity", "pi"].includes(patch.provider)) {
-        profile.provider = patch.provider;
+      if (patch.label?.trim()) profile.label = patch.label.trim();
+      // The schema already narrowed provider to the five known ids.
+      if (patch.provider) profile.provider = patch.provider;
+      // A blank model means "back to this provider's default".
+      if (patch.model !== undefined) {
+        profile.model = patch.model.trim() || defaultModelFor(profile.provider);
       }
-      if (Object.hasOwn(patch, "model")) {
-        profile.model = typeof patch.model === "string" && patch.model.trim()
-          ? patch.model.trim()
-          : defaultModelFor(profile.provider);
-      }
-      if (Array.isArray(patch.capabilities)) profile.capabilities = patch.capabilities.map(String);
-      if (patch.env && typeof patch.env === "object") {
+      if (patch.capabilities) profile.capabilities = patch.capabilities;
+      if (patch.env) {
         profile.env = Object.fromEntries(Object.entries(patch.env).map(([key, value]) => [
           key,
           value === "••••••••" ? profile.env[key] ?? "" : String(value),
@@ -225,25 +304,18 @@ Bun.serve({
       return new Response(null, { status: 204 });
     }
     if (url.pathname === "/api/tasks" && request.method === "POST") {
-      const body = await request.json() as {
-        profile: string;
-        prompt: string;
-        cwd: string;
-        model?: string;
-        parent?: string;
-        scope?: { read: string[]; write: string[] };
-        allowQuestions?: boolean;
-        timeoutMs?: number;
-        tldr?: string;
-        title?: string;
-      };
+      const body = await readJson(request);
+      if (body === undefined) return invalidJsonBody();
+      const parsed = delegateBodySchema.safeParse(body);
+      if (!parsed.success) return Response.json({ error: describeZodIssue(parsed.error) }, { status: 400 });
+      const { profile, prompt, cwd, model, parent, scope, allowQuestions, timeoutMs, tldr, title } = parsed.data;
       try {
-        const task = await delegate(body.profile, body.prompt, body.cwd, body.model, body.parent, {
-          scope: body.scope,
-          allowQuestions: body.allowQuestions,
-          timeoutMs: body.timeoutMs,
-          tldr: body.tldr,
-          title: body.title,
+        const task = await delegate(profile, prompt, cwd, model, parent, {
+          scope,
+          allowQuestions,
+          timeoutMs,
+          tldr,
+          title,
         });
         return Response.json(
           startedTask(task, DEFAULT_DELEGATE_FIELDS),
@@ -255,12 +327,12 @@ Bun.serve({
     }
     const patchTaskId = url.pathname.match(/^\/api\/tasks\/([^/]+)$/)?.[1];
     if (patchTaskId && request.method === "PATCH") {
-      const body = await request.json() as { archived?: unknown };
-      if (typeof body.archived !== "boolean") {
-        return Response.json({ error: "archived must be a boolean" }, { status: 400 });
-      }
+      const body = await readJson(request);
+      if (body === undefined) return invalidJsonBody();
+      const parsed = archiveBodySchema.safeParse(body);
+      if (!parsed.success) return Response.json({ error: describeZodIssue(parsed.error) }, { status: 400 });
       try {
-        return Response.json(taskView(setTaskArchived(decodeURIComponent(patchTaskId), body.archived), DEFAULT_ARCHIVE_FIELDS));
+        return Response.json(taskView(setTaskArchived(decodeURIComponent(patchTaskId), parsed.data.archived), DEFAULT_ARCHIVE_FIELDS));
       } catch (error) {
         return Response.json({ error: String(error) }, { status: 400 });
       }
@@ -289,7 +361,7 @@ Bun.serve({
         try {
           body = JSON.parse(text);
         } catch {
-          return Response.json({ error: "invalid JSON body" }, { status: 400 });
+          return invalidJsonBody();
         }
       }
       try {
@@ -322,47 +394,7 @@ async function createMcpServer(): Promise<McpServer> {
   );
   server.registerTool("delegate", {
     description: DELEGATE_DESCRIPTION,
-    inputSchema: z.object({
-      profile: z.string().optional()
-        .describe("Profile id to run on. Omit for automatic routing; see profiles."),
-      model: z.string().min(1).max(200).optional()
-        .describe("Model id for that profile. Omit to use the profile's default."),
-      preference: z.enum(["balanced", "quality", "cost", "speed"]).optional()
-        .describe("Bias for automatic routing. Ignored when profile is set."),
-      prompt: z.string().min(1).max(64_000)
-        .describe("Structured markdown: Goal, Context, Scope, numbered Instructions, Guardrails, Output Format."),
-      cwd: z.string().min(1)
-        .describe("Absolute path the worker runs in. Scope and grants are keyed to it."),
-      parent: z.string().optional()
-        .describe("Task id of the first task in a fan-out, so the batch groups together."),
-      scope: scopeSchema.optional()
-        .describe(
-          "Paths the worker may touch, relative to cwd: literal file paths, dir/** for recursive, ** for the whole tree. " +
-          "Stating it records a grant on this cwd; omitting it reuses the newest grant, or falls back to ** and flags the task when none exists.",
-        ),
-      allowQuestions: z.boolean().default(true)
-        .describe("Whether the worker may pause in needs_input to ask. False makes it guess or stop."),
-      effort: z.enum(["minimal", "low", "medium", "high", "xhigh", "max"]).optional()
-        .describe(
-          "Reasoning effort for this run. Honoured by claude, codex, opencode, and pi; antigravity " +
-          "ignores it because its level is baked into the model id. Ladders differ per provider, " +
-          "so call profiles with include: [\"models\"] and read the model's efforts before choosing.",
-        ),
-      tldr: z.string().min(1).max(200).optional()
-        .describe(
-          "One plain sentence, in the user's terms, saying what the task will do and to what; the " +
-          "user reads it on the task list, not the prompt. No markdown, no file paths unless they " +
-          "are the point.",
-        ),
-      title: z.string().min(1).max(60)
-        .describe(
-          "Short imperative label, max 60 chars, what the task does, no markdown, " +
-          "readable at a glance in a sidebar.",
-        ),
-      timeoutMs: z.number().int().min(1).max(86_400_000).optional()
-        .describe("Hard runtime limit. The task lands in failed with code timeout."),
-      fields: taskFieldSchema,
-    }),
+    inputSchema: delegateToolSchema,
   }, async ({ profile, model, preference, prompt, cwd, parent, scope, allowQuestions, effort, tldr, title, timeoutMs, fields }) => {
     const resolvedFields = fields ?? DEFAULT_DELEGATE_FIELDS;
     if (profile) {
@@ -588,6 +620,31 @@ async function policyWarnings(cwd: string, task: Task): Promise<string[]> {
   return [
     `${provider}/${task.model} is not in any allow list in ${policy.path}; the explicit profile overrode project routing policy`,
   ];
+}
+
+/**
+ * JSON bodies are caller input, so a syntax error is a 400, never a 500.
+ * `undefined` is the failure marker because no valid JSON parses to it.
+ */
+async function readJson(request: Request): Promise<unknown | undefined> {
+  try {
+    return await request.json();
+  } catch {
+    return undefined;
+  }
+}
+
+/** The malformed-JSON answer, in the one shape every body-reading route shares. */
+function invalidJsonBody(): Response {
+  return Response.json({ error: "invalid JSON body" }, { status: 400 });
+}
+
+/** The first problem, phrased the way a form would: `scope.write: expected array, received string`. */
+function describeZodIssue(error: z.ZodError): string {
+  const issue = error.issues[0];
+  if (!issue) return "invalid body";
+  const where = issue.path.length > 0 ? issue.path.join(".") : "body";
+  return `${where}: ${issue.message}`;
 }
 
 function result(value: unknown) {

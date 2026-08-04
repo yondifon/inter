@@ -24,6 +24,16 @@ import type { Profile, Task, TaskScope, TaskSummary } from "./types";
 const MAX_EVENT_LINE = 64 * 1024;
 const MAX_EVENTS = 5_000;
 const MAX_OUTPUT = 10 * 1024 * 1024;
+// A block that never closes still surfaces a row this often, so a long
+// thinking stretch shows progress at ~1 row/s instead of pi's ~80 token rows/s.
+const PI_DELTA_FLUSH_MS = 1_000;
+/// pi's message_update events, by their assistantMessageEvent.type. Everything
+/// else on the wire is stored as-is; only these stream fragments are folded.
+const PI_DELTA_TYPES = new Set([
+  "text_start", "text_delta", "text_end",
+  "thinking_start", "thinking_delta", "thinking_end",
+  "toolcall_start", "toolcall_delta", "toolcall_end",
+]);
 const MAX_ANTIGRAVITY_BOOTSTRAP_RETRIES = 2;
 const taskWaiter = new TaskWaiter(
   (id) => stateStore().getTask(id),
@@ -154,6 +164,64 @@ export function compactPayload(payload: Record<string, unknown>): Record<string,
   if (!event || typeof event !== "object" || Array.isArray(event)) return rest;
   const { partial: _partial, ...delta } = event as Record<string, unknown>;
   return { ...rest, assistantMessageEvent: delta };
+}
+
+interface PiBlock {
+  kind: "thinking" | "text";
+  text: string;
+}
+
+/// pi streams one message_update per token — 4,365 thinking_delta rows in a
+/// measured 63 s — which would burn the 5,000-event cap in about a minute.
+/// The deltas of one block are folded into a buffer and stored once at the
+/// block boundary, in the `*_end` shape pi itself uses to close with the whole
+/// block in `content`; a block that never ends still surfaces a row each
+/// PI_DELTA_FLUSH_MS. toolcall_* fragments are dropped outright:
+/// tool_execution_* already records the call, and a streamed argument token
+/// is not row-worthy. The fold keys off the pi provider, never off the shape —
+/// a non-pi provider emitting identical lines stores them verbatim.
+function foldPiDelta(
+  payload: Record<string, unknown>,
+  block: PiBlock | undefined,
+  lastFlushAt: number,
+  now: number,
+): { block: PiBlock | undefined; row?: Record<string, unknown> } {
+  const event = payload.assistantMessageEvent;
+  if (!event || typeof event !== "object" || Array.isArray(event)) return { block, row: payload };
+  const detail = event as Record<string, unknown>;
+  const type = typeof detail.type === "string" ? detail.type : "";
+  if (!PI_DELTA_TYPES.has(type)) return { block, row: payload };
+  const kind: "thinking" | "text" = type.startsWith("thinking") ? "thinking" : "text";
+  if (type === "toolcall_start" || type === "toolcall_delta" || type === "toolcall_end") {
+    return { block };
+  }
+  if (type === "thinking_delta" || type === "text_delta") {
+    const next = block?.kind === kind ? block : { kind, text: "" };
+    const text = typeof detail.delta === "string" ? detail.delta : "";
+    next.text += text;
+    if (now - lastFlushAt >= PI_DELTA_FLUSH_MS) {
+      return {
+        block: next,
+        row: { type: "message_update", assistantMessageEvent: { type: `${kind}_end`, content: next.text } },
+      };
+    }
+    return { block: next };
+  }
+  if (type === "thinking_start" || type === "text_start") {
+    return { block: { kind, text: typeof detail.delta === "string" ? detail.delta : "" } };
+  }
+  // thinking_end / text_end: the boundary row, carrying the whole block.
+  const text = block?.kind === kind ? block.text : "";
+  return {
+    block: undefined,
+    row: {
+      type: "message_update",
+      assistantMessageEvent: {
+        type,
+        content: text || (typeof detail.content === "string" ? detail.content : ""),
+      },
+    },
+  };
 }
 
 export function appendTaskEvent(
@@ -406,7 +474,11 @@ async function runTask(
       INTER_HOOK_URL: hookUrl,
     };
     const startedAt = Date.now();
-    let lastAgentEventAt = startedAt;
+    // Liveness is pipe activity, not stored rows: a run that emits bytes but
+    // stores nothing (capture stopped, unparseable lines) is working, and a
+    // clock only the storage path advanced misreported pi's truncated runs as
+    // stalled for minutes.
+    let lastPipeActivityAt = startedAt;
     let eventCount = 0;
     let eventCaptureStopped = false;
     let oversizedLine = false;
@@ -440,7 +512,7 @@ async function runTask(
           }, task.timeoutMs);
         }
         heartbeat = setInterval(() => {
-          const silentMs = Date.now() - lastAgentEventAt;
+          const silentMs = Date.now() - lastPipeActivityAt;
           appendTaskEvent(task.id, "heartbeat", task.state, {
             elapsedMs: Date.now() - startedAt,
             silentMs,
@@ -454,7 +526,13 @@ async function runTask(
         ...(resumeWith ? { resumedSession: resumeWith } : {}),
       });
       let attemptEvents = 0;
+      // pi's fold state lives per attempt: a respawned child starts with an
+      // empty buffer and a fresh flush clock.
+      let piBlock: PiBlock | undefined;
+      let lastPiFlushAt = Date.now();
       [stdout, stderr, exitCode] = await Promise.all([
+        // Any byte on stdout is the worker alive; stderr is not hooked because
+        // it is never parsed and these CLIs write it rarely.
         readStream(child.stdout, (line) => {
           if (eventCaptureStopped) return;
           if (eventCount >= MAX_EVENTS) {
@@ -465,7 +543,6 @@ async function runTask(
           // One oversized payload — a large file read echoed back as a tool
           // result — must cost only that line, not the rest of the trace.
           if (line.length > MAX_EVENT_LINE) {
-            lastAgentEventAt = Date.now();
             if (!oversizedLine) {
               oversizedLine = true;
               appendTaskEvent(task.id, "event_dropped", task.state, {
@@ -479,8 +556,8 @@ async function runTask(
           // Only the parse is expected to fail: a provider can print
           // anything, and a bad line costs that line alone. Everything after
           // it is deliberate work — a failed event write is a real fault,
-          // and swallowing it would truncate the log and freeze the silence
-          // clock with no signal anywhere. Let it throw to runTask's catch.
+          // and swallowing it would truncate the log with no signal anywhere.
+          // Let it throw to runTask's catch.
           let payload: Record<string, unknown>;
           try {
             const parsed = JSON.parse(line) as unknown;
@@ -491,12 +568,18 @@ async function runTask(
             return;
           }
           const kind = typeof payload.type === "string" ? payload.type : "event";
+          if (profile.provider === "pi" && kind === "message_update") {
+            const folded = foldPiDelta(payload, piBlock, lastPiFlushAt, Date.now());
+            piBlock = folded.block;
+            if (!folded.row) return;
+            payload = folded.row;
+            lastPiFlushAt = Date.now();
+          }
           appendTaskEvent(task.id, `agent.${kind}`, task.state, compactPayload(payload));
           // The run reports its own spend once, near the end; a retry inside
           // this same run replaces it rather than adding to it.
           const reported = runCostFrom(payload);
           if (reported.costUsd !== undefined || reported.turns !== undefined) runCost = reported;
-          lastAgentEventAt = Date.now();
           eventCount++;
           attemptEvents++;
           // The sandbox refuses out-of-scope writes inside the worker, where
@@ -541,7 +624,7 @@ async function runTask(
             }
           }
 
-        }),
+        }, MAX_OUTPUT, () => { lastPipeActivityAt = Date.now(); }),
         readStream(child.stderr, undefined, MAX_EVENT_LINE),
         child.exited,
       ]);
@@ -765,6 +848,7 @@ async function readStream(
   stream: ReadableStream<Uint8Array>,
   onLine?: (line: string) => void,
   outputLimit = MAX_OUTPUT,
+  onBytes?: () => void,
 ): Promise<string> {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
@@ -773,6 +857,7 @@ async function readStream(
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
+    if (value.byteLength > 0) onBytes?.();
     const text = decoder.decode(value, { stream: true });
     output = tail(output + text, outputLimit);
     carry += text;

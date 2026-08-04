@@ -36,11 +36,17 @@ struct TaskDetail: View {
     /// there mid-run would mean opening on an empty panel.
     @State private var section: TaskDetailSection = .activity
     @State private var events: [TaskEventSnapshot] = []
+    /// The retelling of `events`, kept beside them rather than folded in `body`.
+    /// Composing is pure but linear in the trace, and a long run re-folded a few
+    /// thousand events on every render pass; it only has to change when the
+    /// events do.
+    @State private var story = ActivityStory.Composition(blocks: [], technical: [])
     @State private var eventCursor = 0
     @State private var loadedInitialEvents = false
     @State private var loading = true
     @State private var loadFailed = false
     @State private var showingTechnicalEvents = false
+    @State private var showingEarlierActivity = false
     @State private var showingRunFacts = false
     @State private var confirmingCancel = false
     @State private var showingResumeSheet = false
@@ -125,8 +131,13 @@ struct TaskDetail: View {
                     }
                     continue
                 }
+                // The server long-poll holds while the run can still produce
+                // events on its own — queued and running — and answers at once
+                // when it is settled or waiting on a human, so the sleep is
+                // unconditional: without it the loop re-sorts the whole trace on
+                // the main actor as fast as HTTP allows.
                 if loadFailed { try? await Task.sleep(for: .seconds(1)) }
-                else if eventCursor == 0 { try? await Task.sleep(for: .milliseconds(500)) }
+                else { try? await Task.sleep(for: .milliseconds(500)) }
             }
         }
         // Cancel kills the worker process tree, so it always asks first (EC-004).
@@ -342,9 +353,19 @@ struct TaskDetail: View {
                     .frame(minHeight: 24)
                 }
             }
-            let story = ActivityStory.compose(events)
+            if story.blocks.count > visibleBlockLimit {
+                Button(showingEarlierActivity
+                       ? "Hide earlier blocks"
+                       : "Show \(story.blocks.count - visibleBlockLimit) earlier blocks") {
+                    showingEarlierActivity.toggle()
+                }
+                .buttonStyle(.plain)
+                .scaledFont(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.bottom, 2)
+            }
             LazyVStack(alignment: .leading, spacing: 10) {
-                ForEach(story.blocks) { block in
+                ForEach(displayedBlocks) { block in
                     ActivityBlockView(block: block)
                 }
                 if showingTechnicalEvents, !story.technical.isEmpty {
@@ -363,6 +384,16 @@ struct TaskDetail: View {
                 }
             }
         }
+    }
+
+    /// The pane follows the tail, so only the newest blocks are laid out; the
+    /// scroll anchor asks for the whole content height, which would otherwise
+    /// measure a multi-thousand-block trace on every pass.
+    private let visibleBlockLimit = 300
+
+    /// The newest blocks, or the whole trace once the reader asked for it.
+    private var displayedBlocks: [ActivityBlock] {
+        showingEarlierActivity ? story.blocks : Array(story.blocks.suffix(visibleBlockLimit))
     }
 
     /// Zero-height anchor at the content's edge, the jump control's target. A
@@ -430,17 +461,22 @@ struct TaskDetail: View {
 
     private func resetEventState() {
         events = []
+        story = ActivityStory.Composition(blocks: [], technical: [])
         eventCursor = 0
         loadedInitialEvents = false
         loading = true
         loadFailed = false
         showingTechnicalEvents = false
+        showingEarlierActivity = false
     }
 
     private func appendEvents(_ incoming: [TaskEventSnapshot]) {
         var known = Set(events.map(\.id))
-        events.append(contentsOf: incoming.filter { known.insert($0.id).inserted })
+        let fresh = incoming.filter { known.insert($0.id).inserted }
+        guard !fresh.isEmpty else { return }
+        events.append(contentsOf: fresh)
         events.sort { $0.id < $1.id }
+        story = ActivityStory.compose(events)
     }
 }
 

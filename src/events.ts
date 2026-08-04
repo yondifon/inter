@@ -412,11 +412,21 @@ function piEvent(
     const text = string(delta.delta);
     // Deltas, not snapshots: the cumulative message was removed from this event.
     // pi streams a token at a time, so an unfolded row per delta buries the run
-    // in one-word lines. Every kind stays minor and the closing message_end
-    // carries the assembled reply — which pi, unlike Antigravity, does send.
+    // in one-word lines. A block's assembled content arrives on its own `*_end`
+    // boundary — thinking_end and text_end close with the completed text — and
+    // again, authoritatively, on message_end; so a delta row carries nothing
+    // the trace is missing. The capture path skips thinking deltas; these arms
+    // only render for traces that predate that skip.
     if (deltaType === "thinking_delta" && text) {
       return { ...base, kind: "reasoning", phase: "started", title: "Thinking", detail: text,
         minor: true, ...raw };
+    }
+    // The boundary arrives with the whole block in `content`, not a delta, so
+    // this one row is the block: the trace's single "Thinking" line, not one
+    // per token.
+    if (deltaType === "thinking_end") {
+      return { ...base, kind: "reasoning", phase: "info", title: "Thinking",
+        detail: string(delta.content), minor: true, ...raw };
     }
     if (deltaType === "text_delta" && text) {
       return { ...base, kind: "message", phase: "info", title: "Agent message", detail: text,

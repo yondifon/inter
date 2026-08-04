@@ -871,6 +871,61 @@ describe("task event views", () => {
     expect(settled.phase).toBe("completed");
   });
 
+  test("coalesces a pi thinking block into one row at its boundary", () => {
+    const view = taskEventView({
+      id: 1, taskId: "task", type: "agent.event", state: "running",
+      payload: {
+        type: "message_update",
+        assistantMessageEvent: {
+          type: "thinking_end", contentIndex: 0, content: "The 404 should read as an unrouted task.",
+        },
+      },
+      createdAt: "now",
+    }, "pi");
+    expect(view.kind).toBe("reasoning");
+    expect(view.title).toBe("Thinking");
+    expect(view.detail).toBe("The 404 should read as an unrouted task.");
+    expect(view.minor).toBe(true);
+  });
+
+  test("renders a whole pi thinking block as one row, not one per delta", () => {
+    const view = (payload: Record<string, unknown>) =>
+      taskEventView({ id: 1, taskId: "task", type: "agent.event", state: "running", payload, createdAt: "now" }, "pi");
+    const rows = [
+      { type: "message_update", assistantMessageEvent: { type: "thinking_start", contentIndex: 0 } },
+      { type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "weighing" } },
+      { type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: " the " } },
+      { type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "options" } },
+      { type: "message_update", assistantMessageEvent: { type: "thinking_end", contentIndex: 0, content: "weighing the options" } },
+    ].map(view);
+    // The deltas stay token-sized minor rows; the assembled block surfaces
+    // once, on the boundary, where the content field carries the whole block.
+    expect(rows.filter((row) => row.kind === "reasoning" && row.title === "Thinking").map((row) => row.detail))
+      .toEqual(["weighing", "the", "options", "weighing the options"]);
+    expect(rows.at(-1)?.minor).toBe(true);
+  });
+
+  test("keeps pi's assembled thinking reachable on the closing message", () => {
+    const view = taskEventView({
+      id: 2, taskId: "task", type: "agent.event", state: "running",
+      payload: {
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "weighing the two surface options" },
+            { type: "text", text: "Done." },
+          ],
+          stopReason: "stop",
+          usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 },
+        },
+      },
+      createdAt: "now",
+    }, "pi");
+    expect(view.kind).toBe("usage");
+    expect(view.rawText).toContain("weighing the two surface options");
+  });
+
   test("reads a pi edit off its result once the arguments are gone", () => {
     // Verbatim from a real run: tool_execution_end carries `args: null`, so the
     // path and the change have to come out of the result or the row degrades to

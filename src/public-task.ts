@@ -171,7 +171,7 @@ export function waitTaskView(task: Task): WaitTaskView {
   };
 }
 
-function settled(state: TaskState): boolean {
+export function settled(state: TaskState): boolean {
   return state === "completed" || state === "failed" || state === "cancelled" ||
     state === "blocked" || state === "needs_input";
 }

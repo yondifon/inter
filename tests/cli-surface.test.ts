@@ -1,0 +1,321 @@
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { closeStateStore, stateStore } from "../src/store";
+import type { Profile, Task } from "../src/types";
+
+/**
+ * The HTTP surface lives inside Bun.serve's fetch handler with no seam (review
+ * finding 1), so the only way to exercise it is through the real listener:
+ * point INTER_PORT at a free port, import the module, and fetch. Each test
+ * file runs in its own process, so the import-time server binds no other
+ * suite's port.
+ */
+let root: string;
+let base: string;
+let taskId: string;
+let profileId = "surface-fake";
+
+const mask = "••••••••";
+
+function seedProfile(profile: Profile): void {
+  stateStore().saveProfiles([profile]);
+}
+
+function seedTask(overrides: Partial<Task> = {}): Task {
+  const now = new Date().toISOString();
+  const task: Task = {
+    id: crypto.randomUUID(),
+    profileId,
+    model: "fake",
+    prompt: "seed",
+    cwd: root,
+    state: "completed",
+    createdAt: now,
+    updatedAt: now,
+    output: "",
+    scope: { read: [root], write: [root] },
+    allowQuestions: true,
+    ...overrides,
+  };
+  stateStore().createTask(task);
+  return task;
+}
+
+function post(path: string, body: string) {
+  return fetch(`${base}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body,
+  });
+}
+
+function put(path: string, body: string) {
+  return fetch(`${base}${path}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body,
+  });
+}
+
+beforeAll(async () => {
+  root = mkdtempSync(join(tmpdir(), "inter-surface-"));
+  process.env.INTER_DB = join(root, "inter.db");
+  process.env.INTER_ROOTS = root;
+  // Grab a free port, then hand it to the module before it reads it at import.
+  const probe = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data: () => {} } });
+  const port = probe.port;
+  probe.stop();
+  process.env.INTER_PORT = String(port);
+  await import("../src/cli");
+  base = `http://127.0.0.1:${port}`;
+  seedProfile({
+    id: profileId,
+    label: "Surface Fake",
+    provider: "antigravity",
+    model: "fake",
+    enabled: true,
+    env: { ANTHROPIC_API_KEY: "s3cr3t" },
+    capabilities: [],
+    // The sandbox in this environment refuses nested sandbox-exec, so the
+    // worker dies instantly; the route's 202 contract does not depend on it.
+    command: ["/bin/sh", "-c", "echo hi"],
+  });
+  taskId = seedTask().id;
+});
+
+afterAll(() => {
+  closeStateStore();
+  delete process.env.INTER_DB;
+  delete process.env.INTER_ROOTS;
+  delete process.env.INTER_PORT;
+  rmSync(root, { recursive: true, force: true });
+});
+
+describe("malformed JSON is a 400, not a 500", () => {
+  test.each([
+    ["POST /api/tasks", () => post("/api/tasks", "{")],
+    ["POST /api/profiles", () => post("/api/profiles", "{")],
+    ["PUT /api/profiles/:id", () => put(`/api/profiles/${profileId}`, "{")],
+    ["PATCH /api/tasks/:id", () => fetch(`${base}/api/tasks/${taskId}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: "{",
+    })],
+    ["POST /api/hooks/:id", () => post(`/api/hooks/${taskId}`, "{")],
+    ["POST /api/tasks/:id/resume", () => post(`/api/tasks/${taskId}/resume`, "{")],
+  ])("%s", async (_name, request) => {
+    const response = await request();
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "invalid JSON body" });
+  });
+});
+
+describe("invalid bodies are a 400 with a useful message", () => {
+  test("null task body names the problem instead of a TypeError", async () => {
+    const response = await post("/api/tasks", "null");
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body.error).toContain("expected object");
+  });
+
+  test("a wrong prompt type points at the field", async () => {
+    const response = await post("/api/tasks", JSON.stringify({
+      profile: profileId, prompt: 42, cwd: root,
+    }));
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body.error).toContain("prompt:");
+    expect(body.error).toContain("expected string");
+  });
+
+  test("the string \"false\" no longer enables questions", async () => {
+    const response = await post("/api/tasks", JSON.stringify({
+      profile: profileId, prompt: "hi", cwd: root, allowQuestions: "false",
+    }));
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body.error).toContain("allowQuestions:");
+  });
+
+  test("a prompt over the MCP cap is rejected", async () => {
+    const response = await post("/api/tasks", JSON.stringify({
+      profile: profileId, prompt: "x".repeat(64_001), cwd: root,
+    }));
+    expect(response.status).toBe(400);
+  });
+
+  test("profile creation surfaces its own validation messages", async () => {
+    const badProvider = await post("/api/profiles", JSON.stringify({
+      provider: "bogus", label: "Nope",
+    }));
+    expect(badProvider.status).toBe(400);
+    expect((await badProvider.json()).error).toContain("invalid provider");
+
+    const noLabel = await post("/api/profiles", JSON.stringify({ provider: "pi" }));
+    expect(noLabel.status).toBe(400);
+    expect((await noLabel.json()).error).toContain("label is required");
+  });
+
+  test("a profile patch env array is rejected, not written as key \"0\"", async () => {
+    const response = await put(`/api/profiles/${profileId}`, JSON.stringify({ env: ["a"] }));
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body.error).toContain("env:");
+  });
+
+  test("a blank profile label is rejected", async () => {
+    const response = await put(`/api/profiles/${profileId}`, JSON.stringify({ label: "" }));
+    expect(response.status).toBe(400);
+  });
+
+  test("an unknown profile provider is rejected", async () => {
+    const response = await put(`/api/profiles/${profileId}`, JSON.stringify({ provider: "bogus" }));
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body.error).toContain("provider:");
+  });
+
+  test("an oversized profile model is rejected", async () => {
+    const response = await put(`/api/profiles/${profileId}`, JSON.stringify({
+      model: "m".repeat(201),
+    }));
+    expect(response.status).toBe(400);
+  });
+
+  test("a non-boolean archived flag is rejected", async () => {
+    const response = await fetch(`${base}/api/tasks/${taskId}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ archived: "yes" }),
+    });
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body.error).toContain("archived:");
+  });
+});
+
+describe("valid bodies still succeed", () => {
+  test("POST /api/tasks dispatches and returns the acknowledgement", async () => {
+    const response = await post("/api/tasks", JSON.stringify({
+      profile: profileId,
+      prompt: "do the thing",
+      cwd: root,
+      scope: { read: [], write: [] },
+      allowQuestions: false,
+      tldr: "a short summary",
+      title: "Do the thing",
+    }));
+    expect(response.status).toBe(202);
+    const body = await response.json();
+    expect(typeof body.id).toBe("string");
+    expect(body.profileId).toBe(profileId);
+    // runTask flips the row to "running" asynchronously and mutates the task
+    // object in place, so either is a valid view of the same dispatch.
+    expect(["queued", "running"]).toContain(body.state);
+    const row = stateStore().getTask(body.id);
+    expect(row?.title).toBe("Do the thing");
+    expect(row?.allowQuestions).toBe(false);
+  });
+
+  // After the dispatch test: this one disables the shared profile, and
+  // delegate refuses a disabled profile.
+  test("PUT /api/profiles/:id accepts the app's full-profile body and round-trips masked env", async () => {
+    // The app PUTs the whole Profile it decoded from the state poll, masked
+    // secrets included. The sentinel must keep the stored value, not overwrite it.
+    const response = await put(`/api/profiles/${profileId}`, JSON.stringify({
+      id: profileId,
+      label: "Surface Renamed",
+      provider: "antigravity",
+      model: "other",
+      enabled: false,
+      env: { ANTHROPIC_API_KEY: mask },
+      capabilities: ["review"],
+      command: ["/bin/sh", "-c", "echo hi"],
+    }));
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.label).toBe("Surface Renamed");
+    expect(body.enabled).toBe(false);
+    const saved = stateStore().listProfiles().find((item) => item.id === profileId);
+    expect(saved?.env.ANTHROPIC_API_KEY).toBe("s3cr3t");
+    expect(saved?.model).toBe("other");
+    expect(saved?.label).toBe("Surface Renamed");
+  });
+
+  test("PATCH /api/tasks/:id archives and the response carries archivedAt", async () => {
+    const response = await fetch(`${base}/api/tasks/${taskId}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ archived: true }),
+    });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.id).toBe(taskId);
+    expect(body.archivedAt).toBeDefined();
+    expect(stateStore().getTask(taskId)?.archivedAt).toBeDefined();
+  });
+
+  test("POST /api/hooks/:id accepts an object payload and records the event", async () => {
+    const response = await post(`/api/hooks/${taskId}`, JSON.stringify({ event: "x" }));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({});
+    const events = stateStore().listTaskEvents(taskId);
+    expect(events.at(-1)?.type).toBe("agent.hook");
+  });
+
+  // Last: saveConfig replaces the whole profile list, so nothing that needs
+  // the seeded surface-fake profile may run after it.
+  test("POST /api/profiles returns 201 with the created profile", async () => {
+    const response = await post("/api/profiles", JSON.stringify({
+      label: "Surface Test",
+      provider: "pi",
+      env: { SOME_SECRET: "visible" },
+      capabilities: ["build"],
+    }));
+    expect(response.status).toBe(201);
+    const body = await response.json();
+    expect(body.id).toBe("surface-test");
+    expect(body.label).toBe("Surface Test");
+    const saved = stateStore().listProfiles().find((item) => item.id === "surface-test");
+    expect(saved?.env.SOME_SECRET).toBe("visible");
+  });
+});
+
+describe("/api/state", () => {
+  test("returns stored output verbatim instead of re-running finalText", async () => {
+    // The stored output is already the parsed answer. Under the old mapping
+    // this route re-extracted it: for a claude profile the final line parses
+    // as {"result": "second"}, so the poll would report "second".
+    // The profile row must exist before the task row references it.
+    seedProfile({
+      id: "state-claude",
+      label: "State Claude",
+      provider: "claude",
+      model: "sonnet",
+      enabled: true,
+      env: {},
+      capabilities: [],
+    });
+    const now = new Date().toISOString();
+    const seeded = seedTask({
+      id: "state-divergence",
+      profileId: "state-claude",
+      model: "sonnet",
+      state: "completed",
+      createdAt: now,
+      updatedAt: now,
+      output: "first\n{\"result\": \"second\"}",
+    });
+    const response = await fetch(`${base}/api/state?archived=include`);
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(Object.keys(body).sort()).toEqual([
+      "grants", "memoryProjects", "profileFailures", "profiles", "tasks",
+    ]);
+    const task = body.tasks.find((item: { id: string }) => item.id === seeded.id);
+    expect(task.output).toBe("first\n{\"result\": \"second\"}");
+    expect(stateStore().getTask(seeded.id)?.output).toBe(task.output);
+  });
+});
