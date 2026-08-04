@@ -98,8 +98,12 @@ enum MCPConfigInjector {
         try Data(text.utf8).write(to: URL(fileURLWithPath: path), options: .atomic)
     }
 
-    private static func sanitizeJSONC(_ text: String) -> String {
+    static func sanitizeJSONC(_ text: String) -> String {
         var output = ""
+        // A comma seen outside a string, plus the whitespace after it: held back until
+        // the next meaningful character says whether it closes a container (drop it) or
+        // separates two members (emit it).
+        var pendingComma = ""
         var inString = false
         var escaped = false
         var index = text.startIndex
@@ -114,16 +118,23 @@ enum MCPConfigInjector {
                 index = next
                 continue
             }
-            if char == "\"" { inString = true; output.append(char); index = next; continue }
             if char == "/", next < text.endIndex, text[next] == "/" {
                 index = text.index(after: next)
                 while index < text.endIndex, text[index] != "\n" { index = text.index(after: index) }
                 continue
             }
+            if !pendingComma.isEmpty {
+                if char.isWhitespace { pendingComma.append(char); index = next; continue }
+                if char != "}" && char != "]" { output.append(pendingComma) }
+                pendingComma = ""
+            }
+            if char == "," { pendingComma = ","; index = next; continue }
+            if char == "\"" { inString = true; output.append(char); index = next; continue }
             output.append(char)
             index = next
         }
-        return output.replacingOccurrences(of: #",\s*([}\]])"#, with: "$1", options: .regularExpression)
+        output.append(pendingComma)
+        return output
     }
 
     private static func expand(_ path: String) -> String {
