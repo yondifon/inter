@@ -635,6 +635,18 @@ export class StateStore {
     return row ? taskFromRow(row) : undefined;
   }
 
+  // The waiter's 100 ms poll only reads `state`, so materialising the whole
+  // row — prompt, shipped prompt, output, and three JSON parses — per poll
+  // priced the hot loop in bytes instead of task count. A probe that touches
+  // exactly the two columns the poll reads keeps that cost flat.
+  taskStates(ids: string[]): Map<string, TaskState> {
+    if (ids.length === 0) return new Map();
+    const placeholders = ids.map(() => "?").join(",");
+    return new Map(this.database.query<{ id: string; state: TaskState }, string[]>(
+      `SELECT id, state FROM tasks WHERE id IN (${placeholders})`,
+    ).all(...ids).map(({ id, state }) => [id, state]));
+  }
+
   listTasks(limit = 200, archived: TaskListQuery["archived"] = "active"): Task[] {
     const where = archiveClause(archived);
     return this.database.query<TaskRow, [number]>(`

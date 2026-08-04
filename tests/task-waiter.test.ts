@@ -37,6 +37,7 @@ function storeWaiter(store: StateStore): TaskWaiter {
   return new TaskWaiter(
     (id) => store.getTask(id),
     (ids) => store.latestTaskEventId(ids, true),
+    (ids) => store.taskStates(ids),
   );
 }
 
@@ -120,6 +121,47 @@ describe("TaskWaiter", () => {
   test("rejects unknown task IDs", async () => {
     const waiter = new TaskWaiter(() => undefined);
     await expect(waiter.wait(["missing"], 100)).rejects.toThrow("unknown task: missing");
+  });
+
+  test("polls the state probe, not full rows, while nothing changes", async () => {
+    const running = task("busy");
+    let fullReads = 0;
+    let probeReads = 0;
+    const waiter = new TaskWaiter(
+      (id) => { fullReads++; return running; },
+      () => 0,
+      (ids) => { probeReads++; return new Map(ids.map((id) => [id, running.state])); },
+    );
+
+    const waiting = waiter.wait([running.id], 150);
+    waiter.notify("busy");
+    waiter.notify("busy");
+    expect((await waiting).reason).toBe("timeout");
+
+    // One full read at wait start, one at the timeout snapshot. The probe
+    // covers the initial tick, both notifies and the 100 ms interval tick;
+    // with the old per-poll `getTask` this wait would have made six reads.
+    expect(fullReads).toBe(2);
+    expect(probeReads).toBeGreaterThanOrEqual(4);
+  });
+
+  test("rejects a task that vanishes while waiting", async () => {
+    const running = task("doomed");
+    const tasks = new Map([["doomed", running]]);
+    const waiter = new TaskWaiter(
+      (id) => tasks.get(id),
+      () => 0,
+      (ids) => {
+        const states = new Map<string, Task["state"]>();
+        for (const id of ids) { const task = tasks.get(id); if (task) states.set(id, task.state); }
+        return states;
+      },
+    );
+
+    const waiting = waiter.wait([running.id], 100);
+    tasks.delete("doomed");
+    waiter.notify("doomed");
+    await expect(waiting).rejects.toThrow("unknown task: doomed");
   });
 
   test("detects external completed and failed updates within two seconds", async () => {

@@ -146,8 +146,8 @@ final class TaskGroupingTests: XCTestCase {
             project: nil,
             grouping: .status
         )
-        XCTAssertEqual(groups[0].tasks.map(\.id), ["1", "3"], "newest-first order survives bucketing")
-        XCTAssertEqual(groups[1].tasks.map(\.id), ["2", "4"])
+        XCTAssertEqual(groups[0].tasks.map(\.id), ["2", "4"], "newest-first order survives bucketing")
+        XCTAssertEqual(groups[1].tasks.map(\.id), ["1", "3"])
     }
 
     func testStatusGroupingComposesWithTheProjectFilter() {

@@ -112,8 +112,19 @@ struct TaskDetail: View {
             resetEventState()
             while !Task.isCancelled {
                 await loadEvents()
-                let live = store.tasks.first { $0.id == task.id }?.state ?? task.state
-                if TaskState(live).isTerminal, !loading { break }
+                if TaskState(liveState).isTerminal {
+                    // A settled run is not polled for events; park on the store
+                    // instead. Resume and answering a question both leave a
+                    // terminal state, and nothing but this loop fetches events,
+                    // so it must outlive the settlement rather than break on it.
+                    // A failed fetch just before settling had no next poll to
+                    // recover it, so the trace it left is final — drop the flag.
+                    loadFailed = false
+                    while !Task.isCancelled, TaskState(liveState).isTerminal {
+                        try? await Task.sleep(for: .seconds(1))
+                    }
+                    continue
+                }
                 if loadFailed { try? await Task.sleep(for: .seconds(1)) }
                 else if eventCursor == 0 { try? await Task.sleep(for: .milliseconds(500)) }
             }
@@ -301,20 +312,36 @@ struct TaskDetail: View {
                 HStack { ProgressView().controlSize(.small); Text("Loading trace…").foregroundStyle(.secondary) }
                     .frame(minHeight: 56)
             }
-        } else if loadFailed {
-            TaskPanel {
-                HStack {
-                    Label("Couldn’t load activity.", systemImage: "exclamationmark.triangle")
-                    Spacer()
-                    Button("Retry") { Task { await loadEvents() } }
-                }.frame(minHeight: 56)
-            }
         } else if events.isEmpty {
-            TaskPanel {
-                Text("No structured events for this run. New delegated runs stream activity here.")
-                    .scaledFont(.body).foregroundStyle(.secondary).frame(minHeight: 56)
+            if loadFailed {
+                TaskPanel {
+                    HStack {
+                        Label("Couldn’t load activity.", systemImage: "exclamationmark.triangle")
+                        Spacer()
+                        Button("Retry") { Task { await loadEvents() } }
+                    }.frame(minHeight: 56)
+                }
+            } else {
+                TaskPanel {
+                    Text("No structured events for this run. New delegated runs stream activity here.")
+                        .scaledFont(.body).foregroundStyle(.secondary).frame(minHeight: 56)
+                }
             }
         } else {
+            if loadFailed {
+                // A transient failure must not take the rendered trace down with
+                // it; the next successful poll clears this row, so it reads as
+                // reconnecting rather than as data loss.
+                TaskPanel {
+                    HStack(spacing: 8) {
+                        Label("Reconnecting…", systemImage: "exclamationmark.triangle")
+                        Spacer()
+                    }
+                    .scaledFont(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(minHeight: 24)
+                }
+            }
             let story = ActivityStory.compose(events)
             LazyVStack(alignment: .leading, spacing: 10) {
                 ForEach(story.blocks) { block in
@@ -355,6 +382,13 @@ struct TaskDetail: View {
     }
 
     private var state: TaskState { TaskState(task.state) }
+
+    /// The store's current word on this task, not the snapshot the pane opened
+    /// with — the loop parks on this value, so a stale copy would either keep a
+    /// settled pane fetching or miss the resume that should re-arm it.
+    private var liveState: String {
+        store.tasks.first { $0.id == task.id }?.state ?? task.state
+    }
 
     private func loadEvents() async {
         do {

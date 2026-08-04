@@ -310,6 +310,27 @@ describe("SQLite state store", () => {
     store.close();
   });
 
+  test("probes task states without materialising full rows", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const running = task("running");
+    const asking = task("needs_input");
+    store.createTask(running);
+    store.createTask(asking);
+
+    // The waiter's poll path reads exactly id and state, nothing else.
+    expect(store.taskStates([running.id, asking.id]))
+      .toEqual(new Map([[running.id, "running"], [asking.id, "needs_input"]]));
+    expect(store.taskStates(["missing"])).toEqual(new Map());
+    expect(store.taskStates([])).toEqual(new Map());
+
+    running.state = "completed";
+    running.updatedAt = new Date().toISOString();
+    store.saveTask(running);
+    expect(store.taskStates([running.id]).get(running.id)).toBe("completed");
+    store.close();
+  });
+
   test("finds a fan-out batch by its parent task", () => {
     const { db } = paths();
     const store = new StateStore({ path: db, seedProfiles: [profile] });

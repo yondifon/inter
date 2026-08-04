@@ -1,4 +1,4 @@
-import type { Task } from "./types";
+import type { Task, TaskState } from "./types";
 
 export interface TaskWaitResult {
   reason: "attention" | "progress" | "timeout";
@@ -28,11 +28,27 @@ const POLL_INTERVAL_MS = 100;
 
 export class TaskWaiter {
   private readonly listeners = new Set<Listener>();
+  // Polls only read `state`; the optional probe makes that a two-column read
+  // instead of a full row. Direct constructions without it fall back to
+  // deriving state from getTask, which keeps the unknown-id throw here.
+  // (That fallback is a test convenience, not the production path.)
+  private readonly getStates: (ids: string[]) => Map<string, TaskState>;
 
   constructor(
     private readonly getTask: (id: string) => Task | undefined,
     private readonly getCursor: (ids: string[]) => number = () => 0,
-  ) {}
+    getStates?: (ids: string[]) => Map<string, TaskState>,
+  ) {
+    this.getStates = getStates ?? ((ids) => {
+      const states = new Map<string, TaskState>();
+      for (const id of ids) {
+        const task = this.getTask(id);
+        if (!task) throw new Error(`unknown task: ${id}`);
+        states.set(id, task.state);
+      }
+      return states;
+    });
+  }
 
   notify(taskId: string): void {
     for (const listener of [...this.listeners]) listener(taskId);
@@ -55,7 +71,7 @@ export class TaskWaiter {
     // one to a smaller set would otherwise hand back a lower number and replay
     // events the caller already saw.
     const cursor = () => Math.max(afterCursor ?? 0, this.getCursor(ids));
-    if (current.some(needsAttention)) {
+    if (current.some((task) => needsAttention(task.state))) {
       return { reason: "attention", tasks: current, cursor: cursor() };
     }
     if (until === "progress" && afterCursor !== undefined && this.getCursor(ids) > afterCursor) {
@@ -88,11 +104,17 @@ export class TaskWaiter {
       const onChange: Listener = (changedId) => {
         if (changedId && !ids.includes(changedId)) return;
         try {
-          const tasks = this.tasks(ids);
+          // Decide from the probe before paying for full rows: the common case
+          // is no news, and a full row exists only to be thrown away then.
+          const states = this.getStates(ids);
+          for (const id of ids) if (!states.has(id)) throw new Error(`unknown task: ${id}`);
           const latest = this.getCursor(ids);
           const cursor = Math.max(afterCursor ?? 0, latest);
-          if (tasks.some(needsAttention)) finish({ reason: "attention", tasks, cursor });
-          else if (until === "progress" && latest > baseline) finish({ reason: "progress", tasks, cursor });
+          const attention = ids.some((id) => needsAttention(states.get(id)!));
+          if (attention || (until === "progress" && latest > baseline)) {
+            const tasks = this.tasks(ids);
+            finish({ reason: attention ? "attention" : "progress", tasks, cursor });
+          }
         } catch (error) {
           if (settled) return;
           settled = true;
@@ -122,7 +144,7 @@ export class TaskWaiter {
   }
 }
 
-function needsAttention(task: Task): boolean {
-  return task.state === "needs_input" || task.state === "blocked" ||
-    task.state === "completed" || task.state === "failed" || task.state === "cancelled";
+function needsAttention(state: TaskState): boolean {
+  return state === "needs_input" || state === "blocked" ||
+    state === "completed" || state === "failed" || state === "cancelled";
 }

@@ -28,6 +28,7 @@ const MAX_ANTIGRAVITY_BOOTSTRAP_RETRIES = 2;
 const taskWaiter = new TaskWaiter(
   (id) => stateStore().getTask(id),
   (ids) => stateStore().latestTaskEventId(ids, true),
+  (ids) => stateStore().taskStates(ids),
 );
 type WorkerProcess = ReturnType<typeof Bun.spawn>;
 interface ActiveWorker {
@@ -475,62 +476,71 @@ async function runTask(
             }
             return;
           }
+          // Only the parse is expected to fail: a provider can print
+          // anything, and a bad line costs that line alone. Everything after
+          // it is deliberate work — a failed event write is a real fault,
+          // and swallowing it would truncate the log and freeze the silence
+          // clock with no signal anywhere. Let it throw to runTask's catch.
+          let payload: Record<string, unknown>;
           try {
             const parsed = JSON.parse(line) as unknown;
-            const payload = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+            payload = parsed && typeof parsed === "object" && !Array.isArray(parsed)
               ? parsed as Record<string, unknown>
               : { value: parsed };
-            const kind = typeof payload.type === "string" ? payload.type : "event";
-            appendTaskEvent(task.id, `agent.${kind}`, task.state, compactPayload(payload));
-            // The run reports its own spend once, near the end; a retry inside
-            // this same run replaces it rather than adding to it.
-            const reported = runCostFrom(payload);
-            if (reported.costUsd !== undefined || reported.turns !== undefined) runCost = reported;
-            lastAgentEventAt = Date.now();
-            eventCount++;
-            attemptEvents++;
-            // The sandbox refuses out-of-scope writes inside the worker, where
-            // the trace never sees a failure row; flag the refusal here so the
-            // stream carries an explicit marker instead of implying success.
-            for (const target of writeTargetsFrom(payload)) {
-              const refused = scopeRefusedWrite(target, task.cwd, task.scope, scratchDir);
-              if (!refused || flaggedWrites.has(refused)) continue;
-              flaggedWrites.add(refused);
-              appendTaskEvent(task.id, "scope_refusal", task.state, {
-                path: refused,
-                error: `${refused} is outside the granted write scope; the sandbox refuses this write`,
-              });
-            }
-            const sessionId = sessionIdFrom(profile.provider, payload);
-            if (sessionId) {
-              if (resumeWith) {
-                if (sessionId !== resumeWith && !resumeSessionMismatch) {
-                  resumeSessionMismatch = sessionId;
-                  appendTaskEvent(task.id, "resume_session_mismatch", task.state, {
-                    expectedSession: resumeWith,
-                    actualSession: sessionId,
-                  });
-                  killProcessGroup(child, "SIGTERM");
-                } else if (sessionId === resumeWith && !resumeSessionConfirmed) {
-                  resumeSessionConfirmed = true;
-                  appendTaskEvent(task.id, "session_reused", task.state, {
-                    provider: profile.provider,
-                    sessionId,
-                  });
-                }
-                return;
+          } catch {
+            return;
+          }
+          const kind = typeof payload.type === "string" ? payload.type : "event";
+          appendTaskEvent(task.id, `agent.${kind}`, task.state, compactPayload(payload));
+          // The run reports its own spend once, near the end; a retry inside
+          // this same run replaces it rather than adding to it.
+          const reported = runCostFrom(payload);
+          if (reported.costUsd !== undefined || reported.turns !== undefined) runCost = reported;
+          lastAgentEventAt = Date.now();
+          eventCount++;
+          attemptEvents++;
+          // The sandbox refuses out-of-scope writes inside the worker, where
+          // the trace never sees a failure row; flag the refusal here so the
+          // stream carries an explicit marker instead of implying success.
+          for (const target of writeTargetsFrom(payload)) {
+            const refused = scopeRefusedWrite(target, task.cwd, task.scope, scratchDir);
+            if (!refused || flaggedWrites.has(refused)) continue;
+            flaggedWrites.add(refused);
+            appendTaskEvent(task.id, "scope_refusal", task.state, {
+              path: refused,
+              error: `${refused} is outside the granted write scope; the sandbox refuses this write`,
+            });
+          }
+          const sessionId = sessionIdFrom(profile.provider, payload);
+          if (sessionId) {
+            if (resumeWith) {
+              if (sessionId !== resumeWith && !resumeSessionMismatch) {
+                resumeSessionMismatch = sessionId;
+                appendTaskEvent(task.id, "resume_session_mismatch", task.state, {
+                  expectedSession: resumeWith,
+                  actualSession: sessionId,
+                });
+                killProcessGroup(child, "SIGTERM");
+              } else if (sessionId === resumeWith && !resumeSessionConfirmed) {
+                resumeSessionConfirmed = true;
+                appendTaskEvent(task.id, "session_reused", task.state, {
+                  provider: profile.provider,
+                  sessionId,
+                });
               }
-              const store = stateStore();
-              if (!task.sessionId) {
-                if (store.captureTaskSessionId(task.id, profile.provider, sessionId)) {
-                  task.sessionId = sessionId;
-                  taskWaiter.notify(task.id);
-                } else {
-                  task.sessionId = store.getTask(task.id)?.sessionId;
-                }
+              return;
+            }
+            const store = stateStore();
+            if (!task.sessionId) {
+              if (store.captureTaskSessionId(task.id, profile.provider, sessionId)) {
+                task.sessionId = sessionId;
+                taskWaiter.notify(task.id);
+              } else {
+                task.sessionId = store.getTask(task.id)?.sessionId;
               }
             }
-          } catch {}
+          }
+
         }),
         readStream(child.stderr, undefined, MAX_EVENT_LINE),
         child.exited,
@@ -615,6 +625,10 @@ async function runTask(
     if (!persisted) return;
     recordProfileTaskOutcome(stateStore(), task.profileId, outcome);
   } catch (error) {
+    // A throw from the stream handler abandons a worker mid-flight: its pipe
+    // reader is gone, so it would block on a full buffer forever. The cancel
+    // path kills the child for the same reason.
+    if (active?.child) killProcessGroup(active.child, "SIGTERM");
     if (!active?.cancelled && stateStore().getTask(task.id)?.state !== "cancelled") {
       const message = String(error);
       update(task, {
