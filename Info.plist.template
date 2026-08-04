@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>CFBundleExecutable</key><string>Inter</string>
-  <key>CFBundleIdentifier</key><string>dev.inter.app</string>
+  <key>CFBundleIdentifier</key><string>desgnspace.inter.app</string>
   <key>CFBundleName</key><string>Inter</string>
   <key>CFBundleIconFile</key><string>Inter.icns</string>
   <key>CFBundleShortVersionString</key><string>0.3.0</string>

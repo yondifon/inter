@@ -977,4 +977,118 @@ describe("SQLite state store", () => {
     expect(store.getTask(legacyTask.id)?.state).toBe("cancelled");
     store.close();
   });
+
+  test("migrates an old-shape database to the full schema, ledger and retry backfill", () => {
+    const { db } = paths();
+    const failedAt = "2026-07-30T12:30:00.000Z";
+    const old = new Database(db, { create: true });
+    old.exec(`
+      PRAGMA foreign_keys = ON;
+      CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT);
+      CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE profiles(
+        id TEXT PRIMARY KEY, label TEXT NOT NULL, provider TEXT NOT NULL,
+        default_model TEXT NOT NULL, enabled INTEGER NOT NULL, env_json TEXT NOT NULL,
+        capabilities_json TEXT NOT NULL, command_json TEXT, created_at TEXT, updated_at TEXT,
+        deleted_at TEXT
+      );
+      CREATE TABLE tasks(
+        id TEXT PRIMARY KEY, profile_id TEXT NOT NULL REFERENCES profiles(id), model TEXT NOT NULL,
+        prompt TEXT NOT NULL, cwd TEXT NOT NULL, state TEXT NOT NULL, output TEXT NOT NULL,
+        error TEXT, question TEXT, parent_task_id TEXT REFERENCES tasks(id),
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE task_events(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL REFERENCES tasks(id),
+        event_type TEXT NOT NULL, state TEXT NOT NULL, payload TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+      );
+      CREATE TABLE profile_failures(
+        profile_id TEXT PRIMARY KEY REFERENCES profiles(id), code TEXT NOT NULL,
+        message TEXT NOT NULL, failed_at TEXT NOT NULL, consecutive_failures INTEGER NOT NULL
+      );
+      CREATE TABLE scope_grants(
+        id TEXT PRIMARY KEY, cwd TEXT NOT NULL, scope_json TEXT NOT NULL,
+        created_at TEXT NOT NULL, last_used_at TEXT NOT NULL, use_count INTEGER NOT NULL DEFAULT 1
+      );
+    `);
+    old.query(`
+      INSERT INTO profiles(
+        id, label, provider, default_model, enabled, env_json, capabilities_json,
+        command_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, 1, '{}', '[]', NULL, ?, ?)
+    `).run(profile.id, profile.label, profile.provider, profile.model, new Date().toISOString(), new Date().toISOString());
+    const legacyTask = task("completed");
+    old.query(`
+      INSERT INTO tasks(
+        id, profile_id, model, prompt, cwd, state, output, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      legacyTask.id, legacyTask.profileId, legacyTask.model, legacyTask.prompt,
+      legacyTask.cwd, legacyTask.state, legacyTask.output, legacyTask.createdAt, legacyTask.updatedAt,
+    );
+    old.query(`
+      INSERT INTO profile_failures(profile_id, code, message, failed_at, consecutive_failures)
+      VALUES (?, 'rate_limit', 'Too many requests', ?, 2)
+    `).run(profile.id, failedAt);
+    old.query(`
+      INSERT INTO scope_grants(id, cwd, scope_json, created_at, last_used_at, use_count)
+      VALUES (?, ?, ?, ?, ?, 1)
+    `).run("grant-1", "/tmp/project", JSON.stringify({ read: ["src/**"], write: [] }), failedAt, failedAt);
+    old.close();
+
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    store.close();
+
+    const migrated = new Database(db);
+    const ledger = migrated.query<{ version: number; name: string }, []>(
+      "SELECT version, name FROM schema_migrations ORDER BY version",
+    ).all();
+    expect(ledger).toEqual([
+      { version: 1, name: "profiles tasks and events" },
+      { version: 2, name: "task scope lifecycle and completion" },
+      { version: 3, name: "profile failure retry timestamps" },
+      { version: 4, name: "task worker session ids" },
+      { version: 5, name: "backfill task worker session ids" },
+      { version: 6, name: "project memories" },
+      { version: 7, name: "task archives" },
+      { version: 8, name: "scope grants, shipped prompts, attempts and cost" },
+      { version: 9, name: "task titles" },
+    ]);
+    const taskColumns = new Set(migrated.query<{ name: string }, []>(
+      "PRAGMA table_info(tasks)",
+    ).all().map(({ name }) => name));
+    for (const column of [
+      "scope_json", "allow_questions", "session_id", "archived_at", "grant_id",
+      "shipped_prompt", "attempts_json", "cost_usd", "turns", "effort", "tldr", "title",
+    ]) {
+      expect(taskColumns).toContain(column);
+    }
+    expect(taskColumns).not.toContain("child_task_id");
+    // The contract rebuild gave the legacy row the modern defaults.
+    expect(migrated.query<{ scope_json: string; allow_questions: number }, [string]>(
+      "SELECT scope_json, allow_questions FROM tasks WHERE id = ?",
+    ).get(legacyTask.id)).toEqual({
+      scope_json: '{"read":["**"],"write":["**"]}',
+      allow_questions: 1,
+    });
+    // The rate-limit failure gained a retry time derived from its failed_at.
+    expect(migrated.query<{ retry_at: string | null }, [string]>(
+      "SELECT retry_at FROM profile_failures WHERE profile_id = ?",
+    ).get(profile.id)?.retry_at).toBe(new Date(Date.parse(failedAt) + 10 * 60_000).toISOString());
+    // The legacy grant gained the per-destination column and kept its row.
+    const grantColumns = new Set(migrated.query<{ name: string }, []>(
+      "PRAGMA table_info(scope_grants)",
+    ).all().map(({ name }) => name));
+    expect(grantColumns).toContain("profile_id");
+    expect(migrated.query<{ id: string }, []>("SELECT id FROM scope_grants").all()
+      .map(({ id }) => id)).toEqual(["grant-1"]);
+    // The profiles rebuild widened the provider CHECK to pi and kept the row.
+    expect(migrated.query<{ sql: string | null }, []>(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'profiles'",
+    ).get()?.sql).toContain("'pi'");
+    expect(migrated.query<{ id: string }, []>("SELECT id FROM profiles").all()
+      .map(({ id }) => id)).toContain(profile.id);
+    migrated.close();
+  });
 });
