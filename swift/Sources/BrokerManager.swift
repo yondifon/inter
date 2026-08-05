@@ -1,6 +1,13 @@
 import Foundation
 import Observation
 
+struct BrokerHealth: Codable, Sendable {
+    var status: String
+    var version: String
+    var mcpContractVersion: Int
+    var build: String
+}
+
 @Observable
 @MainActor
 final class BrokerManager {
@@ -55,6 +62,17 @@ final class BrokerManager {
                 }
             }
             status = .stopped
+        }
+    }
+
+    func fetchHealth() async -> BrokerHealth? {
+        guard let url = URL(string: "\(InterServer.baseURL)/health") else { return nil }
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+            return try JSONDecoder().decode(BrokerHealth.self, from: data)
+        } catch {
+            return nil
         }
     }
 

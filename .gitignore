@@ -1,6 +1,8 @@
 node_modules/
 .build/
 dist/
+# Bun compile leftovers, dropped in the repo root on interrupted builds
+*.bun-build
 
 .env
 .env.*
@@ -31,6 +33,7 @@ DerivedData/
 examples/
 .inter-test/
 tests/.probe/
+.inter-analysis/
 
 # Scratch and planning
 .plans/

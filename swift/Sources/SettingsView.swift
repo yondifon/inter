@@ -1,26 +1,38 @@
 import SwiftUI
 
+enum SettingsSelection: Hashable {
+    case worker(String)
+    case about
+}
+
 /// Standard Settings window content, opened by ⌘, (see `AppDelegate.openSettings`
 /// in main.swift — this app is AppKit-lifecycle, not a SwiftUI `App`, so there is
-/// no `Settings` scene to host this for free). Workers is the only pane today; a
-/// second pane would make this worth wrapping in a `TabView`.
+/// no `Settings` scene to host this for free).
 struct SettingsView: View {
     let store: ProfileStore
-    @State private var selection: String?
+    let broker: BrokerManager
+    @State private var selection: SettingsSelection?
     @State private var editing: Profile?
     @State private var adding = false
+    @State private var workersExpanded = true
 
     var body: some View {
         NavigationSplitView {
             List(selection: $selection) {
-                if store.profiles.isEmpty {
-                    Text("No workers yet. Add one to start delegating.")
-                        .scaledFont(.callout).foregroundStyle(.tertiary)
-                } else {
-                    ForEach(store.profiles) { profile in
-                        WorkerRow(profile: profile).tag(profile.id)
+                DisclosureGroup(isExpanded: $workersExpanded) {
+                    if store.profiles.isEmpty {
+                        Text("No workers yet. Add one to start delegating.")
+                            .scaledFont(.callout).foregroundStyle(.tertiary)
+                    } else {
+                        ForEach(store.profiles) { profile in
+                            WorkerRow(profile: profile).tag(SettingsSelection.worker(profile.id))
+                        }
                     }
+                } label: {
+                    SidebarSectionLabel(text: "Workers")
                 }
+
+                AboutRow().tag(SettingsSelection.about)
             }
             .listStyle(.sidebar)
             .scrollIndicators(.never)
@@ -32,11 +44,18 @@ struct SettingsView: View {
                 }
             }
         } detail: {
-            if let id = selection, let profile = store.profiles.first(where: { $0.id == id }) {
-                ProfileDetail(profile: profile, store: store) { editing = profile }
-                    .id(profile.id)
-            } else {
-                ContentUnavailableView("Choose a worker", systemImage: "person.2")
+            switch selection {
+            case .worker(let id):
+                if let profile = store.profiles.first(where: { $0.id == id }) {
+                    ProfileDetail(profile: profile, store: store) { editing = profile }
+                        .id(profile.id)
+                } else {
+                    ContentUnavailableView("Choose a worker", systemImage: "person.2")
+                }
+            case .about:
+                AboutPage(broker: broker)
+            case nil:
+                ContentUnavailableView("Choose an item", systemImage: "gearshape")
             }
         }
         .sheet(isPresented: $adding) { ProfileFormView(store: store) }
@@ -45,12 +64,99 @@ struct SettingsView: View {
         // profile that no longer exists; fall back to the empty state instead of
         // stranding the detail pane on stale data.
         .onChange(of: store.profiles) { _, profiles in
-            if let selection, !profiles.contains(where: { $0.id == selection }) {
+            if case let .worker(id) = selection, !profiles.contains(where: { $0.id == id }) {
                 self.selection = nil
             }
         }
         .frame(minWidth: 640, minHeight: 420)
         .navigationTitle("Settings")
+    }
+}
+
+private struct AboutRow: View {
+    @Environment(\.uiScale) private var uiScale
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(systemName: "info.circle")
+                .scaledFont(.body)
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+                .frame(width: 18 * uiScale, alignment: .center)
+            Text("About").scaledFont(.body)
+        }
+        .padding(.vertical, 5)
+    }
+}
+
+struct AboutPage: View {
+    let broker: BrokerManager
+    @State private var health: BrokerHealth?
+    @State private var fetchFailed = false
+
+    var body: some View {
+        VStack(spacing: 24) {
+            VStack(spacing: 12) {
+                Image(nsImage: InterMark.appIcon(side: 80))
+                    .resizable()
+                    .frame(width: 80, height: 80)
+
+                VStack(spacing: 4) {
+                    Text("Inter").font(.title2.weight(.semibold))
+                    Text("Version \(appVersion) (\(buildNumber))")
+                        .scaledFont(.callout, design: .monospaced)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Divider()
+
+            if let health {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        PulsingDot(color: .green, diameter: 7, beats: false)
+                        Text("Broker running").scaledFont(.callout, weight: .medium)
+                    }
+
+                    LabeledContent("Version", value: health.version)
+                    LabeledContent("MCP contract", value: "v\(health.mcpContractVersion)")
+
+                    Text(health.build)
+                        .scaledFont(.caption, design: .monospaced)
+                        .foregroundStyle(.tertiary)
+                        .textSelection(.enabled)
+                }
+            } else if fetchFailed {
+                HStack(spacing: 8) {
+                    Circle().fill(.red).frame(width: 7, height: 7)
+                    Text("Broker unreachable").scaledFont(.callout)
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                ProgressView().controlSize(.small)
+            }
+
+            Spacer()
+        }
+        .padding(32)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .task { await fetch() }
+    }
+
+    private var appVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
+    }
+
+    private var buildNumber: String {
+        Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0"
+    }
+
+    private func fetch() async {
+        if let result = await broker.fetchHealth() {
+            health = result
+        } else {
+            fetchFailed = true
+        }
     }
 }
 

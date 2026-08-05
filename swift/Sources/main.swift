@@ -137,7 +137,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             panel.title = "Settings"
             panel.titlebarAppearsTransparent = true
             panel.isReleasedWhenClosed = false
-            panel.contentViewController = NSHostingController(rootView: SettingsView(store: store))
+            panel.contentViewController = NSHostingController(rootView: SettingsView(store: store, broker: broker))
             panel.center()
             settingsWindow = panel
         }
