@@ -165,12 +165,22 @@ final class TaskListItemTests: XCTestCase {
         XCTAssertTrue(fresh.isEmpty)
     }
 
-    func testPrependInOrderReturnsEmptyWhenBatchOverlaps() {
+    func testPrependInOrderFiltersDuplicatesAndKeepsTheOlderRemainder() {
         let existing = [event(3), event(4)]
-        // incoming has id 4 which >= existing.first.id (3)
+        // id 4 is a duplicate; the genuinely new id 1 still sits before the
+        // existing range, so it prepends cleanly.
         let incoming = [event(1), event(4)]
         let fresh = EventMerge.prependInOrder(incoming, before: existing)
-        XCTAssertTrue(fresh.isEmpty, "overlapping batch must signal the caller to sort")
+        XCTAssertEqual(fresh.map(\.id), [1])
+    }
+
+    func testPrependInOrderReturnsEmptyWhenBatchStraddlesTheRange() {
+        let existing = [event(3), event(4)]
+        // id 5 is new and newer than the first existing id — the page straddles
+        // the range, so the caller must fall back to a full sort.
+        let incoming = [event(1), event(5)]
+        let fresh = EventMerge.prependInOrder(incoming, before: existing)
+        XCTAssertTrue(fresh.isEmpty, "straddling batch must signal the caller to sort")
     }
 
     func testPrependInOrderHandlesEmptyExisting() {
@@ -199,17 +209,17 @@ final class TaskListItemTests: XCTestCase {
         XCTAssertEqual(events.map(\.id), [3, 5, 6, 7])
     }
 
-    func testFullMergeSortsWhenPrependOverlaps() {
+    func testFullMergeSortsWhenPrependStraddles() {
         var events = [event(3), event(4)]
-        let incoming = [event(1), event(3)]
+        let incoming = [event(1), event(5)]
         let fresh = EventMerge.prependInOrder(incoming, before: events)
-        XCTAssertTrue(fresh.isEmpty, "overlap detected")
+        XCTAssertTrue(fresh.isEmpty, "straddle detected")
         // Caller's fallback: dedupe + sort
         let known = Set(events.map(\.id))
         let deduped = incoming.filter { !known.contains($0.id) }
         events = deduped + events
         events.sort { $0.id < $1.id }
-        XCTAssertEqual(events.map(\.id), [1, 3, 4])
+        XCTAssertEqual(events.map(\.id), [1, 3, 4, 5])
     }
 
     func testBeforePagePrependKeepsAscendingOrder() {

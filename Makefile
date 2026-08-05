@@ -9,7 +9,10 @@ dev:
 
 server:
 	mkdir -p $(DIST)
-	bun build --compile src/cli.ts --outfile $(DIST)/inter-server
+	@# The stamp is what lets `make install` tell two 0.6.0 builds apart: a
+	@# surviving old broker with a matching version number would otherwise pass
+	@# verification while serving yesterday's code.
+	bun build --compile --define INTER_BUILD_STAMP="\"$$(git rev-parse --short HEAD 2>/dev/null || echo nogit)-$$(date +%Y%m%d%H%M%S)\"" src/cli.ts --outfile $(DIST)/inter-server
 
 swift-build:
 	cd swift && swift build -c release
@@ -78,7 +81,12 @@ install: bundle
 		echo "  just built:      $$built"; \
 		exit 1; \
 	fi; \
-	echo "install: broker verified — $$health"
+	echo "install: broker verified — $$health"; \
+	if [ -S "$$HOME/.inter/inter.sock" ]; then \
+		echo "install: event socket bound — $$HOME/.inter/inter.sock"; \
+	else \
+		echo "install: warning: no event socket at $$HOME/.inter/inter.sock; watch will fall back to database polling (harmless, but push is off)"; \
+	fi
 
 clean:
 	rm -rf $(DIST)

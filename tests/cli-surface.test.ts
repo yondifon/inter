@@ -328,6 +328,10 @@ describe("the build's own answer to /health", () => {
     expect(body.status).toBe("ok");
     expect(typeof body.version).toBe("string");
     expect(typeof body.mcpContractVersion).toBe("number");
+    // The build stamp is what tells two same-version builds apart — the
+    // comparison `make install` actually needs. "dev" under `bun run`; the
+    // Makefile bakes a real sha+time stamp via --define.
+    expect(body.build).toBe("dev");
   });
 
   // `make install` decides the running broker is the build it just made by

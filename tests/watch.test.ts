@@ -699,6 +699,10 @@ describe("observe store errors", () => {
       expect(out).toEqual([]);
       expect(err.join(" ")).toContain("cannot observe");
       expect(err.join(" ")).toContain(bogus);
+      // Both transports failed, so both belong in the error: naming only the
+      // database sends whoever reads it down the wrong road.
+      expect(err.join(" ")).toContain("event socket was also unavailable");
+      expect(err.join(" ")).toContain("no event socket at");
     } finally {
       process.env.INTER_DB = savedDb;
       process.env.INTER_SOCK = savedSock;

@@ -293,30 +293,34 @@ struct ProfileFailureSnapshot: Codable, Identifiable, Hashable {
 /// ascending by id; callers verify that invariant and fall back to a full sort
 /// when a batch lands out of order.
 enum EventMerge {
-    /// Filters to events whose ids are not already present, and returns them
-    /// only when they are strictly newer than the last existing id. Returns an
-    /// empty array when every event is a duplicate, or when the batch overlaps
-    /// (caller must sort).
+    /// Filters out ids already present, then returns the remainder only when it
+    /// can be appended without breaking order: internally ascending and every id
+    /// past the last existing one. A duplicate is fine — page boundaries repeat
+    /// an id — but a genuinely new id inside the existing range means the stream
+    /// jumped, so the empty return tells the caller to fall back to a full sort.
     static func appendInOrder(_ incoming: [TaskEventSnapshot], after existing: [TaskEventSnapshot]) -> [TaskEventSnapshot] {
         var known = Set(existing.map(\.id))
         let fresh = incoming.filter { known.insert($0.id).inserted }
-        guard !fresh.isEmpty else { return [] }
-        if let lastExisting = existing.last, let firstIncoming = fresh.first, firstIncoming.id < lastExisting.id {
+        guard !fresh.isEmpty, ascending(fresh) else { return [] }
+        if let lastExisting = existing.last, fresh[0].id < lastExisting.id {
             return []
         }
         return fresh
     }
 
-    /// Filters to events whose ids are not already present, and returns them
-    /// only when they are strictly older than the first existing id. Returns an
-    /// empty array when every event is a duplicate, or when the batch overlaps.
+    /// Mirror of `appendInOrder` for paging backward: the remainder must be
+    /// internally ascending and sit entirely before the first existing id.
     static func prependInOrder(_ incoming: [TaskEventSnapshot], before existing: [TaskEventSnapshot]) -> [TaskEventSnapshot] {
         var known = Set(existing.map(\.id))
         let fresh = incoming.filter { known.insert($0.id).inserted }
-        guard !fresh.isEmpty else { return [] }
-        if let firstExisting = existing.first, let lastIncoming = fresh.last, lastIncoming.id >= firstExisting.id {
+        guard !fresh.isEmpty, ascending(fresh) else { return [] }
+        if let firstExisting = existing.first, fresh[fresh.count - 1].id > firstExisting.id {
             return []
         }
         return fresh
+    }
+
+    private static func ascending(_ events: [TaskEventSnapshot]) -> Bool {
+        zip(events, events.dropFirst()).allSatisfy { $0.id < $1.id }
     }
 }

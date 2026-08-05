@@ -176,20 +176,21 @@ export async function runWatch(
   // ---- Try the event socket first ----
 
   const sockResult = await trySocketRun(parsed.taskIds, deadline, labelled, out, err);
-  if (sockResult !== "fallback") return sockResult;
+  if (typeof sockResult === "number") return sockResult;
 
   // ---- DB fallback ----
 
-  return runDbLoop(parsed.taskIds, deadline, labelled, out, err, false);
+  return runDbLoop(parsed.taskIds, deadline, labelled, out, err, false, undefined, undefined, 0, sockResult.fallbackReason);
 }
 
 // ---- Socket attempt ----
 
 /**
  * Tries the event socket. Returns a numeric exit code on success or fatal
- * error, or `"fallback"` when the caller should open the store and run the
- * DB loop instead (socket never existed, or died mid-run and has already
- * warned to stderr).
+ * error, or a fallback carrying WHY the socket was skipped — the fallback
+ * itself stays silent, but if the store then fails too, an error naming only
+ * the database sends whoever reads it down the wrong road. Both causes belong
+ * in that message; tonight's two-hour diagnosis started with exactly this gap.
  */
 async function trySocketRun(
   taskIds: string[],
@@ -197,11 +198,11 @@ async function trySocketRun(
   labelled: boolean,
   out: (line: string) => void,
   err: (line: string) => void,
-): Promise<number | "fallback"> {
+): Promise<number | { fallbackReason: string }> {
   let stream;
   try {
     const remaining = deadline - Date.now();
-    if (remaining <= 0) return "fallback";
+    if (remaining <= 0) return { fallbackReason: "the deadline expired before connecting" };
     const connecting = connectEventSocket({
       path: eventSocketPath(),
       watch: taskIds,
@@ -228,11 +229,13 @@ async function trySocketRun(
       // and silence timer (the same leak `finally`'s stream.close() below
       // prevents for the mainline path).
       connecting.then((s) => s.close()).catch(() => {});
-      return "fallback";
+      return { fallbackReason: `connecting to ${eventSocketPath()} outlasted the deadline` };
     }
     stream = raced.stream;
   } catch (e) {
-    if (e instanceof SocketConnectError) return "fallback";
+    if (e instanceof SocketConnectError) {
+      return { fallbackReason: `no event socket at ${eventSocketPath()} (${e.message})` };
+    }
     if (e instanceof SocketErrorFrame) {
       err(e.message);
       return 2;
@@ -309,12 +312,18 @@ async function runDbLoop(
   failoverPending?: Set<string>,
   /** Only meaningful when isFailover: settles already printed over the socket. */
   failoverSettled = 0,
+  /** Why the socket path was skipped, for the one error that needs both causes. */
+  socketNote?: string,
 ): Promise<number> {
   let store;
   try {
     store = observeStateStore();
   } catch (e) {
     err(e instanceof Error ? e.message : String(e));
+    // The silent fallback earns its silence only while the DB answers. When
+    // both transports are down, an error naming only the database points the
+    // reader at the wrong half of the problem.
+    if (socketNote) err(`event socket was also unavailable: ${socketNote}`);
     return 2;
   }
 

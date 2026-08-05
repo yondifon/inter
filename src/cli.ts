@@ -36,13 +36,13 @@ import { loadRoutingPolicy } from "./routing-policy";
 import { runWatch, watchCommand } from "./watch";
 import { runInflight } from "./inflight";
 import { startEventSocket } from "./event-socket";
-import { MCP_CONTRACT_VERSION, VERSION } from "./version";
+import { BUILD_STAMP, MCP_CONTRACT_VERSION, VERSION } from "./version";
 
 const port = Number(Bun.env.INTER_PORT ?? 7331);
 // The one answer to "what build are you": /health serves it from the broker on
 // the port, `version` prints it from the binary on disk, and `make install`
 // fails when those two disagree. One literal, so the two cannot drift.
-const healthReport = { status: "ok", version: VERSION, mcpContractVersion: MCP_CONTRACT_VERSION } as const;
+const healthReport = { status: "ok", version: VERSION, mcpContractVersion: MCP_CONTRACT_VERSION, build: BUILD_STAMP } as const;
 
 // `watch` is the one invocation that is not the broker. It reads the same
 // SQLite store the broker writes, rather than calling the broker over HTTP, so

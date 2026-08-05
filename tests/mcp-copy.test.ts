@@ -49,11 +49,18 @@ describe("MCP consent copy", () => {
     // never a hardcoded literal that can drift from how this process started.
     expect(MCP_INSTRUCTIONS).toContain("Dispatch returns immediately");
     expect(MCP_INSTRUCTIONS).toContain(watchCommand());
-    expect(MCP_INSTRUCTIONS).toContain("default to backgrounding");
-    expect(MCP_INSTRUCTIONS).toContain("short deliberate block");
+    expect(MCP_INSTRUCTIONS).toContain("background");
     expect(DELEGATE_DESCRIPTION).toContain("Dispatch returns immediately");
     expect(DELEGATE_DESCRIPTION).toContain(watchCommand());
-    expect(DELEGATE_DESCRIPTION).toContain("short deliberate block");
+  });
+
+  test("the delegate flow never mentions the wait tool", () => {
+    // Wait earns its keep only in its own description (a short deliberate
+    // block); naming it in the dispatch flow re-taught callers the polling
+    // habit the watch command exists to end.
+    expect(MCP_INSTRUCTIONS.toLowerCase()).not.toContain("wait");
+    expect(DELEGATE_DESCRIPTION.toLowerCase()).not.toContain("wait for");
+    expect(DELEGATE_DESCRIPTION).not.toContain("Reach for wait");
   });
 
   test("positions delegation for second opinions, capacity, and refused work", () => {

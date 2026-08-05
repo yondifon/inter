@@ -129,15 +129,11 @@ struct TaskDetail: View {
         }
         .background(Surface.content)
         .task(id: taskId) {
-            // Fetch the full task detail on open; refetch when the summary row
-            // signals a state change or an update the detail hasn't seen yet.
-            if task?.updatedAt != currentListItem?.updatedAt || task?.state != currentListItem?.state {
-                task = await store.taskDetail(id: taskId)
-                detailLoaded = true
-            }
+            await refreshDetailIfStale()
             resetEventState()
             while !Task.isCancelled {
                 await loadEvents()
+                await refreshDetailIfStale()
                 if TaskState(liveState).isTerminal {
                     // A settled run is not polled for events; park on the store
                     // instead. Resume and answering a question both leave a
@@ -148,6 +144,7 @@ struct TaskDetail: View {
                     loadFailed = false
                     while !Task.isCancelled, TaskState(liveState).isTerminal {
                         try? await Task.sleep(for: .seconds(1))
+                        await refreshDetailIfStale()
                     }
                     continue
                 }
@@ -483,6 +480,16 @@ struct TaskDetail: View {
     /// should be refetched.
     private var currentListItem: TaskListItem? {
         store.tasks.first { $0.id == taskId }
+    }
+
+    /// Refetches the full row whenever the summary has moved past the copy on
+    /// screen. Runs on every pass of the polling loop — including the parked
+    /// terminal loop, where completion lands the output the Response tab shows.
+    private func refreshDetailIfStale() async {
+        guard task?.updatedAt != currentListItem?.updatedAt || task?.state != currentListItem?.state else { return }
+        guard let fetched = await store.taskDetail(id: taskId), !Task.isCancelled else { return }
+        task = fetched
+        detailLoaded = true
     }
 
     // MARK: - Event loading (tail-first, compose off-main)

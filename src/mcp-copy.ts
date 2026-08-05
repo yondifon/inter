@@ -8,7 +8,7 @@ export const MCP_INSTRUCTIONS = [
   "Delegation sends the prompt, the cwd's saved memories, and whatever the worker reads to an external account. Get the user's approval for the destination and the data once — it then stands for that cwd and profile, so do not re-ask per dispatch — and ask again only when either moves outside what they agreed to.",
   "Scope is what the worker may touch. State it on delegate and Inter records it as a grant on that cwd for that profile; omit it and Inter reuses the newest grant for the cwd. Reusing a scope approved for a different profile still runs, but returns a warning — approval names a destination, not only a folder. Only a cwd with no grant at all falls back to the whole tree, and that task is flagged too.",
   "Callers hold only the Inter task ID; provider session IDs stay private. Reply answers a needs_input question and resume retries a failed, blocked, or cancelled task, both on the same provider session; handoff moves such a task to a different profile when that account itself is the problem, and all three keep the same task ID.",
-  `Dispatch returns immediately, so default to backgrounding \`${watchCommand()}\` in your own shell tool and get on with other work — it sleeps for free and reports the moment the task needs you. Reach for wait only for a short deliberate block, and inspect once something has settled to read it in full.`,
+  `Dispatch returns immediately, so background \`${watchCommand()}\` in your own shell tool and get on with other work — it sleeps for free and reports the moment the task needs you; inspect once something has settled to read it in full.`,
   "Answer a worker's reversible in-scope questions yourself; bring product intent, secrets, destructive actions, and requests for new authority to the user.",
 ].join(" ");
 
@@ -40,7 +40,7 @@ export const DELEGATE_DESCRIPTION = [
   "Ask an external AI provider to handle a new scoped task.",
   "Reach for this as a normal way to get work done, not only when this session is stuck: hand off implementation, research, writing, analysis, and review, and keep goal-setting, architecture, and final review here.",
   "Also use it to get an independent second opinion, explore an idea with another model, or keep working when the current provider is near its usage limit.",
-  "Supports any bounded task that can run from a prompt and cwd; for work already started, background watch to follow it, wait for a short check, or inspect to read it.",
+  "Supports any bounded task that can run from a prompt and cwd; for work already started, background watch to follow it and inspect to read it.",
   "Returns a small acknowledgement by default; use `fields` to request more of the task record, or `[\"all\"]` for the full task minus the provider session ID.",
   "This may share the prompt and worker-read project data with an external CLI account.",
   "The user approves a destination and data scope once per cwd and profile, and that approval stands for later dispatches; call route and ask for consent when no such approval exists yet, or when this task would widen it.",
@@ -55,5 +55,5 @@ export const DELEGATE_DESCRIPTION = [
   "Always pass title too: a short imperative label (max 60 chars, no markdown) of what the task does, readable at a glance in a sidebar — tldr is the sentence you read when you stop on it, title is what you read in the list.",
   "When fanning out several tasks for one goal, pass the first task's id as parent on the rest so the switchboard groups the batch.",
   "The returned Inter task ID is the only continuation handle; provider session IDs are private implementation data.",
-  `Dispatch returns immediately. Background \`${watchCommand()}\` in your own shell tool right after and get on with other work — it sleeps for free and reports the moment the task needs you, no turn spent watching it. Reach for wait instead only for a short deliberate block, and inspect once something has settled to read the result in full.`,
+  `Dispatch returns immediately. Background \`${watchCommand()}\` in your own shell tool right after and get on with other work — it sleeps for free and reports the moment the task needs you, no turn spent watching it. Inspect once something has settled to read the result in full.`,
 ].join(" ");
