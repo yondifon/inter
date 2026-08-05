@@ -9,6 +9,7 @@ private enum SidebarSelection: Hashable {
 struct ContentView: View {
     let store: ProfileStore
     let broker: BrokerManager
+    let updateChecker: UpdateChecker
     let openSettings: () -> Void
     @State private var selection: SidebarSelection?
     @State private var installResults: [MCPConfigInjector.InstallResult] = []
@@ -152,6 +153,16 @@ struct ContentView: View {
         .alert("Couldn’t update the task.", isPresented: $showingTaskActionError) {
             Button("OK", role: .cancel) {}
         }
+        .safeAreaInset(edge: .bottom) {
+            switch updateChecker.state {
+            case .updateAvailable(let commit):
+                UpdateBanner(commit: commit, updating: false) { updateChecker.installUpdate() }
+            case .updating:
+                UpdateBanner(commit: nil, updating: true) {}
+            default:
+                EmptyView()
+            }
+        }
         .frame(minWidth: 760, minHeight: 520)
     }
 
@@ -265,8 +276,8 @@ struct ContentView: View {
             Image(systemName: isFiltering
                   ? "line.3.horizontal.decrease.circle.fill"
                   : "line.3.horizontal.decrease")
-                .scaledFont(.caption2, weight: .semibold)
-                .foregroundStyle(isFiltering ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary))
+                .scaledFont(.callout, weight: .semibold)
+                .foregroundStyle(isFiltering ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
                 .frame(width: 24 * uiScale, height: 24 * uiScale)
                 .contentShape(Rectangle())
         }
@@ -396,6 +407,45 @@ private struct TaskRow: View {
     }
     private var title: String {
         task.displayLabel
+    }
+}
+
+/// Sits under the sidebar and detail columns, not inside either — an update
+/// concerns the whole app, not the current selection.
+private struct UpdateBanner: View {
+    let commit: String?
+    let updating: Bool
+    let onUpdate: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if updating {
+                ProgressView().controlSize(.small)
+                Text("Updating — rebuilding from source, app will relaunch (log: \(UpdateChecker.updateLogPath))")
+                    .scaledFont(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Image(systemName: "arrow.down.circle.fill")
+                    .scaledFont(.callout)
+                    .foregroundStyle(.tint)
+                Text("Update available — \(commit.map { String($0.prefix(7)) } ?? "new commit") on remote")
+                    .scaledFont(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+            if !updating {
+                Button("Update & Relaunch", action: onUpdate)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(Surface.content)
+        .overlay(alignment: .top) {
+            Rectangle().fill(Color(nsColor: .separatorColor)).frame(height: 1)
+        }
+        .transition(.move(edge: .bottom).combined(with: .opacity))
     }
 }
 

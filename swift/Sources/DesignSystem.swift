@@ -38,13 +38,19 @@ enum Surface {
 /// The two panes' background shades already carry the separation, so this
 /// suppresses the divider's drawn color without touching its draggable hit
 /// area — dragging keeps resizing the sidebar exactly as before.
+/// `dividerColor` alone leaves the line visible: the split view paints the
+/// divider in `drawDivider(in:)` rather than filling the rect with that color,
+/// so both have to go. The draggable hit area is separate from either, and
+/// keeps working.
 private final class HairlineHiddenSplitView: NSSplitView {
     override var dividerColor: NSColor { .clear }
+    override func drawDivider(in rect: NSRect) {}
 }
 
 /// Invisible helper view. Add it anywhere inside a `NavigationSplitView` pane
-/// via `.background(SplitViewDividerHider())` and it walks up to the enclosing
-/// `NSSplitView` to hide its divider line.
+/// via `.background(SplitViewDividerHider())`; it walks up to the outermost
+/// enclosing `NSSplitView` and hides every divider on the way, since the pane
+/// a caller anchors to may sit inside a nested split view of its own.
 struct SplitViewDividerHider: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         NSView(frame: .zero)
@@ -54,11 +60,10 @@ struct SplitViewDividerHider: NSViewRepresentable {
         DispatchQueue.main.async {
             var view: NSView? = nsView
             while let current = view {
-                if let splitView = current as? NSSplitView {
-                    if object_getClass(splitView) !== HairlineHiddenSplitView.self {
-                        object_setClass(splitView, HairlineHiddenSplitView.self)
-                    }
-                    return
+                if let splitView = current as? NSSplitView,
+                   object_getClass(splitView) !== HairlineHiddenSplitView.self {
+                    object_setClass(splitView, HairlineHiddenSplitView.self)
+                    splitView.needsDisplay = true
                 }
                 view = current.superview
             }

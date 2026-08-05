@@ -27,7 +27,11 @@ bundle: server swift-build app-icon
 	cp swift/.build/release/Inter $(APP)/Contents/MacOS/Inter
 	cp $(DIST)/inter-server $(APP)/Contents/Resources/inter-server
 	cp $(DIST)/Inter.icns $(APP)/Contents/Resources/Inter.icns
-	cp Info.plist.template $(APP)/Contents/Info.plist
+	@commit=$$(git rev-parse HEAD); \
+	sed -e "s/{{COMMIT}}/$$commit/g" \
+		-e "s|{{REPO}}|$(CURDIR)|g" \
+		Info.plist.template \
+		> $(APP)/Contents/Info.plist
 	codesign --force --deep --sign - $(APP)
 
 install: bundle

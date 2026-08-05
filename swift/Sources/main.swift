@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private let broker = BrokerManager()
     private let store = ProfileStore()
     private let zoom = AppZoom()
+    private let updateChecker = UpdateChecker()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if Bundle.main.object(forInfoDictionaryKey: "CFBundleIconFile") == nil {
@@ -19,6 +20,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         setupStatusItem()
         setupWindow()
         broker.start()
+        updateChecker.startPeriodicChecks()
     }
 
     func applicationWillTerminate(_ notification: Notification) { broker.stop() }
@@ -38,6 +40,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         settingsItem.target = self
         appMenu.addItem(settingsItem)
         appMenu.addItem(.separator())
+        if UpdateChecker.isConfigured {
+            let update = appMenu.addItem(
+                withTitle: "Check for Updates…",
+                action: #selector(checkForUpdates),
+                keyEquivalent: ""
+            )
+            update.target = self
+            appMenu.addItem(.separator())
+        }
         appMenu.addItem(withTitle: "Hide Inter", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         let hideOthers = NSMenuItem(title: "Hide Others",
                                     action: #selector(NSApplication.hideOtherApplications(_:)),
@@ -85,6 +96,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc private func zoomOut() { zoom.zoomOut() }
     @objc private func zoomReset() { zoom.reset() }
 
+    @objc private func checkForUpdates() {
+        showWindow()
+        Task { await updateChecker.check() }
+    }
+
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {
         case #selector(zoomIn): return zoom.canZoomIn
@@ -119,7 +135,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         window.hidesOnDeactivate = false
         window.isReleasedWhenClosed = false
         window.contentViewController = NSHostingController(
-            rootView: RootView(store: store, broker: broker, zoom: zoom, openSettings: { [weak self] in self?.openSettings() })
+            rootView: RootView(store: store, broker: broker, zoom: zoom, updateChecker: updateChecker, openSettings: { [weak self] in self?.openSettings() })
         )
         window.setFrameAutosaveName("InterMainWindow")
         if !window.setFrameUsingName("InterMainWindow") { window.center() }
