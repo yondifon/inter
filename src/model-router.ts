@@ -41,10 +41,10 @@ const DIFFICULTY_FLOOR: Record<Difficulty, number> = {
 /// Where on a model's own effort ladder each difficulty lands, normalised so
 /// ladders of different lengths stay comparable across providers.
 const DIFFICULTY_EFFORT_TARGET: Record<Difficulty, number> = {
-  mechanical: 0.25,
-  standard: 0.75,
-  hard: 1,
-  critical: 1,
+  mechanical: 0.1,
+  standard: 0.3,
+  hard: 0.6,
+  critical: 0.9,
 };
 
 /// Inter's own effort vocabulary, weakest first. Claude's and pi's ladders are

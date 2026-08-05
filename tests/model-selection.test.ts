@@ -283,24 +283,26 @@ describe("effort read off the model's own ladder", () => {
     };
   }
 
-  test("projects difficulty onto a five-rung ladder", () => {
+  test("projects difficulty onto a five-rung ladder, landing standard on medium", () => {
     const claude = ladder(["low", "medium", "high", "xhigh", "max"]);
-    expect(projectEffort(claude, "mechanical").effort).toBe("medium");
-    expect(projectEffort(claude, "standard").effort).toBe("xhigh");
-    expect(projectEffort(claude, "hard").effort).toBe("max");
+    expect(projectEffort(claude, "mechanical").effort).toBe("low");
+    expect(projectEffort(claude, "standard").effort).toBe("medium");
+    expect(projectEffort(claude, "hard").effort).toBe("high");
     expect(projectEffort(claude, "critical").effort).toBe("max");
   });
 
   test("projects onto a six-rung ladder without assuming five", () => {
     const pi = ladder(["minimal", "low", "medium", "high", "xhigh", "max"], "pi");
     expect(projectEffort(pi, "mechanical").effort).toBe("low");
-    expect(projectEffort(pi, "hard").effort).toBe("max");
+    expect(projectEffort(pi, "standard").effort).toBe("medium");
+    expect(projectEffort(pi, "hard").effort).toBe("high");
+    expect(projectEffort(pi, "critical").effort).toBe("max");
   });
 
   test("a ladder published out of order is sorted before anything projects onto it", () => {
     const codex = ladder(["high", "minimal", "medium"], "codex");
-    expect(projectEffort(codex, "mechanical").effort).toBe("medium");
-    expect(projectEffort(codex, "hard").effort).toBe("high");
+    expect(projectEffort(codex, "mechanical").effort).toBe("minimal");
+    expect(projectEffort(codex, "hard").effort).toBe("medium");
   });
 
   test("a ladder using unknown words keeps the order the provider published", () => {
@@ -324,7 +326,7 @@ describe("effort read off the model's own ladder", () => {
     const route = chooseModel("Implement the feature.", withLadder, [profiles[0]!], {
       difficulty: "hard",
     });
-    expect(route.effort).toBe("max");
+    expect(route.effort).toBe("high");
     expect(route.effortReason).toContain("hard");
   });
 });
@@ -425,6 +427,6 @@ describe("the caller-named pair is advised, never blocked", () => {
     );
     expect(audit.rejected).toEqual([]);
     expect(audit.warnings).toEqual([]);
-    expect(audit.effort).toBe("medium");
+    expect(audit.effort).toBe("low");
   });
 });

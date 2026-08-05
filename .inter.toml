@@ -5,12 +5,16 @@ version = 1
 # spent. Entries are ordered best-first per provider: that order decides which
 # model a caller gets when they name the profile but not the model.
 #
-# No haiku and no free-tier catalog entries anywhere. Cheapest-wins produced
-# models that answer without thinking, so the floor is sonnet on claude and a
-# deepseek-flash, gpt-5.6, or kimi elsewhere. Deepseek-flash leads on opencode
-# and carries the everyday classes; raise effort rather than reaching for a
-# bigger model when a task in those classes needs more thinking. Kimi stays for
-# advanced reasoning — the build and reasoning classes. Luna leads on codex.
+# No haiku, and the only free-tier entry is deepseek-v4-flash-free — the free
+# catalog's one full-strength model, and the reason `build` sits at min_quality
+# 4. Cheapest-wins otherwise produced models that answer without thinking, so
+# the floor is sonnet on claude and a deepseek-flash or gpt-5.6 elsewhere.
+# Deepseek-flash leads on opencode and pi and carries every class up to build;
+# raise effort rather than reaching for a bigger model when one of those needs
+# more thinking. Kimi is reserved for the reasoning class alone — it costs like
+# a frontier model and buys nothing on work that is merely long. Luna leads on
+# codex. Pi and opencode reach the same catalog, so pi is the second account to
+# route to when opencode is spent.
 
 [routes.mechanical]
 preference = "speed"
@@ -18,6 +22,7 @@ min_quality = 3
 allow = [
   { provider = "claude", model = "sonnet" },
   { provider = "opencode", model = "opencode-go/deepseek-v4-flash" },
+  { provider = "pi", model = "opencode-go/deepseek-v4-flash" },
   { provider = "codex", model = "gpt-5.6-luna" },
 ]
 
@@ -27,6 +32,7 @@ min_quality = 4
 allow = [
   { provider = "claude", model = "sonnet" },
   { provider = "opencode", model = "opencode-go/deepseek-v4-flash" },
+  { provider = "pi", model = "opencode-go/deepseek-v4-flash" },
   { provider = "codex", model = "gpt-5.6-luna" },
 ]
 
@@ -37,16 +43,19 @@ allow = [
   { provider = "claude", model = "sonnet" },
   { provider = "claude", model = "opus" },
   { provider = "opencode", model = "opencode-go/deepseek-v4-flash" },
+  { provider = "pi", model = "opencode-go/deepseek-v4-flash" },
   { provider = "codex", model = "gpt-5.6-luna" },
 ]
 
 [routes.build]
 preference = "quality"
-min_quality = 5
+min_quality = 4
 allow = [
   { provider = "claude", model = "opus" },
   { provider = "claude", model = "sonnet" },
-  { provider = "opencode", model = "opencode-go/kimi-k3" },
+  { provider = "opencode", model = "opencode/deepseek-v4-flash-free" },
+  { provider = "opencode", model = "opencode-go/deepseek-v4-flash" },
+  { provider = "pi", model = "opencode-go/deepseek-v4-flash" },
   { provider = "codex", model = "gpt-5.6-luna" },
 ]
 
@@ -62,6 +71,7 @@ preference = "quality"
 min_quality = 5
 allow = [
   { provider = "opencode", model = "opencode-go/kimi-k3" },
+  { provider = "pi", model = "opencode-go/kimi-k3" },
   { provider = "claude", model = "opus" },
   { provider = "codex", model = "gpt-5.6-luna" },
 ]
