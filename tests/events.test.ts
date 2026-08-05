@@ -1039,6 +1039,95 @@ describe("task event views", () => {
     expect(view.title).toBe("Prompt received");
   });
 
+  test("renders a pi turn_end as one spend line, tokens humanized, dollars never e-notation", () => {
+    // Verbatim from the live DB, task 021ffa9d…: the turn's usage rides the
+    // turn's last assistant message, nested under `message`.
+    const view = taskEventView({
+      id: 2, taskId: "task", type: "agent.event", state: "running",
+      payload: {
+        type: "turn_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "…" }],
+          model: "deepseek-v4-flash",
+          usage: {
+            input: 142,
+            output: 1160,
+            cacheRead: 70144,
+            cacheWrite: 0,
+            reasoning: 383,
+            totalTokens: 71446,
+            cost: {
+              input: 0.00001988,
+              output: 0.0003248,
+              cacheRead: 0.0001964,
+              cacheWrite: 0,
+              total: 0.0005410832,
+            },
+          },
+          stopReason: "stop",
+          timestamp: 1785896280291,
+        },
+        toolResults: [],
+      },
+      createdAt: "now",
+    }, "pi");
+    expect(view.kind).toBe("usage");
+    expect(view.phase).toBe("completed");
+    expect(view.title).toBe("Turn");
+    // 1160 out → 1.2k, 70144 cached → 70k, 0.0005410832 → 4 decimals max,
+    // never scientific notation.
+    expect(view.detail).toBe("1.2k out · 70k cached · $0.0005");
+    expect(view.detail).not.toContain("e-");
+    // Folding it away: a 147-turn run must not spam the watch stream.
+    expect(view.minor).toBe(true);
+    expect(view.presentation).toMatchObject({
+      type: "usage",
+      tokensIn: 142,
+      tokensOut: 1160,
+      tokensCached: 70144,
+      tokensThinking: 383,
+      costUsd: 0.0005410832,
+    });
+  });
+
+  test("reads a pi turn failure from stopReason on turn_end", () => {
+    const view = taskEventView({
+      id: 2, taskId: "task", type: "agent.event", state: "running",
+      payload: {
+        type: "turn_end",
+        message: {
+          role: "assistant",
+          content: [],
+          stopReason: "error",
+          errorMessage: "invalid x-api-key",
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        },
+        toolResults: [],
+      },
+      createdAt: "now",
+    }, "pi");
+    expect(view.kind).toBe("error");
+    expect(view.phase).toBe("failed");
+    expect(view.title).toBe("Turn failed");
+    expect(view.detail).toContain("invalid x-api-key");
+    // A zeroed usage means nothing to show: no "0 out" noise, no $0.00 line.
+    expect(view.detail).not.toContain("$");
+    expect(view.minor).toBe(true);
+  });
+
+  test("keeps a usage-less turn_end as a folded boundary", () => {
+    const view = taskEventView({
+      id: 2, taskId: "task", type: "agent.event", state: "running",
+      payload: { type: "turn_end", toolResults: [] },
+      createdAt: "now",
+    }, "pi");
+    expect(view.title).toBe("Turn end");
+    expect(view.kind).toBe("lifecycle");
+    expect(view.minor).toBe(true);
+  });
+
   test("renders an MCP tool call as a readable row, not the output dump", () => {
     // Verbatim from a real run: the memory tool's part carries the call at
     // `part.tool`, the arguments in `state.input`, an empty `state.title`, and

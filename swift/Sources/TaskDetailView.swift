@@ -86,12 +86,14 @@ struct TaskDetail: View {
                 header
                 if resolvedTaskState == "needs_input", let question = resolvedQuestion {
                     NeedsInputBanner(question: question)
+                        .transition(.opacity)
                 }
                 HStack(spacing: 0) {
                     TaskSectionTabs(selection: $section, hasError: resolvedError != nil)
                     Spacer(minLength: 0)
                 }
             }
+            .animation(.easeOut(duration: 0.2), value: resolvedTaskState)
             .frame(maxWidth: 980 * uiScale)
             .padding(.horizontal, 24)
             .padding(.top, 24)
@@ -114,15 +116,16 @@ struct TaskDetail: View {
                 // without a permanent rail.
                 .scrollIndicators(.automatic)
                 .id("\(taskId)-\(section.rawValue)")
+                .transition(.opacity)
                 // Scrolling to a sentinel at the end of the list put the view past the
                 // content whenever the rows under it had not been measured yet — the
                 // panel opened blank, and nothing re-clamped it. The anchor asks for
                 // the same thing against the real content size, so it cannot overshoot,
                 // and it keeps holding the tail as events stream in.
                 .defaultScrollAnchor(followsTail && section == .activity ? .bottom : .top)
-                .overlay(alignment: .leading) {
+                .overlay(alignment: .bottom) {
                     ScrollJumpControl(proxy: proxy)
-                        .padding(.leading, 16 * uiScale)
+                        .padding(.bottom, 16 * uiScale)
                 }
             }
         }
@@ -668,17 +671,17 @@ struct TaskDetail: View {
     }
 }
 
-/// Floating top/bottom jump control along the trace's leading edge, vertically
-/// centred. Always visible — the trace's length moves as events stream in, so an
-/// overflow gate would flicker across the whole run; the pair stays put so the
-/// reader always knows where it is.
+/// Floating top/bottom jump control at the bottom centre of the trace. Always
+/// visible — the trace's length moves as events stream in, so an overflow gate
+/// would flicker across the whole run; the pair stays put so the reader always
+/// knows where it is.
 private struct ScrollJumpControl: View {
     let proxy: ScrollViewProxy
 
     @Environment(\.uiScale) private var uiScale
 
     var body: some View {
-        VStack(spacing: 2 * uiScale) {
+        HStack(spacing: 2 * uiScale) {
             IconButton(symbol: "chevron.up", label: "Jump to top") {
                 withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("top", anchor: .top) }
             }
@@ -858,7 +861,9 @@ private struct ActivityWorkRow: View {
                         symbol: showingRawDetails ? "chevron.down" : "chevron.right",
                         label: EventExpansion.label(for: event, expanded: showingRawDetails),
                         tint: AnyShapeStyle(.tertiary)
-                    ) { showingRawDetails.toggle() }
+                    ) {
+                        withAnimation(.easeOut(duration: 0.15)) { showingRawDetails.toggle() }
+                    }
                     .scaledFont(.caption2, weight: .semibold)
                 }
                 Text(EventClock.time(event.createdAt))
@@ -870,7 +875,7 @@ private struct ActivityWorkRow: View {
                 TaskEventPresentationView(presentation: presentation)
             }
             if showingRawDetails {
-                EventExpansionView(event: event).padding(.top, 3)
+                EventExpansionView(event: event).padding(.top, 3).transition(.opacity)
             }
         }
         .padding(.vertical, 8)
@@ -1079,6 +1084,7 @@ private struct ActivityHandoffCard: View {
                 }
                 .padding(.top, 6)
                 .padding(.leading, 14)
+                .transition(.opacity)
             }
         }
     }
@@ -1133,6 +1139,7 @@ private struct ActivityReceiptCard: View {
             }
             if showingRawDetails, let raw = event.rawText {
                 ReviewContentView(source: raw, initiallyExpandJSON: false)
+                    .transition(.opacity)
             }
         }
         .padding(14)
@@ -1330,6 +1337,8 @@ private struct TaskMetaChip<Icon: View>: View {
 private struct TaskSectionTabs: View {
     @Binding var selection: TaskDetailSection
     let hasError: Bool
+    @Namespace private var pillNamespace
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.uiScale) private var uiScale
 
     var body: some View {
@@ -1340,12 +1349,13 @@ private struct TaskSectionTabs: View {
         }
         .padding(2 * uiScale)
         .background(Surface.sunken, in: RoundedRectangle(cornerRadius: Radius.medium))
+        .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 1), value: selection)
     }
 
     private func tab(_ section: TaskDetailSection) -> some View {
         let selected = section == selection
         return Button {
-            withAnimation(.easeOut(duration: 0.12)) { selection = section }
+            withAnimation(.easeOut(duration: 0.2)) { selection = section }
         } label: {
             Image(systemName: symbol(section))
                 .font(.system(size: 11 * uiScale, weight: .regular))
@@ -1353,7 +1363,9 @@ private struct TaskSectionTabs: View {
                 .frame(width: 32 * uiScale, height: 24 * uiScale)
                 .background {
                     if selected {
-                        RoundedRectangle(cornerRadius: Radius.small).fill(Surface.panel)
+                        RoundedRectangle(cornerRadius: Radius.small)
+                            .fill(Surface.panel)
+                            .matchedGeometryEffect(id: "sectionPill", in: pillNamespace)
                     }
                 }
                 .contentShape(.rect)

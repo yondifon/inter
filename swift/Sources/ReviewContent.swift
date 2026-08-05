@@ -422,6 +422,7 @@ private struct JSONTreeRow: View {
                                 Image(systemName: expanded ? "chevron.down" : "chevron.right")
                                     .scaledFont(.caption2, weight: .semibold)
                                     .foregroundStyle(.tertiary)
+                                    .contentTransition(.symbolEffect(.replace))
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .contentShape(.rect)

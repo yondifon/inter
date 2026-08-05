@@ -574,12 +574,17 @@ function piEvent(
     // Nothing to subtract here, unlike codex whose input_tokens includes the
     // cached part. `reasoning` sits inside `input` (30 of the 1938).
     const cached = Number(usage.cacheRead ?? 0) + Number(usage.cacheWrite ?? 0);
+    const cost = usage.cost && typeof usage.cost === "object" && !Array.isArray(usage.cost)
+      ? usage.cost.total
+      : undefined;
+    const costUsd = typeof cost === "number" && Number.isFinite(cost) ? cost : undefined;
     const presentation: TaskEventPresentation = {
       type: "usage",
       ...(typeof usage.input === "number" ? { tokensIn: usage.input } : {}),
       ...(typeof usage.output === "number" ? { tokensOut: usage.output } : {}),
       ...(cached ? { tokensCached: cached } : {}),
       ...(typeof usage.reasoning === "number" ? { tokensThinking: usage.reasoning } : {}),
+      ...(costUsd !== undefined ? { costUsd } : {}),
       ...(error ? { level: "error" as const, text: error } : {}),
     };
     return { ...base, kind: failed ? "error" : "usage", phase: failed ? "failed" : "completed",
@@ -591,8 +596,52 @@ function piEvent(
     return { ...base, kind: "lifecycle", phase: "completed", title: "Run finished", ...raw };
   }
 
+  if (type === "turn_end") {
+    // The turn's own settlement: pi closes exactly one `turn_end` per turn,
+    // and the turn's usage rides it (the turn's last assistant message, flat
+    // or nested, same read as message_end). One line carries what the turn
+    // spent — tokens out, cache, dollars — where a message_end carries only
+    // that message's share and a tool-calling turn has several. Folding it
+    // away with `minor` keeps a 147-turn run from spamming the watch stream;
+    // the line lives for the trace, the event inspector, and the app's
+    // run-settlement card. A `turn_end` with no usage at all keeps the plain
+    // folded boundary below, so a stream that only borrows pi's vocabulary
+    // renders exactly as it did before.
+    const message = object(payload.message);
+    const usage = Object.keys(object(payload.usage)).length ? object(payload.usage) : object(message.usage);
+    if (Object.keys(usage).length === 0) {
+      return { ...base, kind: "lifecycle", phase: "completed", title: "Turn end", minor: true, ...raw };
+    }
+    const error = string(payload.errorMessage) ?? string(message.errorMessage);
+    const failed = error !== undefined ||
+      ["error", "aborted"].includes(string(payload.stopReason) ?? string(message.stopReason) ?? "");
+    const cached = Number(usage.cacheRead ?? 0) + Number(usage.cacheWrite ?? 0);
+    const cost = usage.cost && typeof usage.cost === "object" && !Array.isArray(usage.cost)
+      ? usage.cost.total
+      : undefined;
+    const costUsd = typeof cost === "number" && Number.isFinite(cost) ? cost : undefined;
+    const presentation: TaskEventPresentation = {
+      type: "usage",
+      ...(typeof usage.input === "number" ? { tokensIn: usage.input } : {}),
+      ...(typeof usage.output === "number" ? { tokensOut: usage.output } : {}),
+      ...(cached ? { tokensCached: cached } : {}),
+      ...(typeof usage.reasoning === "number" ? { tokensThinking: usage.reasoning } : {}),
+      ...(costUsd !== undefined && costUsd > 0 ? { costUsd } : {}),
+      ...(error ? { level: "error" as const, text: error } : {}),
+    };
+    return { ...base, kind: failed ? "error" : "usage", phase: failed ? "failed" : "completed",
+      title: failed ? "Turn failed" : "Turn",
+      detail: joinDetail(
+        typeof presentation.tokensOut === "number" && presentation.tokensOut > 0
+          ? `${formatCount(presentation.tokensOut)} out` : undefined,
+        presentation.tokensCached ? `${formatCount(presentation.tokensCached)} cached` : undefined,
+        costUsd !== undefined && costUsd > 0 ? formatCost(costUsd) : undefined,
+        error,
+      ), presentation, minor: true, ...raw };
+  }
+
   // Turn and run boundaries carry nothing the trace shows on its own.
-  if (["agent_start", "turn_start", "turn_end", "agent_end"].includes(type ?? "")) {
+  if (["agent_start", "turn_start", "agent_end"].includes(type ?? "")) {
     return { ...base, kind: "lifecycle", phase: type === "agent_start" || type === "turn_start"
       ? "started" : "completed", title: humanize(type!), minor: true, ...raw };
   }

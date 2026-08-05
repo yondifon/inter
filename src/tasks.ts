@@ -103,7 +103,9 @@ export function runCostFrom(payload: Record<string, unknown>): { costUsd?: numbe
  * the total; pi states it per assistant message instead — every `message_end`
  * carries that message's share at `usage.cost.total` and nothing on the wire
  * reports the run total — so the shares accumulate, and no single message's
- * value may stand in for the run's.
+ * value may stand in for the run's. Turn count works the same way: providers
+ * with a receipt state it once in `num_turns`, while pi closes one `turn_end`
+ * per turn, so the turns accumulate too.
  */
 export function accumulateRunCost(
   current: { costUsd?: number; turns?: number },
@@ -112,7 +114,9 @@ export function accumulateRunCost(
   const reported = runCostFrom(payload);
   if (reported.costUsd !== undefined || reported.turns !== undefined) return reported;
   const share = piMessageCostFrom(payload);
-  return share === undefined ? current : { ...current, costUsd: (current.costUsd ?? 0) + share };
+  if (share !== undefined) return { ...current, costUsd: (current.costUsd ?? 0) + share };
+  const turn = piTurnCountFrom(payload);
+  return turn === undefined ? current : { ...current, turns: (current.turns ?? 0) + turn };
 }
 
 /// pi's per-message spend: each assistant `message_end` carries that message's
@@ -138,6 +142,21 @@ function piUsageFrom(payload: Record<string, unknown>): Record<string, unknown> 
   return nested && typeof nested === "object" && !Array.isArray(nested)
     ? nested as Record<string, unknown>
     : {};
+}
+
+/// pi's turn counter: the stream closes exactly one `turn_end` per turn, and
+/// the turn's usage rides it (the turn's last assistant message, flat or
+/// nested). A failed turn still closes with a zeroed usage object, so presence
+/// of the usage shape — not a nonzero figure — is what marks a counted turn;
+/// a `turn_end` with no usage at all (a stream that only borrows pi's
+/// vocabulary) is not a turn pi accounted for.
+function piTurnCountFrom(payload: Record<string, unknown>): number | undefined {
+  if (payload.type !== "turn_end") return undefined;
+  const usage = piUsageFrom(payload);
+  const cost = usage.cost && typeof usage.cost === "object" && !Array.isArray(usage.cost)
+    ? usage.cost
+    : undefined;
+  return cost || usage.totalTokens !== undefined ? 1 : undefined;
 }
 
 function numberOr(...values: unknown[]): number | undefined {
@@ -654,7 +673,8 @@ async function runTask(
           appendTaskEvent(task.id, `agent.${kind}`, task.state, compactPayload(payload));
           // A run's spend arrives either once, near the end, as a receipt that
           // replaces the total (claude's `total_cost_usd` on `result`), or — on
-          // pi — as one `usage.cost.total` per `message_end`, which adds to it.
+          // pi — as one `usage.cost.total` per `message_end`, which adds to it,
+          // while each `turn_end` counts one turn.
           runCost = accumulateRunCost(runCost, payload);
           eventCount++;
           attemptEvents++;

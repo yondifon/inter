@@ -310,6 +310,7 @@ struct IconButton: View {
         Button(action: action) {
             Image(systemName: symbol)
                 .rotationEffect(rotation)
+                .contentTransition(.symbolEffect(.replace))
                 .frame(width: 24 * uiScale, height: 24 * uiScale)
                 .contentShape(.rect)
         }
@@ -401,10 +402,10 @@ struct CopyIconButton: View {
         ) {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(text, forType: .string)
-            copied = true
+            withAnimation(.easeOut(duration: 0.15)) { copied = true }
             Task {
                 try? await Task.sleep(for: .seconds(1.2))
-                copied = false
+                withAnimation(.easeOut(duration: 0.15)) { copied = false }
             }
         }
     }

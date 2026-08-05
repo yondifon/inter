@@ -35,20 +35,32 @@ re-invokes the agent when it exits — so backgrounding `inter watch` *is* the
 notification.
 
 It blocks until any named task asks a question, fails, is cancelled, or
-completes, and then prints **one line per settled task**:
+completes, and prints **NDJSON — one JSON object per line, no prose, no blank
+lines** — ready to pipe and parse. Lifecycle and error events stream as they
+happen:
 
-```
-8f2c1a94-... completed — Port the parser
-8f2c1a94-... needs_input Which database should the migration target? — Port the parser
-8f2c1a94-... failed timeout after 600000ms — Port the parser
-8f2c1a94-... completed (archived) — Port the parser
+```json
+{"type":"event","kind":"lifecycle","task":"8f2c1a94-...","text":"Worker spawned: antigravity"}
+{"type":"event","kind":"error","task":"8f2c1a94-...","text":"Agent error: Your workspace is out of credits"}
 ```
 
-The trailing title is what tells a fan-out's lines apart without spending an
-`inspect` per id; a task with no title prints the bare id and state, as before.
-`(archived)` marks a task that has been archived — it still resolves and still
-settles, unlike an id this store has never held, which exits `2` and names the
-database file it searched.
+Settled tasks print one line each:
+
+```json
+{"type":"settled","task":"8f2c1a94-...","state":"completed","title":"Port the parser"}
+{"type":"settled","task":"8f2c1a94-...","state":"needs_input","question":"Which database should the migration target?","title":"Port the parser"}
+{"type":"settled","task":"8f2c1a94-...","state":"failed","error":"timeout after 600000ms","title":"Port the parser"}
+{"type":"settled","task":"8f2c1a94-...","state":"completed","title":"Port the parser","archived":true}
+```
+
+The `task` field always carries the full id, so a fan-out's lines tell each
+other apart without spending an `inspect` per id. `question`, `error`, `title`,
+and `archived` appear only when there is something to say; a task with no title
+prints just the id, state, and question or error. `archived: true` marks a task
+that has been archived — it still resolves and still settles, unlike an id this
+store has never held, which exits `2` and names the database file it searched.
+Every string value is collapsed onto one line and truncated, so a line stays a
+line.
 
 That is the entire output. A task still running prints nothing, because silence
 is the point.

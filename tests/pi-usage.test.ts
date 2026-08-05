@@ -66,7 +66,83 @@ describe("pi run cost extraction", () => {
     expect(runCostFrom({ type: "result", total_cost_usd: Number.NaN })).toEqual({});
   });
 
-  test("pi reports nothing equivalent to turns, so it stays undefined", () => {
+  test("a message_end's cost share never moves the turn counter", () => {
+    // pi's turn counter lives on turn_end, so the per-message event that sums
+    // the cost must not also count a turn — one turn, many message_ends.
     expect(accumulateRunCost({}, messageEnd)).not.toHaveProperty("turns");
+  });
+
+  // Verbatim from the live DB, task 021ffa9d…, provider pi: every turn closes
+  // with a `turn_end` carrying the turn's last assistant message, and the
+  // usage — the message's cost share included — rides inside it.
+  const turnEnd = {
+    type: "turn_end",
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: "…" }],
+      api: "openai-completions",
+      provider: "opencode-go",
+      model: "deepseek-v4-flash",
+      usage: {
+        input: 142,
+        output: 1160,
+        cacheRead: 70144,
+        cacheWrite: 0,
+        reasoning: 383,
+        totalTokens: 71446,
+        cost: {
+          input: 0.00001988,
+          output: 0.0003248,
+          cacheRead: 0.0001964,
+          cacheWrite: 0,
+          total: 0.0005410832,
+        },
+      },
+      stopReason: "stop",
+      timestamp: 1785896280291,
+      responseId: "073984d3-a055-4e04-90fe-73944037863f",
+      rawStopReason: "stop",
+    },
+    toolResults: [],
+  };
+
+  describe("pi turn counting", () => {
+    test("counts one turn per turn_end carrying usage", () => {
+      expect(accumulateRunCost({}, turnEnd)).toEqual({ turns: 1 });
+    });
+
+    test("accumulates turns across turn_ends", () => {
+      const run = [turnEnd, turnEnd, turnEnd].reduce(accumulateRunCost, {});
+      expect(run.turns).toBe(3);
+    });
+
+    test("counts a failed turn's zeroed usage as a turn", () => {
+      const failed = {
+        type: "turn_end",
+        message: {
+          role: "assistant",
+          content: [],
+          stopReason: "error",
+          errorMessage: "invalid x-api-key",
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        },
+        toolResults: [],
+      };
+      expect(accumulateRunCost({}, failed)).toEqual({ turns: 1 });
+    });
+
+    test("a turn_end with no usage is not a counted turn", () => {
+      expect(accumulateRunCost({}, { type: "turn_end", toolResults: [] })).toEqual({});
+    });
+
+    test("turn_end counting never adds the turn's own cost on top of message_ends", () => {
+      // Both events carry the same usage on the wire; message_end is what sums
+      // the cost, so the turn_end must only advance the counter — the 0.0005
+      // share must not be double-counted.
+      const stream = [messageEnd, turnEnd].reduce(accumulateRunCost, {});
+      expect(stream.costUsd).toBeCloseTo(0.0003452512, 12);
+      expect(stream.turns).toBe(1);
+    });
   });
 });

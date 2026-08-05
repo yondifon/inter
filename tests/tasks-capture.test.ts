@@ -179,6 +179,50 @@ describe("capture coalescing and liveness", () => {
     expect(stored.filter((event) => event.type.startsWith("agent.")).length).toBeLessThan(100);
   }, 15_000);
 
+  test("banks pi turns and the summed cost on the task record", async () => {
+    const root = mkdtempSync(join(tmpdir(), "inter-capture-"));
+    scratch.push(root);
+    process.env.INTER_DB = join(root, "inter.db");
+    process.env.INTER_ROOTS = root;
+    // Three turns, each closing with a message_end carrying its cost share and
+    // a turn_end carrying the same usage. The task record must show 3 turns
+    // and the sum of the three shares — never the last turn's total, and never
+    // the turn_end costs added on top of the message_end costs.
+    const turn = (cost: number) => ({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        // Empty content on purpose: a text block would become the run's final
+        // message and shadow the completion marker's fallback path.
+        content: [],
+        usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15, cost: { total: cost } },
+      },
+    });
+    const close = (cost: number) => ({
+      type: "turn_end",
+      message: {
+        role: "assistant",
+        content: [],
+        usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15, cost: { total: cost } },
+      },
+      toolResults: [],
+    });
+    const script = streamScript([
+      turn(0.0001), close(0.0001),
+      turn(0.0002), close(0.0002),
+      turn(0.0004), close(0.0004),
+      "INTER_RESULT: completed",
+    ]);
+    stateStore().saveProfiles([{ ...streamProfile("pi"), command: ["/bin/sh", "-c", script] }]);
+
+    const task = await delegate("pi", "prompt", root);
+    const done = await settled(task.id);
+    expect(done.state).toBe("completed");
+    // 6 assistant-message rows, but only the 3 turn_ends are turns.
+    expect(done.turns).toBe(3);
+    expect(done.costUsd).toBeCloseTo(0.0007, 10);
+  }, 15_000);
+
   test("another provider's capture of the same lines is byte-identical", async () => {
     const root = mkdtempSync(join(tmpdir(), "inter-capture-"));
     scratch.push(root);

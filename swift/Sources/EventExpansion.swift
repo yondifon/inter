@@ -80,14 +80,14 @@ struct EventExpansionView: View {
             if let raw = event.rawText {
                 if expansion != .payload {
                     Button(showingPayload ? "Hide raw event" : "Show raw event") {
-                        showingPayload.toggle()
+                        withAnimation(.easeOut(duration: 0.15)) { showingPayload.toggle() }
                     }
                     .buttonStyle(.plain)
                     .scaledFont(.caption2)
                     .foregroundStyle(.tertiary)
                 }
                 if showingPayload || expansion == .payload {
-                    ReviewContentView(source: raw, initiallyExpandJSON: false)
+                    ReviewContentView(source: raw, initiallyExpandJSON: false).transition(.opacity)
                 }
             }
         }

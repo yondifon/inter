@@ -89,6 +89,7 @@ struct ContentView: View {
                 }
             }
             .listStyle(.sidebar)
+            .animation(.easeOut(duration: 0.2), value: visibleTasks)
             .scrollIndicators(.never)
             .safeAreaInset(edge: .bottom) { brokerIndicator }
             // The system sidebar material is translucent and cooler than the content
