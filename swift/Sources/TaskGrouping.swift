@@ -31,7 +31,7 @@ enum TaskGrouping: String, CaseIterable, Identifiable {
 struct TaskGroup: Identifiable {
     let id: String
     let title: String?
-    let tasks: [TaskSnapshot]
+    let tasks: [TaskListItem]
 }
 
 /// Collapse state for the sidebar's task groups, kept per grouping mode because
@@ -115,7 +115,7 @@ enum TaskOrganizer {
 
     /// Projects in the order their newest task appears, so an active project stays
     /// at the top of the menu.
-    static func projects(in tasks: [TaskSnapshot]) -> [TaskProject] {
+    static func projects(in tasks: [TaskListItem]) -> [TaskProject] {
         var order: [String] = []
         var counts: [String: Int] = [:]
         for task in tasks {
@@ -128,7 +128,7 @@ enum TaskOrganizer {
     /// A saved filter naming a project with no tasks left is ignored rather than
     /// honored, so a stale preference can never strand the sidebar on an empty list.
     static func organize(
-        tasks: [TaskSnapshot],
+        tasks: [TaskListItem],
         project: String?,
         grouping: TaskGrouping
     ) -> [TaskGroup] {
@@ -149,7 +149,7 @@ enum TaskOrganizer {
     }
 
     /// Name to show for an active filter, or nil when every project is showing.
-    static func activeProjectName(tasks: [TaskSnapshot], project: String?) -> String? {
+    static func activeProjectName(tasks: [TaskListItem], project: String?) -> String? {
         guard let project, tasks.contains(where: { $0.cwd == project }) else { return nil }
         return projectName(project)
     }
@@ -157,7 +157,7 @@ enum TaskOrganizer {
     /// Groups every task under the root of its parent chain. A task that is nobody's
     /// child and nobody's parent gets no heading — a lone run titled with its own
     /// prompt would print the same sentence twice.
-    private static func parentGroups(_ tasks: [TaskSnapshot]) -> [TaskGroup] {
+    private static func parentGroups(_ tasks: [TaskListItem]) -> [TaskGroup] {
         let byID = Dictionary(tasks.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let groups = bucket(tasks) { task in
             let root = self.root(of: task, in: byID)
@@ -172,9 +172,9 @@ enum TaskOrganizer {
     /// Walks to the topmost ancestor present in the list. A parent that was purged,
     /// or a cycle, resolves to the deepest task actually reachable.
     private static func root(
-        of task: TaskSnapshot,
-        in byID: [String: TaskSnapshot]
-    ) -> TaskSnapshot {
+        of task: TaskListItem,
+        in byID: [String: TaskListItem]
+    ) -> TaskListItem {
         var current = task
         var seen: Set<String> = [task.id]
         for _ in 0..<maxParentDepth {
@@ -190,12 +190,12 @@ enum TaskOrganizer {
     /// Buckets tasks by a key, keeping both the group order and the order within
     /// each group as the store sent them — newest first.
     private static func bucket(
-        _ tasks: [TaskSnapshot],
-        by key: (TaskSnapshot) -> (id: String, title: String)
+        _ tasks: [TaskListItem],
+        by key: (TaskListItem) -> (id: String, title: String)
     ) -> [TaskGroup] {
         var order: [String] = []
         var titles: [String: String] = [:]
-        var buckets: [String: [TaskSnapshot]] = [:]
+        var buckets: [String: [TaskListItem]] = [:]
         for task in tasks {
             let (id, title) = key(task)
             if buckets[id] == nil {
@@ -217,8 +217,8 @@ enum TaskOrganizer {
 
     /// Buckets by state in the fixed order above, so a state nobody has right now
     /// costs no heading and the rows keep the store's newest-first order.
-    private static func statusGroups(_ tasks: [TaskSnapshot]) -> [TaskGroup] {
-        var buckets: [TaskState: [TaskSnapshot]] = [:]
+    private static func statusGroups(_ tasks: [TaskListItem]) -> [TaskGroup] {
+        var buckets: [TaskState: [TaskListItem]] = [:]
         for task in tasks {
             buckets[TaskState(task.state), default: []].append(task)
         }
@@ -231,7 +231,7 @@ enum TaskOrganizer {
     /// Rows to draw for a group. Only a group with a heading can be collapsed —
     /// an untitled run has no control to expand it again, so a stale collapsed id
     /// left over from when it had children must not hide it.
-    static func visibleTasks(in group: TaskGroup, collapsed: Set<String>) -> [TaskSnapshot] {
+    static func visibleTasks(in group: TaskGroup, collapsed: Set<String>) -> [TaskListItem] {
         guard group.title != nil, collapsed.contains(group.id) else { return group.tasks }
         return []
     }
@@ -246,7 +246,7 @@ enum TaskOrganizer {
 
     /// Heading for a group rooted at this task: the broker's short label when
     /// it has one, otherwise the prompt's first line.
-    static func heading(for task: TaskSnapshot) -> String {
+    static func heading(for task: TaskListItem) -> String {
         heading(task.displayLabel)
     }
 

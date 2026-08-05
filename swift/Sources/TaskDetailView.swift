@@ -29,24 +29,27 @@ enum TaskDetailSection: String, CaseIterable, Identifiable {
 }
 
 struct TaskDetail: View {
-    let task: TaskSnapshot
+    let taskId: String
+    /// The sidebar's summary row — always available so the header reads
+    /// immediately while the full detail loads.
+    let listItem: TaskListItem
     let store: ProfileStore
-    let setArchived: (TaskSnapshot, Bool) -> Void
+    let setArchived: (String, Bool) -> Void
     /// Activity is where a run is read — the response is one tab away, and landing
     /// there mid-run would mean opening on an empty panel.
     @State private var section: TaskDetailSection = .activity
+    /// Full task row fetched on open and refetched when the summary's state or
+    /// updatedAt changes. Nil until the first fetch lands.
+    @State private var task: TaskSnapshot?
+    @State private var detailLoaded = false
     @State private var events: [TaskEventSnapshot] = []
-    /// The retelling of `events`, kept beside them rather than folded in `body`.
-    /// Composing is pure but linear in the trace, and a long run re-folded a few
-    /// thousand events on every render pass; it only has to change when the
-    /// events do.
+    /// The retelling of `events`, composed off the MainActor and published back.
     @State private var story = ActivityStory.Composition(blocks: [], technical: [])
     @State private var eventCursor = 0
     @State private var loadedInitialEvents = false
     @State private var loading = true
     @State private var loadFailed = false
     @State private var showingTechnicalEvents = false
-    @State private var showingEarlierActivity = false
     @State private var showingRunFacts = false
     @State private var confirmingCancel = false
     @State private var showingResumeSheet = false
@@ -55,26 +58,37 @@ struct TaskDetail: View {
     /// run that lands while it is being read would otherwise yank the trace back
     /// to the top under the reader.
     @State private var followsTail: Bool
+    /// Tail-paging — oldest event id loaded and whether the server has more.
+    @State private var oldestId: Int = 0
+    @State private var hasEarlier = false
+    @State private var loadingEarlier = false
+    /// Whether the fast catch-up loop has run once after the initial tail load.
+    @State private var catchUpDone = false
+    /// Single-flight compose coalescing: one in-flight at a time, at most one
+    /// pending re-run when events land mid-compose.
+    @State private var composeInFlight = false
+    @State private var pendingCompose = false
     @Environment(\.uiScale) private var uiScale
 
-    init(task: TaskSnapshot, store: ProfileStore, setArchived: @escaping (TaskSnapshot, Bool) -> Void) {
-        self.task = task
+    init(taskId: String, listItem: TaskListItem, store: ProfileStore, setArchived: @escaping (String, Bool) -> Void) {
+        self.taskId = taskId
+        self.listItem = listItem
         self.store = store
         self.setArchived = setArchived
         // A finished run is read from the beginning; only a live one is read from
         // the end, where the next event will land.
-        _followsTail = State(initialValue: !TaskState(task.state).isTerminal)
+        _followsTail = State(initialValue: !TaskState(listItem.state).isTerminal)
     }
 
     var body: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 12) {
                 header
-                if task.state == "needs_input", let question = task.question {
+                if resolvedTaskState == "needs_input", let question = resolvedQuestion {
                     NeedsInputBanner(question: question)
                 }
                 HStack(spacing: 0) {
-                    TaskSectionTabs(selection: $section, hasError: task.error != nil)
+                    TaskSectionTabs(selection: $section, hasError: resolvedError != nil)
                     Spacer(minLength: 0)
                 }
             }
@@ -99,7 +113,7 @@ struct TaskDetail: View {
                 // and fades when idle, so a long trace gives position feedback
                 // without a permanent rail.
                 .scrollIndicators(.automatic)
-                .id("\(task.id)-\(section.rawValue)")
+                .id("\(taskId)-\(section.rawValue)")
                 // Scrolling to a sentinel at the end of the list put the view past the
                 // content whenever the rows under it had not been measured yet — the
                 // panel opened blank, and nothing re-clamped it. The anchor asks for
@@ -114,7 +128,13 @@ struct TaskDetail: View {
             }
         }
         .background(Surface.content)
-        .task(id: task.id) {
+        .task(id: taskId) {
+            // Fetch the full task detail on open; refetch when the summary row
+            // signals a state change or an update the detail hasn't seen yet.
+            if task?.updatedAt != currentListItem?.updatedAt || task?.state != currentListItem?.state {
+                task = await store.taskDetail(id: taskId)
+                detailLoaded = true
+            }
             resetEventState()
             while !Task.isCancelled {
                 await loadEvents()
@@ -134,8 +154,7 @@ struct TaskDetail: View {
                 // The server long-poll holds while the run can still produce
                 // events on its own — queued and running — and answers at once
                 // when it is settled or waiting on a human, so the sleep is
-                // unconditional: without it the loop re-sorts the whole trace on
-                // the main actor as fast as HTTP allows.
+                // unconditional: without it the loop re-uses the same pattern.
                 if loadFailed { try? await Task.sleep(for: .seconds(1)) }
                 else { try? await Task.sleep(for: .milliseconds(500)) }
             }
@@ -164,17 +183,29 @@ struct TaskDetail: View {
     @ViewBuilder private var sectionContent: some View {
         switch section {
         case .request:
-            TaskPanel { ReviewContentView(source: task.prompt) }
+            if let prompt = task?.prompt {
+                TaskPanel { ReviewContentView(source: prompt) }
+            } else {
+                TaskPanel {
+                    HStack { ProgressView().controlSize(.small); Text("Loading…").foregroundStyle(.secondary) }
+                        .frame(minHeight: 56)
+                }
+            }
         case .response:
-            if let error = task.error {
+            if let error = resolvedError {
                 TaskPanel(accent: .red) { ReviewContentView(source: error) }
-            } else if !task.output.isEmpty {
-                TaskPanel { ReviewContentView(source: task.output) }
+            } else if let output = task?.output, !output.isEmpty {
+                TaskPanel { ReviewContentView(source: output) }
+            } else if task == nil {
+                TaskPanel {
+                    HStack { ProgressView().controlSize(.small); Text("Loading…").foregroundStyle(.secondary) }
+                        .frame(minHeight: 56)
+                }
             } else {
                 ContentUnavailableView(
                     "No response yet",
                     systemImage: "text.bubble",
-                    description: Text("The worker’s response will appear here.")
+                    description: Text("The worker's response will appear here.")
                 )
                 .frame(maxWidth: .infinity, minHeight: 220)
             }
@@ -193,7 +224,7 @@ struct TaskDetail: View {
         HStack(spacing: 8) {
             StateMarker(state: state, speaks: !state.wantsLabelBesideName)
                 .help(state.label)
-            Text(task.displayLabel)
+            Text(resolvedLabel)
                 .scaledFont(.title3, weight: .semibold)
                 .lineLimit(1)
             if state.wantsLabelBesideName {
@@ -207,19 +238,19 @@ struct TaskDetail: View {
                         .font(.system(size: 9 * uiScale, weight: .medium))
                 }
             }
-            TaskMetaChip(text: task.model, label: "Model") {
+            TaskMetaChip(text: resolvedModel, label: "Model") {
                 Image(systemName: "cpu").font(.system(size: 9 * uiScale, weight: .medium))
             }
             // The reasoning level the run was dispatched with is part of its
             // identity like the model, and absent when the caller set none.
-            if let effort = task.effort, !effort.isEmpty {
+            if let effort = task?.effort, !effort.isEmpty {
                 TaskMetaChip(text: effort, label: "Effort") {
                     Image(systemName: "brain").font(.system(size: 9 * uiScale, weight: .medium))
                 }
             }
             // Where a run touched files is part of its identity, not a detail: two
             // tasks with the same worker, model and prompt differ only by folder.
-            TaskMetaChip(text: task.displayPath, label: "Folder", full: task.cwd, maxChars: 28) {
+            TaskMetaChip(text: resolvedDisplayPath, label: "Folder", full: resolvedCwd, maxChars: 28) {
                 Image(systemName: "folder").font(.system(size: 9 * uiScale, weight: .medium))
             }
             Spacer(minLength: 8)
@@ -239,13 +270,13 @@ struct TaskDetail: View {
                 }
             }
             IconButton(symbol: "folder", label: "Open folder") {
-                NSWorkspace.shared.open(URL(fileURLWithPath: task.cwd))
+                NSWorkspace.shared.open(URL(fileURLWithPath: resolvedCwd))
             }
             IconButton(
-                symbol: task.archivedAt == nil ? "archivebox" : "arrow.uturn.backward",
-                label: task.archivedAt == nil ? "Archive task" : "Restore task"
+                symbol: resolvedArchivedAt == nil ? "archivebox" : "arrow.uturn.backward",
+                label: resolvedArchivedAt == nil ? "Archive task" : "Restore task"
             ) {
-                setArchived(task, task.archivedAt == nil)
+                setArchived(taskId, resolvedArchivedAt == nil)
             }
             IconButton(symbol: "ellipsis", label: "Run details", rotation: .degrees(90)) {
                 showingRunFacts.toggle()
@@ -259,11 +290,11 @@ struct TaskDetail: View {
     /// folder repeats because the header shows it shortened and unselectable.
     private var runFactsPopover: some View {
         VStack(alignment: .leading, spacing: 8) {
-            TaskFactRow(icon: "number", label: "Task", value: task.id, copy: task.id)
+            TaskFactRow(icon: "number", label: "Task", value: taskId, copy: taskId)
             if let sessionId {
                 TaskFactRow(icon: "terminal", label: "Session", value: sessionId, copy: sessionId)
             }
-            TaskFactRow(icon: "folder", label: "Folder", value: task.cwd, copy: task.cwd)
+            TaskFactRow(icon: "folder", label: "Folder", value: resolvedCwd, copy: resolvedCwd)
         }
         .padding(14)
         .frame(width: 380 * uiScale, alignment: .leading)
@@ -281,7 +312,7 @@ struct TaskDetail: View {
     }
 
     private var sessionId: String? {
-        let trimmed = task.sessionId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let trimmed = task?.sessionId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return trimmed.isEmpty ? nil : trimmed
     }
 
@@ -304,14 +335,14 @@ struct TaskDetail: View {
     }
 
     private func performCancel() async {
-        guard await store.cancelTask(task) else {
+        guard await store.cancelTask(taskId) else {
             showingActionError = true
             return
         }
     }
 
     private func performResume(instruction: String?) async {
-        guard await store.resumeTask(task, instruction: instruction) else {
+        guard await store.resumeTask(taskId, instruction: instruction) else {
             showingActionError = true
             return
         }
@@ -353,16 +384,26 @@ struct TaskDetail: View {
                     .frame(minHeight: 24)
                 }
             }
-            if story.blocks.count > visibleBlockLimit {
-                Button(showingEarlierActivity
-                       ? "Hide earlier blocks"
-                       : "Show \(story.blocks.count - visibleBlockLimit) earlier blocks") {
-                    showingEarlierActivity.toggle()
+            if hasEarlier {
+                Button {
+                    Task { await loadEarlierEvents() }
+                } label: {
+                    if loadingEarlier {
+                        HStack(spacing: 4) { ProgressView().controlSize(.small); Text("Loading…") }
+                    } else {
+                        Text("Load earlier activity")
+                    }
                 }
                 .buttonStyle(.plain)
                 .scaledFont(.caption)
                 .foregroundStyle(.secondary)
+                .disabled(loadingEarlier)
                 .padding(.bottom, 2)
+            }
+            if story.blocks.count > visibleBlockLimit {
+                Text("Showing the newest \(visibleBlockLimit) of \(story.blocks.count) blocks")
+                    .scaledFont(.caption).foregroundStyle(.tertiary)
+                    .padding(.bottom, 2)
             }
             LazyVStack(alignment: .leading, spacing: 10) {
                 ForEach(displayedBlocks) { block in
@@ -391,9 +432,10 @@ struct TaskDetail: View {
     /// measure a multi-thousand-block trace on every pass.
     private let visibleBlockLimit = 300
 
-    /// The newest blocks, or the whole trace once the reader asked for it.
+    /// The newest blocks — the 300-block cap limits layout measurement, not
+    /// what the user can scroll to (LazyVStack renders on demand).
     private var displayedBlocks: [ActivityBlock] {
-        showingEarlierActivity ? story.blocks : Array(story.blocks.suffix(visibleBlockLimit))
+        Array(story.blocks.suffix(visibleBlockLimit))
     }
 
     /// Zero-height anchor at the content's edge, the jump control's target. A
@@ -405,51 +447,79 @@ struct TaskDetail: View {
     }
 
     private var worker: Profile? {
-        store.profiles.first { $0.id == task.profileId }
+        store.profiles.first { $0.id == resolvedProfileId }
     }
 
     private var workerLabel: String {
-        worker?.label ?? task.profileId
+        worker?.label ?? resolvedProfileId
     }
 
-    private var state: TaskState { TaskState(task.state) }
+    /// The task's model — from the full detail when loaded, the summary otherwise.
+    private var resolvedModel: String {
+        task?.model ?? listItem.model
+    }
+
+    /// Fields shared across summary and full-detail rows, falling back from the
+    /// fetched snapshot to the sidebar's list item.
+    private var resolvedLabel: String { task?.displayLabel ?? listItem.displayLabel }
+    private var resolvedTaskState: String { task?.state ?? listItem.state }
+    private var resolvedCwd: String { task?.cwd ?? listItem.cwd }
+    private var resolvedProfileId: String { task?.profileId ?? listItem.profileId }
+    private var resolvedError: String? { task?.error ?? listItem.error }
+    private var resolvedQuestion: String? { task?.question ?? listItem.question }
+    private var resolvedArchivedAt: String? { task?.archivedAt ?? listItem.archivedAt }
+    private var resolvedDisplayPath: String { task?.displayPath ?? listItem.displayPath }
+
+    private var state: TaskState { TaskState(resolvedTaskState) }
 
     /// The store's current word on this task, not the snapshot the pane opened
     /// with — the loop parks on this value, so a stale copy would either keep a
     /// settled pane fetching or miss the resume that should re-arm it.
     private var liveState: String {
-        store.tasks.first { $0.id == task.id }?.state ?? task.state
+        store.tasks.first { $0.id == taskId }?.state ?? resolvedTaskState
     }
 
+    /// The summary row as it stands right now — used to detect when the detail
+    /// should be refetched.
+    private var currentListItem: TaskListItem? {
+        store.tasks.first { $0.id == taskId }
+    }
+
+    // MARK: - Event loading (tail-first, compose off-main)
+
     private func loadEvents() async {
+        if !loadedInitialEvents {
+            await loadInitialTail()
+            return
+        }
+        // Follow loop: long-poll for events newer than cursor. Only live tasks
+        // produce events, so a terminal state is a no-op here.
+        if !TaskState(liveState).isTerminal {
+            await loadNewerEvents()
+        }
+    }
+
+    /// Fetches the newest 1500 events. The pane opens on the tail — the reader
+    /// lands where the action is, not on event #1.
+    private func loadInitialTail() async {
         do {
-            var hasMore = true
-            while hasMore, !Task.isCancelled {
-                var components = URLComponents(
-                    url: InterServer.api("tasks/\(task.id)/events"),
-                    resolvingAgainstBaseURL: false
-                )!
-                components.queryItems = [
-                    URLQueryItem(name: "after", value: String(eventCursor)),
-                    URLQueryItem(name: "waitMs", value: loadedInitialEvents ? "25000" : "0"),
-                ]
-                let (data, response) = try await URLSession.shared.data(from: components.url!)
-                guard !Task.isCancelled else { return }
-                guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-                    loadFailed = true; loading = false; return
-                }
-                if let page = try? JSONDecoder().decode(TaskEventPage.self, from: data) {
-                    appendEvents(page.events)
-                    eventCursor = max(eventCursor, page.cursor)
-                    hasMore = page.hasMore
-                    loadedInitialEvents = true
-                } else {
-                    let initial = try JSONDecoder().decode([TaskEventSnapshot].self, from: data)
-                    appendEvents(initial)
-                    eventCursor = max(eventCursor, initial.map(\.id).max() ?? 0)
-                    hasMore = false
-                    loadedInitialEvents = true
-                }
+            var components = URLComponents(
+                url: InterServer.api("tasks/\(taskId)/events"),
+                resolvingAgainstBaseURL: false
+            )!
+            components.queryItems = [URLQueryItem(name: "last", value: "1500")]
+            let (data, response) = try await URLSession.shared.data(from: components.url!)
+            guard !Task.isCancelled else { return }
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+                loadFailed = true; loading = false; return
+            }
+            if let page = try? JSONDecoder().decode(TaskEventPage.self, from: data) {
+                events = page.events
+                eventCursor = page.cursor
+                oldestId = page.oldestId ?? 0
+                hasEarlier = page.hasEarlier ?? false
+                scheduleCompose()
+                loadedInitialEvents = true
             }
             loadFailed = false
         } catch {
@@ -457,6 +527,97 @@ struct TaskDetail: View {
             loadFailed = true
         }
         loading = false
+    }
+
+    /// Long-poll for events after the cursor. One fast catch-up pass runs after
+    /// the initial tail load to grab events that landed in the gap; after that,
+    /// each call holds for up to 25s while the worker is live.
+    private func loadNewerEvents() async {
+        if !catchUpDone {
+            await pollEvents(waitMs: 0)
+            catchUpDone = true
+        }
+        await pollEvents(waitMs: 25000)
+    }
+
+    /// Fetches events after the cursor with the given wait, looping while
+    /// `hasMore` is true so a multi-page backlog drains in one pass.
+    private func pollEvents(waitMs: Int) async {
+        var hasMore = true
+        while hasMore, !Task.isCancelled {
+            do {
+                var components = URLComponents(
+                    url: InterServer.api("tasks/\(taskId)/events"),
+                    resolvingAgainstBaseURL: false
+                )!
+                components.queryItems = [
+                    URLQueryItem(name: "after", value: String(eventCursor)),
+                    URLQueryItem(name: "waitMs", value: String(waitMs)),
+                ]
+                let (data, response) = try await URLSession.shared.data(from: components.url!)
+                guard !Task.isCancelled else { return }
+                guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+                    loadFailed = true; return
+                }
+                if let page = try? JSONDecoder().decode(TaskEventPage.self, from: data) {
+                    let fresh = EventMerge.appendInOrder(page.events, after: events)
+                    if fresh.isEmpty, !page.events.isEmpty {
+                        // Overlap — merge with sort
+                        let known = Set(events.map(\.id))
+                        let deduped = page.events.filter { !known.contains($0.id) }
+                        events.append(contentsOf: deduped)
+                        events.sort { $0.id < $1.id }
+                    } else {
+                        events.append(contentsOf: fresh)
+                    }
+                    eventCursor = max(eventCursor, page.cursor)
+                    hasMore = page.hasMore
+                    scheduleCompose()
+                }
+                loadFailed = false
+            } catch {
+                guard !Task.isCancelled else { return }
+                loadFailed = true
+                return
+            }
+        }
+    }
+
+    /// Fetches older events before `oldestId`, prepends them, and recomposes.
+    func loadEarlierEvents() async {
+        guard !loadingEarlier, hasEarlier else { return }
+        loadingEarlier = true
+        do {
+            var components = URLComponents(
+                url: InterServer.api("tasks/\(taskId)/events"),
+                resolvingAgainstBaseURL: false
+            )!
+            components.queryItems = [
+                URLQueryItem(name: "before", value: String(oldestId)),
+                URLQueryItem(name: "last", value: "1500"),
+            ]
+            let (data, response) = try await URLSession.shared.data(from: components.url!)
+            guard !Task.isCancelled else { loadingEarlier = false; return }
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+                loadingEarlier = false; return
+            }
+            if let page = try? JSONDecoder().decode(TaskEventPage.self, from: data) {
+                let fresh = EventMerge.prependInOrder(page.events, before: events)
+                if fresh.isEmpty, !page.events.isEmpty {
+                    // Overlap — merge with sort
+                    let known = Set(events.map(\.id))
+                    let deduped = page.events.filter { !known.contains($0.id) }
+                    events = deduped + events
+                    events.sort { $0.id < $1.id }
+                } else {
+                    events = fresh + events
+                }
+                oldestId = page.oldestId ?? oldestId
+                hasEarlier = page.hasEarlier ?? false
+                scheduleCompose()
+            }
+        } catch {}
+        loadingEarlier = false
     }
 
     private func resetEventState() {
@@ -467,16 +628,37 @@ struct TaskDetail: View {
         loading = true
         loadFailed = false
         showingTechnicalEvents = false
-        showingEarlierActivity = false
+        oldestId = 0
+        hasEarlier = false
+        loadingEarlier = false
+        catchUpDone = false
     }
 
-    private func appendEvents(_ incoming: [TaskEventSnapshot]) {
-        var known = Set(events.map(\.id))
-        let fresh = incoming.filter { known.insert($0.id).inserted }
-        guard !fresh.isEmpty else { return }
-        events.append(contentsOf: fresh)
-        events.sort { $0.id < $1.id }
-        story = ActivityStory.compose(events)
+    // MARK: - Compose coalescing
+
+    /// Schedules an off-main compose. If one is already in flight, marks a
+    /// pending re-run so the latest events always win without stacking work.
+    private func scheduleCompose() {
+        if composeInFlight {
+            pendingCompose = true
+            return
+        }
+        composeInFlight = true
+        let snapshot = events
+        Task.detached(priority: .userInitiated) {
+            let result = ActivityStory.compose(snapshot)
+            await self.applyComposition(result)
+        }
+    }
+
+    @MainActor
+    private func applyComposition(_ comp: ActivityStory.Composition) {
+        story = comp
+        composeInFlight = false
+        if pendingCompose {
+            pendingCompose = false
+            scheduleCompose()
+        }
     }
 }
 
@@ -642,10 +824,26 @@ private struct ActivityWorkRow: View {
                 if isQuote {
                     quoteContent
                 } else {
-                    Text(event.title)
-                        .scaledFont(.callout, weight: .medium, design: .monospaced)
-                        .foregroundStyle(event.phase == "failed" ? AnyShapeStyle(.red) : AnyShapeStyle(.primary))
-                        .layoutPriority(1)
+                    // An icon only stands in for the title when it is
+                    // unmistakable for that tool; anything else keeps the
+                    // word. The subject beside it — a path, a command — is
+                    // what a reader actually scans for, so the icon sits a
+                    // shade quieter than the title used to, at `.tertiary`
+                    // instead of `.primary`. Failure still needs to read at
+                    // a glance, so it keeps the same red the title used.
+                    if let symbolName = ToolIcon.symbolName(for: event) {
+                        Image(systemName: symbolName)
+                            .scaledFont(.callout, weight: .medium)
+                            .foregroundStyle(event.phase == "failed" ? AnyShapeStyle(.red) : AnyShapeStyle(.tertiary))
+                            .layoutPriority(1)
+                            .help(event.title)
+                            .accessibilityLabel(event.title)
+                    } else {
+                        Text(event.title)
+                            .scaledFont(.callout, weight: .medium, design: .monospaced)
+                            .foregroundStyle(event.phase == "failed" ? AnyShapeStyle(.red) : AnyShapeStyle(.primary))
+                            .layoutPriority(1)
+                    }
                     inlineContent
                 }
                 Spacer(minLength: 12)

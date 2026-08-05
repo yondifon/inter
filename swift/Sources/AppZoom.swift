@@ -43,9 +43,10 @@ struct RootView: View {
     let store: ProfileStore
     let broker: BrokerManager
     let zoom: AppZoom
+    let openSettings: () -> Void
 
     var body: some View {
-        ContentView(store: store, broker: broker)
+        ContentView(store: store, broker: broker, openSettings: openSettings)
             .environment(\.uiScale, zoom.scale)
     }
 }

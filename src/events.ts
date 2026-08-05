@@ -893,6 +893,11 @@ const TOOL_LABELS: Record<string, string> = {
   task: "Subagent",
   agent: "Subagent",
   update_plan: "Plan update",
+  toolsearch: "Tool search",
+  taskcreate: "Create task",
+  taskupdate: "Update task",
+  "run command": "Run command",
+  "list permissions": "List permissions",
 };
 
 interface McpToolMeta {
@@ -921,14 +926,29 @@ function findToolMeta(payload: Record<string, any>, id: unknown): McpToolMeta | 
 /// caller has it. The hook events reporting the same call carry only the raw
 /// name, never the meta, so they fall back to parsing it — in the same
 /// "server: function" shape, so a live trace doesn't flip titles as the hook
-/// settles onto the row the assistant message opened.
+/// settles onto the row the assistant message opened. When tool_use_meta is
+/// present but uses a decorative server display name (e.g., "inter [database]"),
+/// ignore it in favor of parsing the canonical server name from mcp__ format.
 function mcpToolTitle(name: string, meta?: McpToolMeta): string {
+  // Always parse the canonical names from the mcp__ format to ensure
+  // consistency across all event shapes (assistant message, hook, opencode
+  // flattened). The tool_use_meta server_display_name is decorative, not canonical.
+  const parts = name.split("__");
+  if (parts.length >= 3) {
+    const server = parts[1]!;
+    const func = parts.slice(2).join("__");
+    // Prefer the parsed canonical form, except when meta provides just a function
+    // name (for simpler MCP servers that don't have complex server names).
+    if (meta?.displayName && !meta.serverDisplayName?.includes(" ")) {
+      // Simple display name without server: just use it
+      return meta.displayName;
+    }
+    return `${humanize(server)}: ${humanize(func)}`;
+  }
   if (meta?.displayName) {
     return meta.serverDisplayName ? `${capitalize(meta.serverDisplayName)}: ${meta.displayName}` : meta.displayName;
   }
-  const parts = name.split("__");
-  if (parts.length < 3) return humanize(name);
-  return `${humanize(parts[1]!)}: ${humanize(parts.slice(2).join("__"))}`;
+  return humanize(name);
 }
 
 /// Codex names an MCP call's server outside the tool name entirely
@@ -949,6 +969,30 @@ function toolTitle(tool: string, meta?: McpToolMeta): string {
   if (normalized === "multiedit") return "Multi-edit file";
   if (normalized === "write_file") return "Write file";
   if (normalized === "read_file") return "Read file";
+  // OpenCode flattens MCP tool names to `server_function` format. If a tool name
+  // contains a hyphen (indicating an MCP server with a multi-word name), split on
+  // the first underscore and treat it as an MCP call. Guard against built-in
+  // underscore tools like `update_plan` or `apply_patch` (already checked above).
+  if (tool.includes("_") && tool.includes("-")) {
+    const underscoreIndex = tool.indexOf("_");
+    const serverPart = tool.substring(0, underscoreIndex);
+    if (serverPart.includes("-")) {
+      const functionPart = tool.substring(underscoreIndex + 1);
+      return `${humanize(serverPart)}: ${humanize(functionPart)}`;
+    }
+  }
+  // Single-word MCP servers like `inter_delegate` follow the same flattened pattern.
+  // Detect them only if they are not in TOOL_LABELS and not file tools.
+  if (tool.includes("_") && !isFileTool(tool) && !TOOL_LABELS[normalized]) {
+    const parts = tool.split("_");
+    if (parts.length === 2) {
+      const [server, func] = parts;
+      // Only treat as MCP if the server part looks like a known MCP server.
+      if (["inter"].includes(server.toLowerCase())) {
+        return `${humanize(server)}: ${humanize(func)}`;
+      }
+    }
+  }
   return isFileTool(tool) ? `${capitalize(normalized)} file` : humanize(tool);
 }
 

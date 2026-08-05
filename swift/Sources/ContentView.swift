@@ -1,7 +1,6 @@
 import SwiftUI
 
 private enum SidebarSelection: Hashable {
-    case profile(String)
     case task(String)
     /// Identified by cwd, which is what a project's memories are keyed to.
     case project(String)
@@ -10,9 +9,8 @@ private enum SidebarSelection: Hashable {
 struct ContentView: View {
     let store: ProfileStore
     let broker: BrokerManager
+    let openSettings: () -> Void
     @State private var selection: SidebarSelection?
-    @State private var editing: Profile?
-    @State private var adding = false
     @State private var installResults: [MCPConfigInjector.InstallResult] = []
     @State private var showingInstall = false
     @AppStorage("taskProjectFilter") private var projectFilter = ""
@@ -26,20 +24,6 @@ struct ContentView: View {
     var body: some View {
         NavigationSplitView {
             List(selection: $selection) {
-                Section {
-                    if store.profiles.isEmpty {
-                        Text("No workers yet. Add one to start delegating.")
-                            .scaledFont(.callout).foregroundStyle(.tertiary)
-                    } else {
-                        ForEach(store.profiles) { profile in
-                            WorkerRow(profile: profile).tag(SidebarSelection.profile(profile.id))
-                        }
-                    }
-                } header: {
-                    SidebarSectionLabel(text: "Workers")
-                        .padding(.top, 2)
-                        .padding(.bottom, 2)
-                }
                 Section {
                     if visibleTasks.isEmpty {
                         Text(showArchivedTasks ? "No archived tasks" : "No tasks yet")
@@ -69,12 +53,12 @@ struct ContentView: View {
                                     }
                                     if canResume(task) {
                                         Button("Resume", systemImage: "arrow.clockwise.circle") {
-                                            Task { await performResume(task) }
+                                            Task { await performResume(task.id) }
                                         }
                                     }
                                     Button(showArchivedTasks ? "Restore" : "Archive",
                                            systemImage: showArchivedTasks ? "arrow.uturn.backward" : "archivebox") {
-                                        setArchived(task, !showArchivedTasks)
+                                        setArchived(task.id, !showArchivedTasks)
                                     }
                                 }
                             }
@@ -126,28 +110,24 @@ struct ContentView: View {
                     .help("Add Inter to every CLI's global MCP config")
                 }
                 ToolbarItem {
-                    Button("Add Worker", systemImage: "plus") { adding = true }
-                        .help("Add worker")
+                    Button("Settings…", systemImage: "gearshape", action: openSettings)
+                        .labelStyle(.iconOnly)
+                        .help("Settings")
                 }
             }
         } detail: {
-            if case let .profile(id) = selection,
-               let profile = store.profiles.first(where: { $0.id == id }) {
-                ProfileDetail(profile: profile, store: store) { editing = profile }
-            } else if case let .task(id) = selection,
-                      let task = store.tasks.first(where: { $0.id == id }) {
-                TaskDetail(task: task, store: store, setArchived: setArchived)
-                    .id(task.id)
+            if case let .task(id) = selection,
+               let item = store.tasks.first(where: { $0.id == id }) {
+                TaskDetail(taskId: id, listItem: item, store: store, setArchived: setArchived)
+                    .id(id)
             } else if case let .project(cwd) = selection,
                       let project = store.memoryProjects.first(where: { $0.cwd == cwd }) {
                 ProjectMemoryView(project: project, store: store)
                     .id(project.cwd)
             } else {
-                ContentUnavailableView("Choose a worker, task, or project", systemImage: "point.3.connected.trianglepath.dotted")
+                ContentUnavailableView("Choose a task or project", systemImage: "point.3.connected.trianglepath.dotted")
             }
         }
-        .sheet(isPresented: $adding) { ProfileFormView(store: store) }
-        .sheet(item: $editing) { ProfileFormView(store: store, profile: $0) }
         .sheet(isPresented: $showingInstall) { InstallResultsView(results: installResults) }
         .task { store.start() }
         // Cancel from the context menu always confirms first (EC-004).
@@ -173,7 +153,7 @@ struct ContentView: View {
         .frame(minWidth: 760, minHeight: 520)
     }
 
-    private var visibleTasks: [TaskSnapshot] {
+    private var visibleTasks: [TaskListItem] {
         store.tasks.filter { showArchivedTasks ? $0.archivedAt != nil : $0.archivedAt == nil }
     }
 
@@ -210,38 +190,37 @@ struct ContentView: View {
         taskGroups.flatMap { TaskOrganizer.visibleTasks(in: $0, collapsed: collapsedGroups) }.map(\.id)
     }
 
-    private func setArchived(_ task: TaskSnapshot, _ archived: Bool) {
-        let nextID = selection == .task(task.id)
-            ? TaskOrganizer.neighbor(afterRemoving: task.id, from: listedTaskIDs)
+    private func setArchived(_ id: String, _ archived: Bool) {
+        let nextID = selection == .task(id)
+            ? TaskOrganizer.neighbor(afterRemoving: id, from: listedTaskIDs)
             : nil
         Task {
-            let changed = await store.setArchived(task, archived)
-            guard changed, selection == .task(task.id) else { return }
+            let changed = await store.setArchived(id, archived)
+            guard changed, selection == .task(id) else { return }
             selection = nextID.map(SidebarSelection.task)
         }
     }
 
     /// Context menu entries mirror the detail header's preconditions, so a menu
     /// never offers an action the broker would reject.
-    private func canCancel(_ task: TaskSnapshot) -> Bool {
+    private func canCancel(_ task: TaskListItem) -> Bool {
         [.queued, .running, .needsInput, .blocked].contains(TaskState(task.state))
     }
 
-    private func canResume(_ task: TaskSnapshot) -> Bool {
+    private func canResume(_ task: TaskListItem) -> Bool {
         [.failed, .cancelled, .blocked].contains(TaskState(task.state))
     }
 
     private func performCancel(_ id: String) async {
-        guard let task = store.tasks.first(where: { $0.id == id }) else { return }
-        guard await store.cancelTask(task) else {
+        guard await store.cancelTask(id) else {
             showingTaskActionError = true
             return
         }
     }
 
     /// Fast path only — the detail header carries the instruction sheet.
-    private func performResume(_ task: TaskSnapshot) async {
-        guard await store.resumeTask(task) else {
+    private func performResume(_ id: String) async {
+        guard await store.resumeTask(id) else {
             showingTaskActionError = true
             return
         }
@@ -315,112 +294,6 @@ struct ContentView: View {
     }
 }
 
-private struct ProfileDetail: View {
-    let profile: Profile
-    let store: ProfileStore
-    let edit: () -> Void
-
-    @State private var confirmingDelete = false
-    @Environment(\.uiScale) private var uiScale
-
-    var body: some View {
-        Form {
-            Section {
-                HStack(spacing: 14) {
-                    ProviderLogo(provider: profile.provider, size: 28 * uiScale)
-                        .accessibilityHidden(true)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(profile.label).scaledFont(.title3, weight: .semibold)
-                        Text("\(profile.provider.label) · \(profile.resolvedModel)")
-                            .scaledFont(.callout, design: .monospaced).foregroundStyle(.secondary)
-                    }
-                    Spacer(minLength: 16)
-                    EnabledToggle(profile: profile, store: store)
-                    Button("Edit…", action: edit)
-                    Menu {
-                        Button("Delete Worker…", role: .destructive) { confirmingDelete = true }
-                    } label: {
-                        Image(systemName: "ellipsis")
-                    }
-                    .menuStyle(.borderlessButton)
-                    .menuIndicator(.hidden)
-                    .fixedSize()
-                    .help("More actions")
-                    .accessibilityLabel("More actions")
-                }
-                .padding(.vertical, 6)
-            }
-
-            Section {
-                if profile.env.isEmpty {
-                    Text("No overrides").foregroundStyle(.secondary)
-                } else {
-                    ForEach(profile.env.keys.sorted(), id: \.self) { key in
-                        EnvironmentRow(key: key, value: profile.env[key] ?? "")
-                    }
-                }
-            } header: {
-                SectionLabel(text: "Environment")
-            }
-
-            Section {
-                LabeledContent("Endpoint") {
-                    HStack(spacing: 8) {
-                        Text(InterServer.mcpURL)
-                            .scaledFont(.body, design: .monospaced)
-                            .textSelection(.enabled)
-                        CopyIconButton(text: InterServer.mcpURL, label: "Copy endpoint")
-                    }
-                }
-            } header: {
-                SectionLabel(text: "MCP — applies to all workers")
-            } footer: {
-                Text("When enabled, each active worker gets a named tool. Reconnect MCP clients after changing this option or workers.")
-            }
-
-        }
-        .formStyle(.grouped)
-        .scrollIndicators(.never)
-        .confirmationDialog("Delete “\(profile.label)”?", isPresented: $confirmingDelete) {
-            Button("Delete", role: .destructive) { Task { await store.delete(profile) } }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Delegated tasks can no longer use this worker. This can’t be undone.")
-        }
-    }
-}
-
-private struct EnvironmentRow: View {
-    let key: String
-    let value: String
-    @State private var revealed = false
-
-    private var isSecret: Bool {
-        ["TOKEN", "KEY", "SECRET", "PASSWORD", "CREDENTIAL"].contains { key.uppercased().contains($0) }
-    }
-
-    var body: some View {
-        LabeledContent {
-            HStack(spacing: 8) {
-                Text(isSecret && !revealed ? String(repeating: "•", count: 10) : value)
-                    .scaledFont(.body, design: .monospaced)
-                    .textSelection(.enabled)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                if isSecret {
-                    IconButton(
-                        symbol: revealed ? "eye.slash" : "eye",
-                        label: revealed ? "Hide value" : "Reveal value"
-                    ) { revealed.toggle() }
-                }
-                CopyIconButton(text: value, label: "Copy value")
-            }
-        } label: {
-            Text(key).scaledFont(.callout, design: .monospaced)
-        }
-    }
-}
-
 /// Collapsible heading for one run of tasks. The count stays visible when the run
 /// is closed so a collapsed group never reads as an empty one.
 private struct TaskGroupHeader: View {
@@ -451,30 +324,6 @@ private struct TaskGroupHeader: View {
     }
 }
 
-private struct WorkerRow: View {
-    let profile: Profile
-    @Environment(\.uiScale) private var uiScale
-
-    var body: some View {
-        HStack(spacing: 9) {
-            ProviderLogo(provider: profile.provider, size: 15 * uiScale)
-                .accessibilityHidden(true)
-                .frame(width: 18 * uiScale, alignment: .center)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(profile.label).scaledFont(.body).lineLimit(1)
-                Text(profile.resolvedModel).scaledFont(.caption, design: .monospaced)
-                    .foregroundStyle(.tertiary).lineLimit(1)
-            }
-            Spacer(minLength: 0)
-            if !profile.enabled {
-                Text("Off").scaledFont(.caption2).foregroundStyle(.tertiary)
-            }
-        }
-        .padding(.vertical, 5)
-        .opacity(profile.enabled ? 1 : 0.5)
-    }
-}
-
 private struct ProjectRow: View {
     let project: MemoryProjectSnapshot
     @Environment(\.uiScale) private var uiScale
@@ -499,7 +348,7 @@ private struct ProjectRow: View {
 }
 
 private struct TaskRow: View {
-    let task: TaskSnapshot
+    let task: TaskListItem
     let worker: String
     @Environment(\.uiScale) private var uiScale
 
@@ -533,32 +382,6 @@ private struct TaskRow: View {
     }
     private var title: String {
         task.displayLabel
-    }
-}
-
-struct EnabledToggle: View {
-    let profile: Profile
-    let store: ProfileStore
-    @State private var saveFailed = false
-
-    var body: some View {
-        Toggle("Enabled", isOn: Binding(
-            get: { profile.enabled },
-            set: { value in
-                var changed = profile
-                changed.enabled = value
-                Task {
-                    do { try await store.save(changed, isNew: false) } catch { saveFailed = true }
-                }
-            }
-        ))
-        .toggleStyle(.switch)
-        .labelsHidden()
-        .accessibilityLabel("Enabled")
-        .help(profile.enabled ? "Accepts delegated tasks" : "Hidden from delegate")
-        .alert("Couldn’t change worker state.", isPresented: $saveFailed) {
-            Button("OK", role: .cancel) {}
-        }
     }
 }
 

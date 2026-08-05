@@ -1075,7 +1075,7 @@ describe("task event views", () => {
 
     expect(view.kind).toBe("tool");
     expect(view.phase).toBe("completed");
-    expect(view.title).toBe("Inter Memory");
+    expect(view.title).toBe("Inter: Memory");
     expect(view.detail).toBe("Action: list");
     expect(view.detail).not.toContain("[{");
     expect(view.presentation).toEqual({ type: "tool", text: "Action: list", outcome: "completed" });
@@ -1137,13 +1137,13 @@ describe("task event views", () => {
     const errored = make("error");
     expect(errored.kind).toBe("error");
     expect(errored.phase).toBe("failed");
-    expect(errored.title).toBe("Inter Memory failed");
+    expect(errored.title).toBe("Inter: Memory failed");
     expect(errored.detail).toBe("Action: set · Tool execution aborted");
     expect(errored.actionId).toBe("call_00_failed");
 
     const failed = make("failed");
     expect(failed.kind).toBe("error");
-    expect(failed.title).toBe("Inter Memory failed");
+    expect(failed.title).toBe("Inter: Memory failed");
   });
 
   test("leaves a label-less tool part in the raw fallback", () => {
@@ -1185,7 +1185,7 @@ describe("task event views", () => {
       createdAt: "now",
     }, "opencode");
     expect(view.kind).toBe("tool");
-    expect(view.title).toBe("Inter Tasks");
+    expect(view.title).toBe("Inter: Tasks");
     expect(view.detail).toBe("3 items");
     expect(view.detail).not.toContain("[{");
   });
@@ -1264,7 +1264,7 @@ describe("task event views", () => {
       createdAt: "now",
     }, "claude");
     expect(view.kind).toBe("tool");
-    expect(view.title).toBe("Inter [database]: Query");
+    expect(view.title).toBe("Inter Database Local: Query");
     expect(view.title).not.toContain("Mcp Inter Database Local Query");
     expect(view.detail).toBe(
       "Sql: select id, profile_id, state, length(prompt) from tasks where id like '82ade75a…",
@@ -1528,5 +1528,215 @@ describe("task event views", () => {
     expect(view.presentation).toEqual({
       type: "tool", text: "https://raw.githubusercontent.com/vercel-labs/web-interface-guidelines/main/command.md",
     });
+  });
+
+  test("names ToolSearch with correct title instead of raw identifier", () => {
+    const view = taskEventView({
+      id: 74,
+      taskId: "task",
+      type: "agent.hook",
+      state: "running",
+      payload: {
+        hook_event_name: "PostToolUse",
+        tool_name: "ToolSearch",
+        tool_input: { query: "search term" },
+        tool_use_id: "toolu_001",
+      },
+      createdAt: "now",
+    }, "claude");
+    expect(view.kind).toBe("tool");
+    expect(view.title).toBe("Tool search");
+  });
+
+  test("names TaskCreate with correct title instead of raw identifier", () => {
+    const view = taskEventView({
+      id: 75,
+      taskId: "task",
+      type: "agent.hook",
+      state: "running",
+      payload: {
+        hook_event_name: "PostToolUse",
+        tool_name: "TaskCreate",
+        tool_input: { description: "create task" },
+        tool_use_id: "toolu_002",
+      },
+      createdAt: "now",
+    }, "claude");
+    expect(view.title).toBe("Create task");
+  });
+
+  test("names TaskUpdate with correct title instead of raw identifier", () => {
+    const view = taskEventView({
+      id: 76,
+      taskId: "task",
+      type: "agent.hook",
+      state: "running",
+      payload: {
+        hook_event_name: "PostToolUse",
+        tool_name: "TaskUpdate",
+        tool_input: { taskId: "123" },
+        tool_use_id: "toolu_003",
+      },
+      createdAt: "now",
+    }, "claude");
+    expect(view.title).toBe("Update task");
+  });
+
+  test("names Run Command with correct title", () => {
+    const view = taskEventView({
+      id: 77,
+      taskId: "task",
+      type: "agent.hook",
+      state: "running",
+      payload: {
+        hook_event_name: "PostToolUse",
+        tool_name: "Run Command",
+        tool_input: { command: "ls" },
+        tool_use_id: "toolu_004",
+      },
+      createdAt: "now",
+    }, "antigravity");
+    expect(view.title).toBe("Run command");
+  });
+
+  test("names List Permissions with correct title", () => {
+    const view = taskEventView({
+      id: 78,
+      taskId: "task",
+      type: "agent.hook",
+      state: "running",
+      payload: {
+        hook_event_name: "PostToolUse",
+        tool_name: "List Permissions",
+        tool_input: {},
+        tool_use_id: "toolu_005",
+      },
+      createdAt: "now",
+    }, "antigravity");
+    expect(view.title).toBe("List permissions");
+  });
+
+  test("renders inter-database-local_query from opencode flattened name as consistent title", () => {
+    // OpenCode flattens MCP tool names by replacing __ with single _
+    // and removing the mcp__ prefix, so mcp__inter-database-local__query
+    // becomes inter-database-local_query
+    const view = taskEventView({
+      id: 79,
+      taskId: "task",
+      type: "agent.tool_use",
+      state: "running",
+      payload: {
+        type: "tool_use",
+        part: {
+          type: "tool",
+          tool: "inter-database-local_query",
+          callID: "call_00_flattened",
+          state: {
+            status: "completed",
+            input: { sql: "select count(*) from tasks" },
+            output: "3",
+            title: "",
+          },
+        },
+      },
+      createdAt: "now",
+    }, "opencode");
+    expect(view.kind).toBe("tool");
+    // All three shapes should produce this consistent title
+    expect(view.title).toBe("Inter Database Local: Query");
+  });
+
+  test("makes all three MCP query shapes produce the same title: claude assistant message with meta", () => {
+    const view = taskEventView({
+      id: 80,
+      taskId: "task",
+      type: "agent.assistant",
+      state: "running",
+      payload: {
+        type: "assistant",
+        message: {
+          model: "claude-opus-5", role: "assistant",
+          content: [{
+            type: "tool_use", id: "toolu_query1", name: "mcp__inter-database-local__query",
+            input: { sql: "select id from profiles" },
+          }],
+        },
+        tool_use_meta: [{
+          id: "toolu_query1", display_name: "Query", server_display_name: "inter [database]",
+        }],
+      },
+      createdAt: "now",
+    }, "claude");
+    // Normalize to canonical server name (from mcp__ format), not decorative display name
+    expect(view.title).toBe("Inter Database Local: Query");
+  });
+
+  test("makes all three MCP query shapes produce the same title: claude hook without meta", () => {
+    const view = taskEventView({
+      id: 81,
+      taskId: "task",
+      type: "agent.hook",
+      state: "running",
+      payload: {
+        hook_event_name: "PreToolUse",
+        tool_name: "mcp__inter-database-local__query",
+        tool_input: { sql: "select id from profiles" },
+        tool_use_id: "toolu_query1",
+      },
+      createdAt: "now",
+    }, "claude");
+    expect(view.title).toBe("Inter Database Local: Query");
+  });
+
+  test("keeps underscore built-in tools with their current titles", () => {
+    const update_plan = taskEventView({
+      id: 82,
+      taskId: "task",
+      type: "agent.tool_use",
+      state: "running",
+      payload: {
+        type: "tool_use",
+        part: {
+          type: "tool",
+          tool: "update_plan",
+          callID: "call_plan_1",
+          state: {
+            status: "completed",
+            input: { plan: "content" },
+            title: "",
+          },
+        },
+      },
+      createdAt: "now",
+    }, "opencode");
+    expect(update_plan.title).toBe("Plan update");
+
+    const apply_patch = taskEventView({
+      id: 83,
+      taskId: "task",
+      type: "agent.hook",
+      state: "running",
+      payload: {
+        hook_event_name: "PostToolUse",
+        tool_name: "apply_patch",
+        tool_input: { patch: "diff" },
+      },
+      createdAt: "now",
+    }, "claude");
+    expect(apply_patch.title).toBe("Apply patch");
+
+    const read_file = taskEventView({
+      id: 84,
+      taskId: "task",
+      type: "agent.hook",
+      state: "running",
+      payload: {
+        hook_event_name: "PostToolUse",
+        tool_name: "read_file",
+        tool_input: { filePath: "a.ts" },
+      },
+      createdAt: "now",
+    }, "claude");
+    expect(read_file.title).toBe("Read file");
   });
 });

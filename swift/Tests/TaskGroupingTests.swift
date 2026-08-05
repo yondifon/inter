@@ -3,18 +3,18 @@ import XCTest
 @testable import Inter
 
 final class TaskGroupingTests: XCTestCase {
-    private func task(_ id: String, cwd: String, parent: String? = nil, prompt: String = "prompt", title: String? = nil, state: String = "completed") -> TaskSnapshot {
-        TaskSnapshot(
+    private func item(_ id: String, cwd: String, parent: String? = nil, promptPreview: String = "prompt", title: String? = nil, state: String = "completed") -> TaskListItem {
+        TaskListItem(
             id: id,
             profileId: "worker",
             model: "sonnet",
-            prompt: prompt,
-            title: title,
             cwd: cwd,
             state: state,
+            promptPreview: promptPreview,
+            tldr: nil,
+            title: title,
             createdAt: "2026-07-29T10:00:00Z",
             updatedAt: "2026-07-29T10:00:00Z",
-            output: "",
             error: nil,
             question: nil,
             parentTaskId: parent
@@ -26,9 +26,9 @@ final class TaskGroupingTests: XCTestCase {
 
     func testProjectsCountTasksInFirstSeenOrder() {
         let projects = TaskOrganizer.projects(in: [
-            task("1", cwd: inter),
-            task("2", cwd: site),
-            task("3", cwd: inter),
+            item("1", cwd: inter),
+            item("2", cwd: site),
+            item("3", cwd: inter),
         ])
         XCTAssertEqual(projects.map(\.name), ["inter", "site"])
         XCTAssertEqual(projects.map(\.count), [2, 1])
@@ -37,7 +37,7 @@ final class TaskGroupingTests: XCTestCase {
 
     func testFilterKeepsOnlyTheSelectedProject() {
         let groups = TaskOrganizer.organize(
-            tasks: [task("1", cwd: inter), task("2", cwd: site), task("3", cwd: inter)],
+            tasks: [item("1", cwd: inter), item("2", cwd: site), item("3", cwd: inter)],
             project: inter,
             grouping: .project
         )
@@ -48,7 +48,7 @@ final class TaskGroupingTests: XCTestCase {
 
     func testGroupingNothingReturnsOneUntitledRun() {
         let groups = TaskOrganizer.organize(
-            tasks: [task("1", cwd: inter), task("2", cwd: site)],
+            tasks: [item("1", cwd: inter), item("2", cwd: site)],
             project: nil,
             grouping: .none
         )
@@ -59,7 +59,7 @@ final class TaskGroupingTests: XCTestCase {
 
     func testStaleFilterFallsBackToEveryTask() {
         let groups = TaskOrganizer.organize(
-            tasks: [task("1", cwd: inter)],
+            tasks: [item("1", cwd: inter)],
             project: "/Users/malico/deleted-checkout",
             grouping: .none
         )
@@ -67,15 +67,15 @@ final class TaskGroupingTests: XCTestCase {
             groups[0].tasks.map(\.id), ["1"],
             "a saved filter for a project with no tasks must not strand the sidebar empty"
         )
-        XCTAssertNil(TaskOrganizer.activeProjectName(tasks: [task("1", cwd: inter)], project: "/gone"))
+        XCTAssertNil(TaskOrganizer.activeProjectName(tasks: [item("1", cwd: inter)], project: "/gone"))
     }
 
     func testGroupingPreservesTaskOrderWithinEachProject() {
         let groups = TaskOrganizer.organize(
             tasks: [
-                task("1", cwd: inter),
-                task("2", cwd: site),
-                task("3", cwd: inter),
+                item("1", cwd: inter),
+                item("2", cwd: site),
+                item("3", cwd: inter),
             ],
             project: nil,
             grouping: .project
@@ -87,7 +87,7 @@ final class TaskGroupingTests: XCTestCase {
 
     func testFilterAndGroupingCombine() {
         let groups = TaskOrganizer.organize(
-            tasks: [task("1", cwd: inter), task("2", cwd: site)],
+            tasks: [item("1", cwd: inter), item("2", cwd: site)],
             project: site,
             grouping: .project
         )
@@ -98,15 +98,15 @@ final class TaskGroupingTests: XCTestCase {
     func testStatusGroupsComeOutInFixedOrder() {
         let groups = TaskOrganizer.organize(
             tasks: [
-                task("1", cwd: inter, state: "failed"),
-                task("2", cwd: inter, state: "running"),
-                task("3", cwd: inter, state: "completed"),
-                task("4", cwd: inter, state: "needs_input"),
-                task("5", cwd: inter, state: "blocked"),
-                task("6", cwd: inter, state: "queued"),
-                task("7", cwd: inter, state: "answered"),
-                task("8", cwd: inter, state: "cancelled"),
-                task("9", cwd: inter, state: "garbage"),
+                item("1", cwd: inter, state: "failed"),
+                item("2", cwd: inter, state: "running"),
+                item("3", cwd: inter, state: "completed"),
+                item("4", cwd: inter, state: "needs_input"),
+                item("5", cwd: inter, state: "blocked"),
+                item("6", cwd: inter, state: "queued"),
+                item("7", cwd: inter, state: "answered"),
+                item("8", cwd: inter, state: "cancelled"),
+                item("9", cwd: inter, state: "garbage"),
             ],
             project: nil,
             grouping: .status
@@ -121,9 +121,9 @@ final class TaskGroupingTests: XCTestCase {
     func testStatusGroupingSkipsAbsentStates() {
         let groups = TaskOrganizer.organize(
             tasks: [
-                task("1", cwd: inter, state: "running"),
-                task("2", cwd: inter, state: "completed"),
-                task("3", cwd: inter, state: "completed"),
+                item("1", cwd: inter, state: "running"),
+                item("2", cwd: inter, state: "completed"),
+                item("3", cwd: inter, state: "completed"),
             ],
             project: nil,
             grouping: .status
@@ -138,10 +138,10 @@ final class TaskGroupingTests: XCTestCase {
     func testStatusGroupingKeepsTheStoresOrderInsideEachGroup() {
         let groups = TaskOrganizer.organize(
             tasks: [
-                task("1", cwd: inter, state: "completed"),
-                task("2", cwd: inter, state: "running"),
-                task("3", cwd: inter, state: "completed"),
-                task("4", cwd: inter, state: "running"),
+                item("1", cwd: inter, state: "completed"),
+                item("2", cwd: inter, state: "running"),
+                item("3", cwd: inter, state: "completed"),
+                item("4", cwd: inter, state: "running"),
             ],
             project: nil,
             grouping: .status
@@ -153,9 +153,9 @@ final class TaskGroupingTests: XCTestCase {
     func testStatusGroupingComposesWithTheProjectFilter() {
         let groups = TaskOrganizer.organize(
             tasks: [
-                task("1", cwd: inter, state: "failed"),
-                task("2", cwd: site, state: "failed"),
-                task("3", cwd: inter, state: "running"),
+                item("1", cwd: inter, state: "failed"),
+                item("2", cwd: site, state: "failed"),
+                item("3", cwd: inter, state: "running"),
             ],
             project: inter,
             grouping: .status
@@ -166,7 +166,7 @@ final class TaskGroupingTests: XCTestCase {
 
     func testStatusGroupIDIsTheRawState() {
         let groups = TaskOrganizer.organize(
-            tasks: [task("1", cwd: inter, state: "needs_input")],
+            tasks: [item("1", cwd: inter, state: "needs_input")],
             project: nil,
             grouping: .status
         )
@@ -179,10 +179,10 @@ final class TaskGroupingTests: XCTestCase {
     func testSiblingsShareTheirParentsGroup() {
         let groups = TaskOrganizer.organize(
             tasks: [
-                task("root", cwd: inter, prompt: "Ship the landing page\nwith three sections"),
-                task("a", cwd: inter, parent: "root"),
-                task("b", cwd: inter, parent: "root"),
-                task("solo", cwd: site),
+                item("root", cwd: inter, promptPreview: "Ship the landing page\nwith three sections"),
+                item("a", cwd: inter, parent: "root"),
+                item("b", cwd: inter, parent: "root"),
+                item("solo", cwd: site),
             ],
             project: nil,
             grouping: .parent
@@ -197,9 +197,9 @@ final class TaskGroupingTests: XCTestCase {
     func testGrandchildrenCollapseIntoTheRootGroup() {
         let groups = TaskOrganizer.organize(
             tasks: [
-                task("root", cwd: inter, prompt: "Retry the failed build"),
-                task("child", cwd: inter, parent: "root"),
-                task("grandchild", cwd: inter, parent: "child"),
+                item("root", cwd: inter, promptPreview: "Retry the failed build"),
+                item("child", cwd: inter, parent: "root"),
+                item("grandchild", cwd: inter, parent: "child"),
             ],
             project: nil,
             grouping: .parent
@@ -210,7 +210,7 @@ final class TaskGroupingTests: XCTestCase {
 
     func testPurgedParentMakesTheChildItsOwnRoot() {
         let groups = TaskOrganizer.organize(
-            tasks: [task("child", cwd: inter, parent: "evicted", prompt: "Keep going")],
+            tasks: [item("child", cwd: inter, parent: "evicted", promptPreview: "Keep going")],
             project: nil,
             grouping: .parent
         )
@@ -224,8 +224,8 @@ final class TaskGroupingTests: XCTestCase {
     func testParentCycleTerminates() {
         let groups = TaskOrganizer.organize(
             tasks: [
-                task("a", cwd: inter, parent: "b", prompt: "First"),
-                task("b", cwd: inter, parent: "a", prompt: "Second"),
+                item("a", cwd: inter, parent: "b", promptPreview: "First"),
+                item("b", cwd: inter, parent: "a", promptPreview: "Second"),
             ],
             project: nil,
             grouping: .parent
@@ -242,8 +242,8 @@ final class TaskGroupingTests: XCTestCase {
     func testTitleWinsOverThePromptFirstLine() {
         let groups = TaskOrganizer.organize(
             tasks: [
-                task("root", cwd: inter, prompt: "Build the marketing site\nwith a contact form", title: "Ship the landing page"),
-                task("a", cwd: inter, parent: "root"),
+                item("root", cwd: inter, promptPreview: "Build the marketing site\nwith a contact form", title: "Ship the landing page"),
+                item("a", cwd: inter, parent: "root"),
             ],
             project: nil,
             grouping: .parent
@@ -254,8 +254,8 @@ final class TaskGroupingTests: XCTestCase {
     func testMissingOrBlankTitleFallsBackToThePromptFirstLine() {
         let withTitle = TaskOrganizer.organize(
             tasks: [
-                task("root", cwd: inter, prompt: "Retry the failed build", title: "   "),
-                task("a", cwd: inter, parent: "root"),
+                item("root", cwd: inter, promptPreview: "Retry the failed build", title: "   "),
+                item("a", cwd: inter, parent: "root"),
             ],
             project: nil,
             grouping: .parent
@@ -264,8 +264,8 @@ final class TaskGroupingTests: XCTestCase {
 
         let untitled = TaskOrganizer.organize(
             tasks: [
-                task("root", cwd: inter, prompt: "Retry the failed build"),
-                task("a", cwd: inter, parent: "root"),
+                item("root", cwd: inter, promptPreview: "Retry the failed build"),
+                item("a", cwd: inter, parent: "root"),
             ],
             project: nil,
             grouping: .parent
@@ -274,21 +274,21 @@ final class TaskGroupingTests: XCTestCase {
     }
 
     func testDisplayLabelPrefersTheTitle() {
-        let labeled = task("1", cwd: inter, prompt: "Build the marketing site\nwith a contact form", title: "Ship the landing page")
+        let labeled = item("1", cwd: inter, promptPreview: "Build the marketing site\nwith a contact form", title: "Ship the landing page")
         XCTAssertEqual(labeled.displayLabel, "Ship the landing page", "the broker's label is the row's label when a task has one")
     }
 
     func testDisplayLabelFallsBackToThePromptFirstLine() {
-        let blank = task("1", cwd: inter, prompt: "Retry the failed build", title: "   ")
+        let blank = item("1", cwd: inter, promptPreview: "Retry the failed build", title: "   ")
         XCTAssertEqual(blank.displayLabel, "Retry the failed build", "a blank title falls back to the prompt's first line")
 
-        let untitled = task("2", cwd: inter, prompt: "Retry the failed build")
+        let untitled = item("2", cwd: inter, promptPreview: "Retry the failed build")
         XCTAssertEqual(untitled.displayLabel, "Retry the failed build", "a missing title falls back to the prompt's first line")
     }
 
     func testCollapsingHidesOnlyTheGroupsRows() {
         let groups = TaskOrganizer.organize(
-            tasks: [task("1", cwd: inter), task("2", cwd: site)],
+            tasks: [item("1", cwd: inter), item("2", cwd: site)],
             project: nil,
             grouping: .project
         )
@@ -299,7 +299,7 @@ final class TaskGroupingTests: XCTestCase {
 
     func testAnUntitledRunIgnoresAStaleCollapsedID() {
         let groups = TaskOrganizer.organize(
-            tasks: [task("solo", cwd: inter)],
+            tasks: [item("solo", cwd: inter)],
             project: nil,
             grouping: .parent
         )

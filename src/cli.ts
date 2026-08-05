@@ -201,12 +201,18 @@ Bun.serve({
     }
     if (url.pathname === "/api/state" && request.method === "GET") {
       const config = await loadConfig();
+      const summary = url.searchParams.get("view") === "summary";
       return Response.json({
         profiles: publicProfiles(config.profiles),
         // Output is already the parsed answer — finalText runs once, when the
         // run is persisted — so re-deriving it here would only make this poll
         // disagree with inspect and wait, on the hottest route in the broker.
-        tasks: listTasks(archiveFilter(url.searchParams.get("archived"))),
+        // The app polls this route every two seconds; `view=summary` swaps the
+        // full rows (prompt + output per task) for the list rows, and the app
+        // fetches one task in full only when it is opened.
+        tasks: summary
+          ? listTaskSummaries({ archived: archiveFilter(url.searchParams.get("archived")) }).map(publicTaskSummary)
+          : listTasks(archiveFilter(url.searchParams.get("archived"))),
         // Why a provider is being avoided, and what each cwd is allowed to
         // touch — both cheap reads, both previously invisible in the app.
         profileFailures: stateStore().listProfileFailures(),
@@ -264,8 +270,26 @@ Bun.serve({
       if (!profile) return Response.json({ error: "unknown task profile" }, { status: 404 });
       const after = Math.max(0, Number(url.searchParams.get("after") ?? 0) || 0);
       const waitMs = Math.min(30_000, Math.max(0, Number(url.searchParams.get("waitMs") ?? 0) || 0));
-      if (after > 0 && waitMs > 0 && stateStore().latestTaskEventId([taskId]) <= after && !settled(task.state)) {
+      // A tail read asks for what is already there, so it never blocks: `waitMs`
+      // is ignored whenever `last` or `before` is present.
+      const tailMode = url.searchParams.has("last") || url.searchParams.has("before");
+      if (!tailMode && after > 0 && waitMs > 0 && stateStore().latestTaskEventId([taskId]) <= after && !settled(task.state)) {
         await waitForTasks([taskId], waitMs, request.signal, after);
+      }
+      if (tailMode) {
+        // The newest `last` events, ascending; `before` moves the window back
+        // for "load earlier" pages. `oldestId`/`hasEarlier` tell the app when
+        // to stop paging back; `cursor` hands the follow loop its starting id.
+        const last = Math.min(5_000, Math.max(1, Number(url.searchParams.get("last") ?? 5_000) || 0));
+        const before = Math.max(0, Number(url.searchParams.get("before") ?? 0) || 0);
+        const { events, hasEarlier } = stateStore().listTaskEventsTail(taskId, before || undefined, last);
+        return Response.json({
+          events: events.map((event) => taskEventView(event, profile.provider)),
+          cursor: events.at(-1)?.id ?? after,
+          hasMore: false,
+          oldestId: events[0]?.id ?? 0,
+          hasEarlier,
+        });
       }
       const rows = stateStore().listTaskEvents(taskId, after);
       if (!url.searchParams.has("after") && !url.searchParams.has("waitMs")) {
@@ -278,6 +302,16 @@ Bun.serve({
         cursor: events.at(-1)?.id ?? after,
         hasMore,
       });
+    }
+    // One task in full, on demand: the detail view opens with this and refetches
+    // when the summary row moves. The regex cannot shadow the /events or
+    // /resume subroutes — a slash after the id matches neither — and POST
+    // /api/tasks is a different method on a different path.
+    const singleTaskId = url.pathname.match(/^\/api\/tasks\/([^/]+)$/)?.[1];
+    if (singleTaskId && request.method === "GET") {
+      const task = getTask(decodeURIComponent(singleTaskId));
+      if (!task) return Response.json({ error: "unknown task" }, { status: 404 });
+      return Response.json(task);
     }
     const hookTaskId = url.pathname.match(/^\/api\/hooks\/([^/]+)$/)?.[1];
     if (hookTaskId && request.method === "POST") {

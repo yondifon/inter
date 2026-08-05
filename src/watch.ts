@@ -54,12 +54,20 @@ const MAX_TITLE = 80;
  * command that does not exist is worse than one naming a longer command that
  * does.
  */
-export function watchCommand(taskIds = "<taskId>", entry: string | undefined = process.argv[1]): string {
-  // argv[1] is how this process was actually started. The installed binary
-  // answers to `inter` whether it was launched through the PATH link or as
-  // the bundle's `inter-server`; anything else is a checkout, which gets the
-  // invocation that works in it.
-  const name = entry && basename(entry).replace(/\.[cm]?[jt]s$/, "");
+export function watchCommand(
+  taskIds = "<taskId>",
+  entry: string | undefined = process.argv[1],
+  execPath: string = process.execPath,
+): string {
+  // argv[1] is how this process was actually started — except in a compiled
+  // binary, where Bun rewrites it to the embedded script under /$bunfs, a
+  // path that exists on nobody's disk. The binary's real name lives in
+  // execPath then. The installed binary answers to `inter` whether it was
+  // launched through the PATH link or as the bundle's `inter-server`;
+  // anything else is a checkout, which gets the invocation that works in it.
+  const name = entry?.startsWith("/$bunfs/")
+    ? basename(execPath)
+    : entry && basename(entry).replace(/\.[cm]?[jt]s$/, "");
   const command = name === "inter" || name === "inter-server"
     ? "inter"
     : `bun run ${join(import.meta.dir, "cli.ts")}`;

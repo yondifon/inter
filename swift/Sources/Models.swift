@@ -78,7 +78,7 @@ private func shellAssignment(_ value: String) -> String {
         : "\"\(value)\""
 }
 
-struct TaskSnapshot: Codable, Identifiable, Hashable {
+struct TaskSnapshot: Codable, Identifiable, Hashable, Sendable {
     var id: String
     var profileId: String
     var model: String
@@ -139,7 +139,7 @@ struct TaskSnapshot: Codable, Identifiable, Hashable {
     }
 }
 
-struct TaskEventSnapshot: Codable, Identifiable, Hashable {
+struct TaskEventSnapshot: Codable, Identifiable, Hashable, Sendable {
     var id: Int
     var taskId: String
     var source: String
@@ -157,7 +157,7 @@ struct TaskEventSnapshot: Codable, Identifiable, Hashable {
     var actionId: String?
 }
 
-struct TaskEventPresentationSnapshot: Codable, Hashable {
+struct TaskEventPresentationSnapshot: Codable, Hashable, Sendable {
     var type: String
     var path: String?
     var change: String?
@@ -178,10 +178,15 @@ struct TaskEventPresentationSnapshot: Codable, Hashable {
     var level: String?
 }
 
-struct TaskEventPage: Codable {
+struct TaskEventPage: Codable, Sendable {
     var events: [TaskEventSnapshot]
     var cursor: Int
     var hasMore: Bool
+    /// Oldest event id in this page — set on tail (`?last=N`) and `?before=<id>`
+    /// responses. Absent on the legacy `after` long-poll path.
+    var oldestId: Int?
+    /// True when older events exist before `oldestId`. Absent on legacy paths.
+    var hasEarlier: Bool?
 }
 
 struct BrokerState: Codable {
@@ -189,6 +194,61 @@ struct BrokerState: Codable {
     var tasks: [TaskSnapshot]
     /// How much memory each project holds. Optional so a broker predating the
     /// field still decodes instead of blanking the whole window.
+    var memoryProjects: [MemoryProjectSnapshot]?
+}
+
+/// Lightweight task row for the sidebar poll. The broker returns this shape
+/// from `GET /api/state?view=summary` — every field the sidebar needs, none
+/// of the payload it doesn't (no prompt, output, or attempts).
+struct TaskListItem: Codable, Identifiable, Hashable, Sendable {
+    var id: String
+    var profileId: String
+    var model: String
+    var cwd: String
+    var state: String
+    /// First line or so of the prompt — enough to label a row, not the full text.
+    var promptPreview: String
+    var tldr: String?
+    var title: String?
+    var createdAt: String
+    var updatedAt: String
+    var error: String?
+    var question: String?
+    var parentTaskId: String?
+    var grantId: String?
+    var costUsd: Double?
+    var archivedAt: String?
+
+    var shortModel: String {
+        model.split(separator: "/").last.map(String.init) ?? model
+    }
+
+    var displayPath: String {
+        (cwd as NSString).abbreviatingWithTildeInPath
+    }
+
+    var displayLabel: String {
+        let label = title?.trimmingCharacters(in: .whitespaces)
+        guard let label, !label.isEmpty else {
+            return promptPreview.split(whereSeparator: \.isNewline).first.map(String.init) ?? "Untitled task"
+        }
+        return label
+    }
+
+    var hoverText: String {
+        let summary = tldr?.trimmingCharacters(in: .whitespaces)
+        guard let summary, !summary.isEmpty else {
+            return promptPreview
+        }
+        return summary
+    }
+}
+
+/// Same envelope as `BrokerState` but tasks are `TaskListItem` instead of
+/// `TaskSnapshot` — decoded from the summary poll.
+struct BrokerSummaryState: Codable, Sendable {
+    var profiles: [Profile]
+    var tasks: [TaskListItem]
     var memoryProjects: [MemoryProjectSnapshot]?
 }
 
@@ -227,4 +287,36 @@ struct ProfileFailureSnapshot: Codable, Identifiable, Hashable {
     var failedAt: String
     var consecutiveFailures: Int
     var retryAt: String?
+}
+
+/// Pure merge helpers for the Activity event stream. Events always arrive
+/// ascending by id; callers verify that invariant and fall back to a full sort
+/// when a batch lands out of order.
+enum EventMerge {
+    /// Filters to events whose ids are not already present, and returns them
+    /// only when they are strictly newer than the last existing id. Returns an
+    /// empty array when every event is a duplicate, or when the batch overlaps
+    /// (caller must sort).
+    static func appendInOrder(_ incoming: [TaskEventSnapshot], after existing: [TaskEventSnapshot]) -> [TaskEventSnapshot] {
+        var known = Set(existing.map(\.id))
+        let fresh = incoming.filter { known.insert($0.id).inserted }
+        guard !fresh.isEmpty else { return [] }
+        if let lastExisting = existing.last, let firstIncoming = fresh.first, firstIncoming.id < lastExisting.id {
+            return []
+        }
+        return fresh
+    }
+
+    /// Filters to events whose ids are not already present, and returns them
+    /// only when they are strictly older than the first existing id. Returns an
+    /// empty array when every event is a duplicate, or when the batch overlaps.
+    static func prependInOrder(_ incoming: [TaskEventSnapshot], before existing: [TaskEventSnapshot]) -> [TaskEventSnapshot] {
+        var known = Set(existing.map(\.id))
+        let fresh = incoming.filter { known.insert($0.id).inserted }
+        guard !fresh.isEmpty else { return [] }
+        if let firstExisting = existing.first, let lastIncoming = fresh.last, lastIncoming.id >= firstExisting.id {
+            return []
+        }
+        return fresh
+    }
 }

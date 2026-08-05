@@ -4,7 +4,7 @@ import Foundation
 /// work, one-line reasoning pulses, signal strips, and a closing receipt. Pure,
 /// so the retelling rules are testable without a view.
 enum ActivityStory {
-    struct Composition {
+    struct Composition: Sendable {
         let blocks: [ActivityBlock]
         let technical: [TaskEventSnapshot]
     }
@@ -14,7 +14,7 @@ enum ActivityStory {
     /// — unless the provider's reasoning events carry prose instead of a
     /// counter, in which case `detail` falls back to `"Thinking"` and
     /// `updates`/`seconds` tell the story instead.
-    struct ReasoningPulse: Hashable {
+    struct ReasoningPulse: Hashable, Sendable {
         let id: Int
         let detail: String
         let updates: Int
@@ -346,7 +346,7 @@ enum ActivityStory {
     }
 }
 
-enum ActivityBlock: Identifiable, Equatable {
+enum ActivityBlock: Identifiable, Equatable, Sendable {
     case chapter(id: Int, rows: [ChapterRow])
     case reasoning(ActivityStory.ReasoningPulse)
     case signal(TaskEventSnapshot)
@@ -368,7 +368,7 @@ enum ActivityBlock: Identifiable, Equatable {
 /// `opencode → codex`. Both sides are mapped to their display labels, and the
 /// raw profile ids stay reachable. When the arrow or the prefix is missing the
 /// hop degrades to the raw string without crashing.
-struct Hop: Equatable {
+struct Hop: Equatable, Sendable {
     let fromId: String
     let toId: String
     let fromLabel: String
@@ -400,13 +400,13 @@ struct Hop: Equatable {
 }
 
 /// One run — the original or a handoff leg — and the handoff that closed it.
-struct HandoffRun: Equatable {
+struct HandoffRun: Equatable, Sendable {
     let endedBy: Hop?
     let blocks: [ActivityBlock]
 }
 
 /// Everything the handoff row needs to render itself collapsed and expanded.
-struct HandoffBoundary: Equatable {
+struct HandoffBoundary: Equatable, Sendable {
     let chain: String
     let earlierRuns: [HandoffRun]
     /// Raw events hidden, not blocks — the row promises the user a count of
@@ -416,7 +416,7 @@ struct HandoffBoundary: Equatable {
 
 /// What a chapter is made of: the work, and the thinking that happened between
 /// it. A pulse is a line inside the run, not a break in it.
-enum ChapterRow: Identifiable, Equatable {
+enum ChapterRow: Identifiable, Equatable, Sendable {
     case work(TaskEventSnapshot)
     case reasoning(ActivityStory.ReasoningPulse)
 

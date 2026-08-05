@@ -938,6 +938,32 @@ export class StateStore {
     }));
   }
 
+  /**
+   * The newest `limit` events of a task, oldest-first — the tail-first read an
+   * app opens a long trace with, and the backward page for "load earlier"
+   * (`before` cuts the window below an id). Fetches limit+1 so the caller
+   * learns whether older rows exist past the slice it gets back.
+   */
+  listTaskEventsTail(taskId: string, before = 0, limit = 5_000): { events: TaskEvent[]; hasEarlier: boolean } {
+    const rows = this.database.query<{
+      id: number;
+      task_id: string;
+      event_type: string;
+      state: TaskState;
+      payload: string;
+      created_at: string;
+    }, Array<string | number>>(`
+      SELECT id, task_id, event_type, state, payload, created_at
+      FROM task_events
+      WHERE task_id = ?${before > 0 ? " AND id < ?" : ""}
+      ORDER BY id DESC
+      LIMIT ?
+    `).all(taskId, ...(before > 0 ? [before] : []), limit + 1);
+    const events = rows.map(taskEventFromRow).reverse();
+    // DESC reversed is ascending; the newest `limit` sit at the end of it.
+    return { events: events.slice(-limit), hasEarlier: rows.length > limit };
+  }
+
   listTaskEventsForTasks(
     taskIds: string[],
     afterId = 0,

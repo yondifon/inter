@@ -1,11 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { closeStateStore, stateStore } from "../src/store";
 import { DEFAULT_WATCH_TIMEOUT_MS, parseWatchArgs, runWatch, watchCommand } from "../src/watch";
 import { startEventSocket } from "../src/event-socket";
-import { appendTaskEvent } from "../src/tasks";
 import { MCP_CONTRACT_VERSION } from "../src/version";
 import type { Task, TaskState } from "../src/types";
 
@@ -88,6 +87,15 @@ describe("watchCommand", () => {
   test("names inter for the installed binary, under either of its names", () => {
     expect(watchCommand("abc", "/Users/x/.local/bin/inter")).toBe("inter watch abc");
     expect(watchCommand("abc", "/Applications/Inter.app/Contents/Resources/inter-server")).toBe("inter watch abc");
+  });
+
+  test("names inter from a compiled binary, where argv[1] is the virtual bunfs script", () => {
+    // Bun rewrites argv[1] to the embedded entry in a compiled binary; the
+    // shipped bug rendered `bun run /$bunfs/root/cli.ts watch` — a command
+    // that exists on nobody's disk — into every MCP tool description.
+    expect(watchCommand("abc", "/$bunfs/root/cli.ts", "/Applications/Inter.app/Contents/Resources/inter-server"))
+      .toBe("inter watch abc");
+    expect(watchCommand("abc", "/$bunfs/root/cli.ts", "/Users/x/.local/bin/inter")).toBe("inter watch abc");
   });
 
   test("falls back to bun run from a checkout, and to the same with no invocation at all", () => {
