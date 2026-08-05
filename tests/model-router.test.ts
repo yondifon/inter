@@ -79,7 +79,9 @@ allow = [{ provider = "claude", model = "opus" }]
   }, 20_000);
 
   test("uses a cheap model for bounded mechanical work", () => {
-    const route = chooseModel("Rename this variable in two files.", models, profiles);
+    const route = chooseModel("Rename this variable in two files.", models, profiles, {
+      difficulty: "mechanical",
+    });
     expect(route.taskClass).toBe("mechanical");
     expect(route.model).toBe("haiku");
   });
@@ -92,13 +94,15 @@ allow = [{ provider = "claude", model = "opus" }]
       source: "claude-cli" as const,
       windows: [{ label: "Current session", kind: "session" as const, usedPercent: 96 }],
     };
-    const baseline = chooseModel("Rename this variable in two files.", models, profiles);
+    const baseline = chooseModel("Rename this variable in two files.", models, profiles, {
+      difficulty: "mechanical",
+    });
     expect(baseline.model).toBe("haiku");
     const route = chooseModel(
       "Rename this variable in two files.",
       models,
       profiles,
-      {},
+      { difficulty: "mechanical" },
       [],
       undefined,
       [claudeNearLimit],
@@ -108,7 +112,9 @@ allow = [{ provider = "claude", model = "opus" }]
   });
 
   test("uses stronger context comprehension for codebase reading", () => {
-    const route = chooseModel("Read these files and understand how auth works.", models, profiles);
+    const route = chooseModel("Read these files and understand how auth works.", models, profiles, {
+      difficulty: "hard",
+    });
     expect(route.taskClass).toBe("context");
     expect(route.candidates[0]!.traits.quality).toBeGreaterThanOrEqual(4);
   });
@@ -116,8 +122,9 @@ allow = [{ provider = "claude", model = "opus" }]
   test("will not let low price beat required architecture quality", () => {
     const route = chooseModel("Architect a secure migration and analyze race conditions.", models, profiles, {
       preference: "cost",
+      difficulty: "critical",
     });
-    expect(route.requiredQuality).toBe(5);
+    expect(route.floor).toBe(5);
     expect(route.candidates[0]!.traits.quality).toBe(5);
   });
 
@@ -281,7 +288,7 @@ allow = [{ provider = "claude", model = "opus" }]
     );
     expect(route.model).toBe("opus");
     expect(route.preference).toBe("quality");
-    expect(route.requiredQuality).toBe(5);
+    expect(route.floor).toBe(5);
     expect(route.candidates.map(({ model }) => model)).toEqual(["opus"]);
     expect(route.warnings.some((warning) => warning.startsWith("excluded ") &&
       warning.includes("project policy route build"))).toBe(true);

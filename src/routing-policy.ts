@@ -1,5 +1,5 @@
 import { join, resolve } from "node:path";
-import type { RoutePreference, TaskClass } from "./model-router";
+import type { RoutePreference, TaskClass } from "./types";
 
 const POLICY_FILE = ".inter.toml";
 const TASK_CLASSES: TaskClass[] = ["mechanical", "context", "build", "reasoning", "general"];
@@ -68,6 +68,18 @@ export function modelAllowed(
   return Number.isFinite(allowRank(route, providerId, modelId));
 }
 
+/// Whether one allow rule covers this model. Needed per rule, not per route:
+/// a rule matching nothing any account offers is a config mistake worth naming,
+/// and `allowRank` reports only the first rule that matched.
+export function allowMatches(
+  rule: AllowedModel,
+  providerId: string,
+  modelId: string,
+): boolean {
+  return rule.provider === normalizeId(providerId) &&
+    globMatches(rule.model, normalizeId(modelId));
+}
+
 /// Position of the first allow rule matching this model. Entries are written
 /// best-first, so this is the preference order to use when a caller has already
 /// named the profile and only the model is left to choose.
@@ -76,11 +88,7 @@ export function allowRank(
   providerId: string,
   modelId: string,
 ): number {
-  const provider = normalizeId(providerId);
-  const model = normalizeId(modelId);
-  const index = route.allow.findIndex((rule) =>
-    rule.provider === provider && globMatches(rule.model, model)
-  );
+  const index = route.allow.findIndex((rule) => allowMatches(rule, providerId, modelId));
   return index < 0 ? Number.POSITIVE_INFINITY : index;
 }
 

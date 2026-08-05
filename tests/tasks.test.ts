@@ -166,6 +166,50 @@ describe("delegate workspace roots", () => {
     await settled(withoutTldr.id);
   });
 
+  test("records how the destination was decided, against the row that ran", async () => {
+    const root = mkdtempSync(join(tmpdir(), "inter-selection-"));
+    scratch.push(root);
+    process.env.INTER_DB = join(root, "inter.db");
+    process.env.INTER_ROOTS = root;
+    stateStore().saveProfiles([noopProfile]);
+
+    const task = await delegate(noopProfile.id, "prompt", root, undefined, undefined, {
+      effort: "max",
+      selection: {
+        decidedBy: "caller-explicit",
+        routerVersion: 2,
+        difficulty: "hard",
+        difficultySource: "caller",
+        heuristicClass: "build",
+        heuristicAgreed: false,
+        floor: 4,
+        floorRelaxed: false,
+        preference: "balanced",
+        effortSource: "caller",
+        effortReason: "the caller set it",
+        quotaUsedPercent: null,
+        warnings: ["noop is unavailable: observed billing failure. Dispatching anyway."],
+      },
+    });
+    await settled(task.id);
+
+    const recorded = stateStore().taskSelection(task.id);
+    expect(recorded?.decidedBy).toBe("caller-explicit");
+    expect(recorded?.difficulty).toBe("hard");
+    expect(recorded?.warnings).toHaveLength(1);
+    // The chosen pair comes off the row, so the record cannot claim a profile,
+    // model, or effort the task did not actually run with.
+    expect(recorded?.chosen).toEqual({
+      profileId: noopProfile.id,
+      model: noopProfile.model,
+      effort: "max",
+    });
+
+    const undecided = await delegate(noopProfile.id, "prompt", root);
+    await settled(undecided.id);
+    expect(stateStore().taskSelection(undecided.id)).toBeUndefined();
+  });
+
   test("threads a caller title through delegate and leaves it absent when omitted", async () => {
     const root = mkdtempSync(join(tmpdir(), "inter-title-"));
     scratch.push(root);

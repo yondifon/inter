@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Database } from "bun:sqlite";
 import { StateStore } from "../src/store";
+import { LATEST_SCHEMA_VERSION } from "../src/store/schema";
 import type { Profile, Task } from "../src/types";
 
 const roots: string[] = [];
@@ -813,6 +814,15 @@ describe("SQLite state store", () => {
     store.close();
   });
 
+  test("defaults to 20 summaries and caps the working set at 200", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    for (let i = 0; i < 210; i++) store.createTask(task("completed"));
+    expect(store.listTaskSummaries({}).length).toBe(20);
+    expect(store.listTaskSummaries({ limit: 500 }).length).toBe(200);
+    store.close();
+  });
+
   test("treats heartbeats as progress reporting, not as meaningful events", () => {
     const { db } = paths();
     const store = new StateStore({ path: db, seedProfiles: [profile] });
@@ -1097,6 +1107,7 @@ describe("SQLite state store", () => {
       { version: 8, name: "scope grants, shipped prompts, attempts and cost" },
       { version: 9, name: "task titles" },
       { version: 10, name: "task worker identity" },
+      { version: 11, name: "task selection records" },
     ]);
     const taskColumns = new Set(migrated.query<{ name: string }, []>(
       "PRAGMA table_info(tasks)",
@@ -1104,6 +1115,7 @@ describe("SQLite state store", () => {
     for (const column of [
       "scope_json", "allow_questions", "session_id", "archived_at", "grant_id",
       "shipped_prompt", "attempts_json", "cost_usd", "turns", "effort", "tldr", "title",
+      "selection_json",
     ]) {
       expect(taskColumns).toContain(column);
     }
@@ -1194,7 +1206,7 @@ describe("SQLite state store", () => {
     const store = new StateStore({ path: db, seedProfiles: [profile] });
     store.close();
     const raw = new Database(db);
-    raw.exec("DELETE FROM schema_migrations WHERE version = 10");
+    raw.exec(`DELETE FROM schema_migrations WHERE version = ${LATEST_SCHEMA_VERSION}`);
     raw.close();
 
     // A behind schema is only readable after a migration, which observe mode

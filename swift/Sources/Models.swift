@@ -21,7 +21,12 @@ enum Provider: String, Codable, CaseIterable, Identifiable {
         case .codex: "terminal"
         case .opencode: "chevron.left.forwardslash.chevron.right"
         case .antigravity: "arrow.up.right"
-        case .pi: "pi"
+        // The `pi` glyph is SF Symbols 2024.3, so it draws nothing at all below
+        // macOS 15.4 — and this app ships to macOS 14. A symbol that silently
+        // renders blank is worse than a plainer one that always draws, so the
+        // letter form only appears where it exists.
+        case .pi:
+            if #available(macOS 15.4, *) { "pi" } else { "function" }
         }
     }
 

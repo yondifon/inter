@@ -85,6 +85,76 @@ export interface Profile {
   command?: string[];
 }
 
+export type RoutePreference = "balanced" | "quality" | "cost" | "speed";
+export type TaskClass = "mechanical" | "context" | "build" | "reasoning" | "general";
+
+/**
+ * How hard the caller judges the work to be. The one routing input the caller
+ * knows better than Inter does: it wrote the prompt. Everything else — profile,
+ * model, effort — is derived from this plus the project policy.
+ */
+export type Difficulty = "mechanical" | "standard" | "hard" | "critical";
+
+/** Where a candidate fell out of selection. Ordered most-informative first. */
+export type SelectionStage =
+  /** Cleared every other filter but sits below the difficulty's capability tier. */
+  | "floor"
+  /** The account has effectively no quota left in its current window. */
+  | "quota"
+  /** A recorded auth, billing, or rate-limit failure on the account. */
+  | "availability"
+  /** The account's own catalog does not list the model. */
+  | "catalog"
+  /** Outside the allow list the project policy sets for this kind of work. */
+  | "policy"
+  /** No tool calling, or not a text model. */
+  | "capability"
+  | "profile";
+
+export interface SelectionRejection {
+  profileId: string;
+  model: string;
+  stage: SelectionStage;
+  reason: string;
+  retryAt?: string;
+}
+
+/**
+ * Why a task landed on the profile, model, and effort it did. Recorded next to
+ * the outcome so a good routing call and a lucky caller guess stay tellable
+ * apart afterwards; `decidedBy` is the field that separates them.
+ */
+export interface TaskSelection {
+  decidedBy: "router" | "caller-profile" | "caller-explicit";
+  routerVersion: number;
+  difficulty: Difficulty;
+  difficultySource: "caller" | "default";
+  /** What the prompt heuristic made of the work, kept as a check on the declaration. */
+  heuristicClass: TaskClass;
+  /** False when the heuristic wanted a stronger tier than the declared difficulty allows. */
+  heuristicAgreed: boolean;
+  floor: number;
+  floorRelaxed: boolean;
+  preference: RoutePreference;
+  chosen: { profileId: string; model: string; effort?: string };
+  effortSource: "caller" | "projected" | "none";
+  effortReason: string;
+  /**
+   * Worst usage window on the chosen account, or null when its provider reports
+   * no usage at all — which is unknown headroom, not full and not empty.
+   */
+  quotaUsedPercent: number | null;
+  runnersUp?: Array<{ profileId: string; model: string }>;
+  rejected?: SelectionRejection[];
+  /** Total rejections, since `rejected` carries only the most informative few. */
+  rejectedCount?: number;
+  policyPath?: string;
+  warnings?: string[];
+}
+
+/** A selection with the chosen pair still to be filled in from the task row. */
+export type SelectionDecision = Omit<TaskSelection, "chosen">;
+
 export interface Config {
   profiles: Profile[];
 }

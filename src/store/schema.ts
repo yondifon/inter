@@ -30,6 +30,7 @@ const MIGRATIONS = [
   [8, "scope grants, shipped prompts, attempts and cost"],
   [9, "task titles"],
   [10, "task worker identity"],
+  [11, "task selection records"],
 ] as const;
 
 /**
@@ -158,6 +159,10 @@ export function migrateDatabase(db: Database): { needsSessionBackfill: boolean }
     // cleared when the child exits, so a row still carrying one after a restart
     // is the only evidence a detached worker may have outlived the broker.
     ["worker_json", "TEXT"],
+    // Why this task went to this profile, model, and effort. The outcome history
+    // was complete and the decision history absent, so nothing could tell a good
+    // routing call from a lucky caller guess after the fact.
+    ["selection_json", "TEXT"],
   ] as const) {
     if (!taskColumns.has(column)) {
       db.exec(`ALTER TABLE tasks ADD COLUMN ${column} ${type}`);

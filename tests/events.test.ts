@@ -956,6 +956,41 @@ describe("task event views", () => {
     expect(view.presentation?.outcome).toContain("replaced 1 block");
   });
 
+  test("measures a pi tool's returned content instead of quoting it", () => {
+    // A read hands back the whole file. Shipping that as the outcome put the
+    // file's first lines on the row beside the file's own name — the substance
+    // quoted above the expansion that exists to hold it.
+    const read = taskEventView({
+      id: 1, taskId: "task", type: "agent.tool_execution_end", state: "running",
+      payload: {
+        type: "tool_execution_end",
+        toolName: "read",
+        args: { filePath: "/repo/a.swift" },
+        result: { content: [{ type: "text", text: "import SwiftUI\n\nstruct A {}\n\nstruct B {}" }] },
+        isError: false,
+      },
+      createdAt: "now",
+    }, "pi");
+    expect(read.presentation?.outcome).toBe("5 lines");
+    expect(read.presentation?.outcome).not.toContain("import SwiftUI");
+    // The whole content still reaches the reader — one expansion away.
+    expect(read.rawText).toContain("import SwiftUI");
+
+    // A single line is a status, not content, so it still reads on the row.
+    const wrote = taskEventView({
+      id: 2, taskId: "task", type: "agent.tool_execution_end", state: "running",
+      payload: {
+        type: "tool_execution_end",
+        toolName: "write",
+        args: { filePath: "/repo/a.swift" },
+        result: { content: [{ type: "text", text: "Wrote 42 bytes" }] },
+        isError: false,
+      },
+      createdAt: "now",
+    }, "pi");
+    expect(wrote.presentation?.outcome).toBe("Wrote 42 bytes");
+  });
+
   test("does not present pi's echoed prompt as an agent message", () => {
     const view = (payload: Record<string, unknown>) =>
       taskEventView({ id: 1, taskId: "task", type: "agent.event", state: "running", payload, createdAt: "now" }, "pi");

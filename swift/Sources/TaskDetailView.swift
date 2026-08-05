@@ -233,17 +233,18 @@ struct TaskDetail: View {
     /// than spending the top of every task on ids the reader rarely needs.
     private var header: some View {
         HStack(spacing: 8) {
-            StateMarker(state: state)
+            // Speaks, because the marker is now the only place the state is
+            // stated: the chip that used to say the word beside it is gone.
+            StateMarker(state: state, speaks: true)
                 .help(state.label)
             Text(resolvedLabel)
                 .scaledFont(.title3, weight: .semibold)
                 .lineLimit(1)
                 .help(resolvedLabel)
-            // Always present — a chip that appears and vanishes between states
-            // shoves every chip right of it, and the header animates the move.
-            // The label and tint already distinguish settled states, so the
-            // marker no longer needs to speak them on its own.
-            TaskStateChip(state: state)
+            // No state chip: the marker beside the title already carries the
+            // state — pulsing while live, tinted and shaped once settled — and
+            // spelling it out again cost a chip that resized between states and
+            // shoved every chip right of it.
             TaskMetaChip(text: workerLabel, label: "Worker", full: workerLabel) {
                 if let provider = worker?.provider {
                     ProviderLogo(provider: provider, size: 10 * uiScale)
@@ -435,12 +436,12 @@ struct TaskDetail: View {
                     .scaledFont(.caption, monospacedDigit: true).foregroundStyle(.tertiary)
                     .padding(.bottom, 2)
             }
-            LazyVStack(alignment: .leading, spacing: 10) {
+            LazyVStack(alignment: .leading, spacing: 16) {
                 ForEach(displayedBlocks) { block in
-                    ActivityBlockView(block: block)
+                    ActivityBlockView(block: block, live: !TaskState(liveState).isTerminal)
                 }
                 if showingTechnicalEvents, !story.technical.isEmpty {
-                    ActivityChapterCard(rows: story.technical.map(ChapterRow.work), muted: true)
+                    ActivityChapterCard(rows: story.technical.map(ChapterRow.work), muted: true, live: false)
                 }
                 if !story.technical.isEmpty {
                     Button(showingTechnicalEvents
@@ -805,6 +806,8 @@ private struct NeedsInputBanner: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
+            AccentRule(color: .orange)
+                .accessibilityHidden(true)
             Image(systemName: "questionmark.bubble.fill")
                 .foregroundStyle(.orange)
                 .accessibilityHidden(true)
@@ -818,7 +821,6 @@ private struct NeedsInputBanner: View {
             CopyIconButton(text: question, label: "Copy question")
         }
         .padding(12)
-        .background(.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: Radius.small))
         .onAppear {
             AccessibilityNotification.Announcement("Task needs input").post()
         }
@@ -844,13 +846,16 @@ private struct TaskPanel<Content: View>: View {
 
 private struct ActivityBlockView: View {
     let block: ActivityBlock
+    /// Present-tense verbs while the current run is still moving; earlier
+    /// handoff legs and the technical list are always past tense.
+    var live = false
 
     var body: some View {
         switch block {
         case .chapter(_, let rows):
-            ActivityChapterCard(rows: rows, muted: false)
+            ActivityChapterCard(rows: rows, muted: false, live: live)
         case .reasoning(let pulse):
-            ActivityReasoningRow(pulse: pulse).padding(.horizontal, 14)
+            ActivityReasoningRow(pulse: pulse)
         case .signal(let event):
             ActivitySignalCard(event: event)
         case .receipt(let event, let thinkingTokens):
@@ -861,32 +866,27 @@ private struct ActivityBlockView: View {
     }
 }
 
-/// A run of work on one flat card: no rails, no dots. Each row leads with what
-/// happened; the clock stays out of the way on the right. Thinking sits between
-/// the rows it happened between, and needs no rule around it — the line is quiet
-/// enough to separate the work on its own.
+/// A run of work flowing straight on the page surface: no card, no rules
+/// between rows — spacing and the leading verb column separate the work.
+/// Muted renders the whole run dimmer, which is how the technical list stays
+/// behind the real trace.
 struct ActivityChapterCard: View {
     let rows: [ChapterRow]
     var muted = false
+    var live = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+            ForEach(rows) { row in
                 switch row {
                 case .work(let event):
-                    ActivityWorkRow(event: event, muted: muted)
+                    ActivityWorkRow(event: event, muted: muted, live: live)
                 case .reasoning(let pulse):
                     ActivityReasoningRow(pulse: pulse)
                 }
-                if row.isWork, rows.indices.contains(index + 1), rows[index + 1].isWork {
-                    Divider().opacity(0.4)
-                }
             }
         }
-        .padding(.vertical, 4)
-        .padding(.horizontal, 14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Surface.panel, in: RoundedRectangle(cornerRadius: Radius.medium))
         .opacity(muted ? 0.72 : 1)
     }
 }
@@ -894,7 +894,12 @@ struct ActivityChapterCard: View {
 private struct ActivityWorkRow: View {
     let event: TaskEventSnapshot
     var muted = false
+    /// Present tense while the run is still moving; past once it settles.
+    var live = false
     @State private var showingRawDetails = false
+
+    /// The verb that opens the row, when the title is a known tool.
+    private var verb: String? { ToolIcon.verb(for: event, live: live) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -902,29 +907,35 @@ private struct ActivityWorkRow: View {
                 if isQuote {
                     quoteContent
                 } else {
-                    // An icon only stands in for the title when it is
-                    // unmistakable for that tool; anything else keeps the
-                    // word. The subject beside it — a path, a command — is
-                    // what a reader actually scans for, so the icon sits a
-                    // shade quieter than the title used to, at `.tertiary`
-                    // instead of `.primary`. Failure still needs to read at
-                    // a glance, so it keeps the same red the title used.
-                    if let symbolName = ToolIcon.symbolName(for: event) {
-                        EventIcon(symbol: symbolName)
-                            .foregroundStyle(event.phase == "failed" ? AnyShapeStyle(.red) : AnyShapeStyle(.tertiary))
+                    // The verb is a label and the subject — a path, a
+                    // command — is the content a reader scans for, so the
+                    // two never look alike: the verb is semibold secondary
+                    // in the system face, the subject regular primary in
+                    // mono. Failure still needs to read at a glance, so it
+                    // keeps the same red the glyph used to carry.
+                    if let verb = verb {
+                        Text(verb)
+                            .scaledFont(.callout, weight: .semibold)
+                            .foregroundStyle(event.phase == "failed" ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
+                            .lineLimit(1)
+                            .layoutPriority(1)
+                    } else if let symbolName = ToolIcon.symbolName(for: event) {
+                        EventIcon(symbol: symbolName, weight: .semibold)
+                            .foregroundStyle(event.phase == "failed" ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
                             .layoutPriority(1)
                             .help(event.title)
                             .accessibilityLabel(event.title)
                     } else {
+                        // An unrecognized title keeps itself as the row's
+                        // name — never an invented verb.
                         Text(event.title)
                             .scaledFont(.callout, weight: .medium, design: .monospaced)
                             .foregroundStyle(event.phase == "failed" ? AnyShapeStyle(.red) : AnyShapeStyle(.primary))
                             .layoutPriority(1)
                     }
-                    inlineContent
+                    inlineContent(subjectTint: verb == nil ? Color.secondary : Color.primary)
                 }
-                Spacer(minLength: 12)
-                if event.rawText != nil {
+                if EventExpansion.shouldOfferExpansion(event) {
                     IconButton(
                         symbol: showingRawDetails ? "chevron.down" : "chevron.right",
                         label: EventExpansion.label(for: event, expanded: showingRawDetails),
@@ -934,6 +945,7 @@ private struct ActivityWorkRow: View {
                     }
                     .scaledFont(.caption2, weight: .semibold)
                 }
+                Spacer(minLength: 12)
                 Text(EventClock.time(event.createdAt))
                     .scaledFont(.caption2, design: .monospaced)
                     .foregroundStyle(.tertiary)
@@ -946,22 +958,22 @@ private struct ActivityWorkRow: View {
                 EventExpansionView(event: event).padding(.top, 3).transition(.opacity)
             }
         }
-        .padding(.vertical, 8)
+        .padding(.vertical, 5)
     }
 
     /// Agent prose reads as a quotation, not as a titled row.
     private var isQuote: Bool { EventExpansion.isProse(event) }
 
-    /// Expanded, the quotation is only the stub above the text rendered whole.
+    /// The stub is one line either way: collapsed it is all the row shows, and
+    /// expanded the same line sits above the text rendered whole below it.
     @ViewBuilder private var quoteContent: some View {
         HStack(alignment: .top, spacing: 9) {
-            RoundedRectangle(cornerRadius: 1)
-                .fill(Color(nsColor: .separatorColor))
-                .frame(width: 2)
+            AccentRule()
+                .accessibilityHidden(true)
             Text(event.presentation?.text ?? event.detail ?? event.title)
                 .scaledFont(.callout)
                 .foregroundStyle(.secondary)
-                .lineLimit(showingRawDetails ? 1 : 6)
+                .lineLimit(EventExpansion.quotePreviewLines)
                 .textSelection(.enabled)
         }
     }
@@ -992,15 +1004,17 @@ private struct ActivityWorkRow: View {
 
     /// A path or a command, then what it came to. Both read as one line — the
     /// command used to sit in a box of its own under the title, which spent
-    /// three lines and a second surface on what fits beside the name.
-    @ViewBuilder private var inlineContent: some View {
+    /// three lines and a second surface on what fits beside the name. The
+    /// subject sits at `subjectTint`: primary when a verb leads the row (the
+    /// target is the content), secondary under a glyph or a plain title.
+    @ViewBuilder private func inlineContent(subjectTint: Color) -> some View {
         if let presentation = event.presentation, ["file", "command"].contains(presentation.type) {
             HStack(spacing: 8) {
                 // A path is identified by its ends, so it loses its middle. A
                 // command is read left to right — cutting its middle strands the
                 // reader between an env-var prefix and half a pipeline.
                 if let subject = presentation.type == "file" ? presentation.path : presentation.command {
-                    Text(subject).scaledFont(.caption, design: .monospaced).foregroundStyle(.secondary)
+                    Text(subject).scaledFont(.caption, design: .monospaced).foregroundStyle(subjectTint)
                         .lineLimit(1)
                         .truncationMode(presentation.type == "file" ? .middle : .tail)
                 }
@@ -1037,12 +1051,11 @@ private struct ActivityReasoningRow: View {
     let pulse: ActivityStory.ReasoningPulse
 
     var body: some View {
-        HStack(spacing: 7) {
-            EventIcon(symbol: "brain").foregroundStyle(.tertiary)
-                .accessibilityHidden(true)
-            Text(label).scaledFont(.caption, design: .monospaced).foregroundStyle(.secondary)
-        }
-        .padding(.vertical, 3)
+        Text(label)
+            .scaledFont(.caption, design: .monospaced)
+            .italic()
+            .foregroundStyle(.secondary)
+            .padding(.vertical, 3)
     }
 
     private var label: String {
@@ -1055,13 +1068,16 @@ private struct ActivityReasoningRow: View {
     }
 }
 
-/// Retries, rate limits, stalls, questions, and broker failures get one loud
-/// strip each. This is the only place the trace uses color before failure.
+/// Retries, rate limits, stalls, questions, and broker failures read as a
+/// tinted 2pt rule on the page's edge plus the line itself — color stays a
+/// hairline here, never a filled strip.
 private struct ActivitySignalCard: View {
     let event: TaskEventSnapshot
 
     var body: some View {
         HStack(alignment: .center, spacing: 9) {
+            AccentRule(color: tint)
+                .accessibilityHidden(true)
             EventIcon(symbol: symbol, weight: .semibold)
                 .foregroundStyle(tint)
                 .accessibilityHidden(true)
@@ -1079,9 +1095,7 @@ private struct ActivitySignalCard: View {
                 .help(DetailClock.dateTime(event.createdAt))
         }
         .padding(.vertical, 10)
-        .padding(.horizontal, 14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(tint.opacity(0.09), in: RoundedRectangle(cornerRadius: Radius.medium))
     }
 
     private var severity: String {
@@ -1121,6 +1135,8 @@ private struct ActivityHandoffCard: View {
                 isExpanded: $expanded,
                 label: {
                     HStack(spacing: 9) {
+                        AccentRule()
+                            .accessibilityHidden(true)
                         EventIcon(symbol: "arrow.triangle.branch", weight: .semibold)
                             .foregroundStyle(.secondary)
                             .accessibilityHidden(true)
@@ -1129,8 +1145,9 @@ private struct ActivityHandoffCard: View {
                             Text(summary).scaledFont(.caption).foregroundStyle(.secondary)
                         }
                     }
+                    .padding(.vertical, 10)
                 },
-                panel: true
+                panel: false
             )
 
             if expanded {
@@ -1149,12 +1166,11 @@ private struct ActivityHandoffCard: View {
                             .padding(.horizontal, 14)
                         }
                         ForEach(run.blocks) { block in
-                            ActivityBlockView(block: block)
+                            ActivityBlockView(block: block, live: false)
                         }
                     }
                 }
                 .padding(.top, 6)
-                .padding(.leading, 14)
                 .transition(.opacity)
             }
         }
@@ -1192,12 +1208,11 @@ private struct ActivityReceiptCard: View {
                     receiptTimestamp
                 }
             }
-            HStack(alignment: .top, spacing: 0) {
-                ForEach(Array(stats.enumerated()), id: \.offset) { index, stat in
-                    if index > 0 { Divider().padding(.horizontal, 14) }
+            HStack(alignment: .top, spacing: 28) {
+                ForEach(stats, id: \.label) { stat in
                     VStack(alignment: .leading, spacing: 2) {
                         Text(stat.value)
-                            .scaledFont(.title3, weight: .semibold, monospacedDigit: true)
+                            .scaledFont(.title3, weight: .semibold, design: .rounded, monospacedDigit: true)
                         Text(stat.label)
                             .scaledFont(.caption2).foregroundStyle(.secondary)
                     }
@@ -1216,10 +1231,6 @@ private struct ActivityReceiptCard: View {
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Surface.panel, in: RoundedRectangle(cornerRadius: Radius.medium))
-        .overlay(
-            RoundedRectangle(cornerRadius: Radius.medium)
-                .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1)
-        )
     }
 
     private var receiptTitle: some View {
@@ -1282,9 +1293,9 @@ struct TaskEventPresentationView: View {
             } else {
                 VStack(alignment: .leading, spacing: 3) {
                     if let command = presentation.command {
-                        Text(command)
+                        Text(Self.collapsedLine(command))
                             .scaledFont(.caption, design: .monospaced)
-                            .lineLimit(2)
+                            .lineLimit(1)
                             .textSelection(.enabled)
                     }
                     if presentation.status != nil || presentation.exitCode != nil || presentation.outcome != nil {
@@ -1297,18 +1308,21 @@ struct TaskEventPresentationView: View {
                 .background(Surface.sunken, in: RoundedRectangle(cornerRadius: Radius.small))
             }
         case "message":
-            Text(presentation.text ?? "")
+            Text(Self.collapsedLine(presentation.text ?? ""))
                 .scaledFont(.caption)
                 .foregroundStyle(.secondary)
-                .lineLimit(4)
+                .lineLimit(1)
                 .textSelection(.enabled)
         case "tool":
-            Text([presentation.text, presentation.outcome].compactMap { $0 }
-                .filter { !$0.isEmpty }.joined(separator: " · "))
-                .scaledFont(.caption, design: .monospaced)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-                .textSelection(.enabled)
+            // The outcome already reads on the title line as a chip, so the
+            // collapsed line carries only the call's own text.
+            if let text = presentation.text, !text.isEmpty {
+                Text(Self.collapsedLine(text))
+                    .scaledFont(.caption, design: .monospaced)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .textSelection(.enabled)
+            }
         case "todo":
             HStack(spacing: 8) {
                 if let total = presentation.total, total > 0 {
@@ -1347,21 +1361,12 @@ struct TaskEventPresentationView: View {
         .compactMap { $0 }
         .joined(separator: " · ")
     }
-}
 
-/// The word alone — the dot before the task name already carries the shape and
-/// the tint, and repeating it inside the chip would say it twice in one line.
-private struct TaskStateChip: View {
-    let state: TaskState
-    @Environment(\.uiScale) private var uiScale
-
-    var body: some View {
-        Text(state.label)
-            .scaledFont(.caption2, weight: .semibold)
-            .padding(.horizontal, 7 * uiScale)
-            .padding(.vertical, 3 * uiScale)
-            .background(state.tint.opacity(0.14), in: Capsule())
-            .accessibilityLabel("State: \(state.label)")
+    /// The collapsed row's one line: the first non-empty line, whitespace runs
+    /// collapsed — a multi-line blob must not render as several lines.
+    private static func collapsedLine(_ text: String) -> String {
+        guard let line = text.split(whereSeparator: \.isNewline).first else { return "" }
+        return line.split(whereSeparator: \.isWhitespace).joined(separator: " ")
     }
 }
 

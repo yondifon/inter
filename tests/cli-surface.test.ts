@@ -16,6 +16,7 @@ let root: string;
 let base: string;
 let taskId: string;
 let profileId = "surface-fake";
+let tasksToolQuerySchema: typeof import("../src/cli").tasksToolQuerySchema;
 
 const mask = "••••••••";
 
@@ -68,7 +69,7 @@ beforeAll(async () => {
   const port = probe.port;
   probe.stop();
   process.env.INTER_PORT = String(port);
-  await import("../src/cli");
+  ({ tasksToolQuerySchema } = await import("../src/cli"));
   base = `http://127.0.0.1:${port}`;
   seedProfile({
     id: profileId,
@@ -317,6 +318,22 @@ describe("/api/state", () => {
     const task = body.tasks.find((item: { id: string }) => item.id === seeded.id);
     expect(task.output).toBe("first\n{\"result\": \"second\"}");
     expect(stateStore().getTask(seeded.id)?.output).toBe(task.output);
+  });
+
+  test("the summary view returns the same working set as the full view, not just 20 rows", async () => {
+    for (let i = 0; i < 25; i++) seedTask({ id: `state-bulk-${i}` });
+    const summaryBody = await (await fetch(`${base}/api/state?view=summary&archived=include`)).json();
+    const fullBody = await (await fetch(`${base}/api/state?archived=include`)).json();
+    expect(summaryBody.tasks.length).toBeGreaterThan(20);
+    expect(summaryBody.tasks.length).toBe(fullBody.tasks.length);
+  });
+});
+
+describe("the MCP tasks tool's input schema", () => {
+  test("still refuses a limit above 100 and defaults to 20", () => {
+    expect(tasksToolQuerySchema.parse({}).limit).toBe(20);
+    expect(tasksToolQuerySchema.parse({ limit: 100 }).limit).toBe(100);
+    expect(() => tasksToolQuerySchema.parse({ limit: 101 })).toThrow();
   });
 });
 

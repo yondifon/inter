@@ -516,7 +516,7 @@ function piEvent(
     const tool = string(payload.toolName);
     const result = object(payload.result);
     const outcome = Array.isArray(result.content)
-      ? firstString(...result.content.map((block: unknown) => object(block).text))
+      ? contentOutcome(firstString(...result.content.map((block: unknown) => object(block).text)))
       : undefined;
     // pi sends `args: null` on tool_execution_end, so the closing row of an edit
     // has no path to present and would fall back to a raw JSON dump. The edit is
@@ -1188,6 +1188,24 @@ function subjectPresentation(
 /// Every provider reports a tool's outcome in its own shape: a read carries a
 /// line count, an edit a patch, a command its streams, a failure a bare string.
 /// Reduce each to the one figure worth putting next to the call.
+/**
+ * What a tool's returned content says on the row, as opposed to inside it. pi
+ * hands back the substance itself — a read returns the whole file, a command
+ * its whole output — and shipping that as the outcome put the payload on the
+ * line above the payload: a file's first lines quoted beside its own name.
+ *
+ * A short single line is the exception worth keeping, because that shape is a
+ * status rather than content ("Successfully replaced 1 block(s)"). Anything
+ * taller is measured instead, and the expansion is where it is read.
+ */
+function contentOutcome(text: string | undefined): string | undefined {
+  const trimmed = text?.trim();
+  if (!trimmed) return undefined;
+  const lines = trimmed.split("\n");
+  if (lines.length === 1) return truncate(trimmed, 120);
+  return plural(lines.length, "line");
+}
+
 function toolResultOutcome(value: unknown): string | undefined {
   if (typeof value === "string") {
     const compact = value.replace(/\s+/g, " ").trim();

@@ -10,46 +10,65 @@ final class ToolIconTests: XCTestCase {
         )
     }
 
-    /// Every title in the real tool census resolves to the glyph its row is
-    /// meant to carry, at the kind that title was actually observed under —
-    /// the same tool (`Read file`) shows up as both a `file` and a `tool`
-    /// kind event across providers, and both must resolve the same way.
-    func testCensusHeadResolves() {
-        let cases: [(kind: String, title: String, symbol: String)] = [
-            ("command", "Bash", "terminal"),
-            ("tool", "Bash", "terminal"),
-            ("file", "Read file", "doc.text"),
-            ("tool", "Read file", "doc.text"),
-            ("file", "Edit file", "square.and.pencil"),
-            ("tool", "Edit file", "square.and.pencil"),
-            ("file", "Write file", "doc.badge.plus"),
-            ("tool", "Write file", "doc.badge.plus"),
-            ("tool", "Search code", "text.magnifyingglass"),
-            ("tool", "Todo list", "checklist"),
-            ("tool", "Find files", "folder.badge.questionmark"),
-            ("tool", "ToolSearch", "magnifyingglass"),
-            ("tool", "TaskUpdate", "list.clipboard"),
-            ("file", "File change", "doc.badge.plus"),
-            ("tool", "Web search", "globe"),
-            ("tool", "TaskCreate", "list.clipboard"),
-            ("tool", "Fetch page", "arrow.down.doc"),
-            ("command", "Run Command", "terminal"),
-            ("tool", "Subagent", "person.2"),
-            ("tool", "Skill", "wand.and.stars"),
-            ("tool", "Node Repl: Js", "chevron.left.forwardslash.chevron.right"),
-            ("tool", "Apply patch", "bandage"),
-            ("tool", "List Permissions", "checkmark.shield"),
+    /// Every title in the real tool census resolves to the verb its row is
+    /// meant to open with, at the kind that title was actually observed
+    /// under — the same tool (`Read file`) shows up as both a `file` and a
+    /// `tool` kind event across providers, and both must resolve the same
+    /// way. A settled run reads in the past tense.
+    func testCensusHeadResolvesToVerbs() {
+        let cases: [(kind: String, title: String, verb: String)] = [
+            ("command", "Bash", "Ran"),
+            ("tool", "Bash", "Ran"),
+            ("file", "Read file", "Read"),
+            ("tool", "Read file", "Read"),
+            ("file", "Edit file", "Edited"),
+            ("tool", "Edit file", "Edited"),
+            ("file", "Write file", "Wrote"),
+            ("tool", "Write file", "Wrote"),
+            ("tool", "Search code", "Searched"),
+            ("tool", "Todo list", "Planned"),
+            ("tool", "Find files", "Found"),
+            ("tool", "ToolSearch", "Searched"),
+            ("tool", "TaskUpdate", "Planned"),
+            ("file", "File change", "Changed"),
+            ("tool", "Web search", "Searched the web"),
+            ("tool", "TaskCreate", "Planned"),
+            ("tool", "Fetch page", "Fetched"),
+            ("command", "Run Command", "Ran"),
+            ("tool", "Subagent", "Delegated"),
+            ("tool", "Skill", "Loaded"),
+            ("tool", "Node Repl: Js", "Evaluated"),
+            ("tool", "Apply patch", "Applied"),
+            ("tool", "List Permissions", "Listed"),
         ]
-        for (kind, title, symbol) in cases {
+        for (kind, title, verb) in cases {
             XCTAssertEqual(
-                ToolIcon.symbolName(title: title, kind: kind), symbol,
-                "\(kind)/\(title) should resolve to \(symbol)"
+                ToolIcon.verb(title: title, live: false), verb,
+                "\(kind)/\(title) should resolve to \(verb)"
+            )
+        }
+    }
+
+    /// A live run narrates the same rows in the present tense.
+    func testLiveRunUsesPresentTense() {
+        let cases: [(title: String, verb: String)] = [
+            ("Bash", "Running"),
+            ("Read file", "Reading"),
+            ("Edit file", "Editing"),
+            ("Web search", "Searching the web"),
+            ("Todo list", "Planning"),
+            ("Node Repl: Js", "Evaluating"),
+        ]
+        for (title, verb) in cases {
+            XCTAssertEqual(
+                ToolIcon.verb(title: title, live: true), verb,
+                "\(title) should resolve to \(verb)"
             )
         }
     }
 
     /// The normalizer's sentence-case rewrite of the same census titles
-    /// resolves to the identical glyph as the raw camelCase form.
+    /// resolves to the identical verb as the raw camelCase form.
     func testCorrectedSpellingsResolveTheSameAsRawTitles() {
         let pairs: [(raw: String, corrected: String)] = [
             ("ToolSearch", "Tool search"),
@@ -59,44 +78,48 @@ final class ToolIconTests: XCTestCase {
             ("List Permissions", "List permissions"),
         ]
         for pair in pairs {
-            let rawSymbol = ToolIcon.symbolName(title: pair.raw, kind: "tool")
-            let correctedSymbol = ToolIcon.symbolName(title: pair.corrected, kind: "tool")
-            XCTAssertNotNil(rawSymbol, "\(pair.raw) should resolve")
-            XCTAssertEqual(rawSymbol, correctedSymbol, "\(pair.raw) and \(pair.corrected) should match")
+            let rawVerb = ToolIcon.verb(title: pair.raw, live: false)
+            let correctedVerb = ToolIcon.verb(title: pair.corrected, live: false)
+            XCTAssertNotNil(rawVerb, "\(pair.raw) should resolve")
+            XCTAssertEqual(rawVerb, correctedVerb, "\(pair.raw) and \(pair.corrected) should match")
         }
     }
 
     /// Lookup folds case entirely, independent of the raw/corrected spelling
     /// question above — shouting or whispering the same title changes nothing.
     func testLookupIsCaseInsensitive() {
-        XCTAssertEqual(ToolIcon.symbolName(title: "BASH", kind: "command"), "terminal")
-        XCTAssertEqual(ToolIcon.symbolName(title: "bash", kind: "command"), "terminal")
-        XCTAssertEqual(ToolIcon.symbolName(title: "ReAd FiLe", kind: "file"), "doc.text")
+        XCTAssertEqual(ToolIcon.verb(title: "BASH", live: false), "Ran")
+        XCTAssertEqual(ToolIcon.verb(title: "bash", live: false), "Ran")
+        XCTAssertEqual(ToolIcon.verb(title: "ReAd FiLe", live: false), "Read")
     }
 
-    /// A title this app never produces, with no MCP shape either, keeps its
-    /// text — the fallback that protects a reader from a wrong or generic
-    /// glyph standing in for a tool that was never identified.
-    func testUnknownTitleHasNoIcon() {
+    /// A title this app never produces gets neither a verb nor a glyph — a
+    /// made-up verb would misname the work as surely as a wrong glyph.
+    func testUnknownTitleHasNoVerbAndNoIcon() {
+        XCTAssertNil(ToolIcon.verb(title: "Frobnicate", live: false))
+        XCTAssertNil(ToolIcon.verb(title: "Frobnicate", live: true))
         XCTAssertNil(ToolIcon.symbolName(title: "Frobnicate", kind: "tool"))
         XCTAssertNil(ToolIcon.symbolName(title: "Frobnicate", kind: "file"))
     }
 
     /// `<server> <function>` and `<server>: <function>` — the two shapes
     /// every MCP call in the stored history actually took — both resolve to
-    /// the puzzle-piece glyph regardless of which server is installed.
+    /// the puzzle-piece glyph regardless of which server is installed. An MCP
+    /// call is the one row a word would be worse for: there is no fixed
+    /// vocabulary to name, so it keeps no verb.
     func testMCPShapedTitlesHitTheMCPRule() {
         let spaceShaped = ["Inter Tasks", "Inter Memory", "Inter Database Local Query", "GitHub Create Issue"]
         for title in spaceShaped {
             XCTAssertEqual(
-                ToolIcon.symbolName(title: title, kind: "tool"), "puzzlepiece.extension",
+                ToolIcon.symbolName(title: title, kind: "tool"), "wrench.adjustable",
                 "\(title) should hit the MCP rule"
             )
+            XCTAssertNil(ToolIcon.verb(title: title, live: false), "\(title) should have no invented verb")
         }
         let colonShaped = ["Inter [database]: Query", "Inter Database Local: Query", "Slack: Post Message"]
         for title in colonShaped {
             XCTAssertEqual(
-                ToolIcon.symbolName(title: title, kind: "tool"), "puzzlepiece.extension",
+                ToolIcon.symbolName(title: title, kind: "tool"), "wrench.adjustable",
                 "\(title) should hit the MCP rule"
             )
         }
@@ -111,15 +134,20 @@ final class ToolIconTests: XCTestCase {
     }
 
     /// The app's own sentence-case titles — capitalized only on their first
-    /// word — must never be mistaken for the MCP shape and lose their exact
-    /// glyph to the generic puzzle piece.
-    func testOwnSentenceCaseTitlesDoNotTripTheMCPRule() {
-        XCTAssertEqual(ToolIcon.symbolName(title: "Web search", kind: "tool"), "globe")
-        XCTAssertEqual(ToolIcon.symbolName(title: "Search code", kind: "tool"), "text.magnifyingglass")
+    /// word — must never be mistaken for the MCP shape: they resolve to their
+    /// verb, and to no glyph.
+    func testOwnSentenceCaseTitlesResolveToVerbsNotTheMCPRule() {
+        XCTAssertNil(ToolIcon.symbolName(title: "Web search", kind: "tool"))
+        XCTAssertEqual(ToolIcon.verb(title: "Web search", live: false), "Searched the web")
+        XCTAssertNil(ToolIcon.symbolName(title: "Search code", kind: "tool"))
+        XCTAssertEqual(ToolIcon.verb(title: "Search code", live: false), "Searched")
     }
 
-    func testConvenienceOverloadReadsTitleAndKindFromTheEvent() {
-        XCTAssertEqual(ToolIcon.symbolName(for: event(kind: "command", title: "Bash")), "terminal")
+    func testConvenienceOverloadsReadTitleAndKindFromTheEvent() {
+        XCTAssertEqual(ToolIcon.verb(for: event(kind: "command", title: "Bash"), live: false), "Ran")
+        XCTAssertEqual(ToolIcon.verb(for: event(kind: "tool", title: "Bash"), live: true), "Running")
+        XCTAssertNil(ToolIcon.verb(for: event(kind: "tool", title: "Frobnicate"), live: false))
+        XCTAssertEqual(ToolIcon.symbolName(for: event(kind: "tool", title: "Inter Tasks")), "wrench.adjustable")
         XCTAssertNil(ToolIcon.symbolName(for: event(kind: "tool", title: "Frobnicate")))
     }
 }

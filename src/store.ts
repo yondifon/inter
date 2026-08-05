@@ -20,6 +20,7 @@ import type {
   TaskAttempt,
   TaskCompletion,
   TaskCompletionOverride,
+  TaskSelection,
   TaskState,
   TaskSummary,
   TaskScope,
@@ -450,6 +451,23 @@ export class StateStore {
     this.database.query("UPDATE tasks SET shipped_prompt = ? WHERE id = ?").run(shippedPrompt, id);
   }
 
+  /**
+   * Stores how this task's profile, model, and effort were decided. Written next
+   * to the outcome the run produces, which is what makes the pair analysable
+   * later: `decidedBy` separates a router decision from a caller's own choice.
+   */
+  recordTaskSelection(id: string, selection: TaskSelection): void {
+    this.database.query("UPDATE tasks SET selection_json = ? WHERE id = ?")
+      .run(JSON.stringify(selection), id);
+  }
+
+  taskSelection(id: string): TaskSelection | undefined {
+    const row = this.database.query<{ selection_json: string | null }, [string]>(
+      "SELECT selection_json FROM tasks WHERE id = ?",
+    ).get(id);
+    return row?.selection_json ? JSON.parse(row.selection_json) as TaskSelection : undefined;
+  }
+
   /** Rolls a run's reported cost onto the task so spend survives the event stream. */
   recordTaskCost(id: string, costUsd?: number, turns?: number): void {
     if (costUsd === undefined && turns === undefined) return;
@@ -866,7 +884,10 @@ export class StateStore {
   }
 
   listTaskSummaries(query: TaskListQuery = {}): TaskSummary[] {
-    const limit = Math.min(100, Math.max(1, query.limit ?? 20));
+    // The MCP `tasks` tool bounds its own `limit` input to 100 via zod; this
+    // higher ceiling exists for the /state poll route, which asks for the
+    // same 200-row working set `listTasks` returns.
+    const limit = Math.min(200, Math.max(1, query.limit ?? 20));
     const clauses: string[] = [];
     const values: Array<string | number> = [];
     if (query.state) {

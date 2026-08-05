@@ -132,4 +132,30 @@ final class EventExpansionTests: XCTestCase {
             "Show raw details"
         )
     }
+
+    /// The chevron is a promise that something is hidden. A collapsed row shows
+    /// one line, so the offer stands exactly when the expansion holds more than
+    /// that line — and never on a row the reader can already see whole.
+    func testOfferFollowsWhatTheCollapsedRowCannotShow() {
+        // Output the one-line summary cannot carry.
+        XCTAssertTrue(EventExpansion.shouldOfferExpansion(event(kind: "command", rawText: bashPayload)))
+        // A diff never renders collapsed.
+        XCTAssertTrue(EventExpansion.shouldOfferExpansion(event(
+            kind: "file",
+            rawText: #"{"tool_input":{"old_string":"a","new_string":"b"}}"#
+        )))
+        // A run of prose past the preview cap keeps its rest reachable.
+        XCTAssertTrue(EventExpansion.shouldOfferExpansion(event(
+            kind: "message",
+            title: "Agent message",
+            detail: String(repeating: "line\n", count: 8)
+        )))
+        // Nothing is hidden behind these, so neither offers.
+        XCTAssertFalse(EventExpansion.shouldOfferExpansion(event(
+            kind: "message",
+            title: "Agent message",
+            detail: "Done."
+        )))
+        XCTAssertFalse(EventExpansion.shouldOfferExpansion(event(kind: "usage", title: "Usage")))
+    }
 }

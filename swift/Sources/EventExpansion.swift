@@ -45,7 +45,38 @@ enum EventExpansion: Equatable {
         if isProse(event) { return "full text" }
         if event.kind == "file", FileChange.mayContainEdit(raw) { return "changes" }
         if event.kind == "command" { return CommandOutput.mayContainOutput(raw) ? "output" : "full command" }
+        // A tool result whose payload names a command is a command's output —
+        // the read and search payloads that carry an `output` key never do.
+        if event.kind == "tool", raw.contains("\"command\""), CommandOutput.mayContainOutput(raw) {
+            return "output"
+        }
         return "raw details"
+    }
+
+    /// Lines a collapsed quotation shows before the chevron — the same cap the
+    /// row's quote preview applies. One, because a trace is scanned before it is
+    /// read: six lines of an agent quoting a file back to itself buried the rows
+    /// around it, and the reader who wants the rest opens the row.
+    static let quotePreviewLines = 1
+
+    /// Whether the chevron earns its place: the expansion holds something the
+    /// collapsed row cannot show. The raw-payload button inside the expansion
+    /// is not counted — it is a secondary detail, not the row's substance.
+    /// Unlike `label`, this derives from the parsed expansion rather than
+    /// substring guesses, so the two never disagree about what a row opens on.
+    static func shouldOfferExpansion(_ event: TaskEventSnapshot) -> Bool {
+        switch EventExpansion(event: event) {
+        case .changes:
+            return true
+        case .command(let command, let output):
+            // The call already sits on the title line; only output or a
+            // script spanning lines is more than that line can show.
+            return output != nil || command?.contains(where: \.isNewline) == true
+        case .prose(let text):
+            return text.split(whereSeparator: \.isNewline).count > quotePreviewLines
+        case .payload:
+            return !(event.rawText ?? "").isEmpty
+        }
     }
 }
 

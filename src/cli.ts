@@ -20,11 +20,28 @@ import {
   waitForTasks,
 } from "./tasks";
 import { listModels } from "./models";
-import { routeModel } from "./model-router";
+import {
+  auditNamedRoute,
+  classifyTask,
+  DEFAULT_DIFFICULTY,
+  DIFFICULTIES,
+  difficultyFloor,
+  ROUTER_VERSION,
+  routeModel,
+  type ModelRoute,
+  type NamedRouteAudit,
+} from "./model-router";
 import { listProfileStatuses } from "./profile-status";
 import { listProfileUsage } from "./usage";
 import { stateStore } from "./store";
-import type { Profile, Provider, Task } from "./types";
+import type {
+  Difficulty,
+  Profile,
+  Provider,
+  RoutePreference,
+  SelectionDecision,
+  Task,
+} from "./types";
 import { taskEventView } from "./events";
 import { COMPLETE_DESCRIPTION, DELEGATE_DESCRIPTION, HANDOFF_DESCRIPTION, MCP_INSTRUCTIONS } from "./mcp-copy";
 import { defaultModelFor } from "./provider-defaults";
@@ -90,11 +107,37 @@ const taskStateSchema = z.enum([
   "queued", "running", "needs_input", "answered", "blocked", "completed", "failed", "cancelled",
 ]);
 
+// Bounds the MCP `tasks` tool's context cost independently of the /state
+// poll route, which asks the store for its own, larger limit directly.
+export const tasksToolQuerySchema = z.object({
+  limit: z.number().int().min(1).max(100).default(20),
+  state: taskStateSchema.optional().describe("Only tasks currently in this state."),
+  since: z.string().datetime().optional().describe("Only tasks updated at or after this ISO timestamp."),
+  profile: z.string().optional().describe("Only tasks sent to this profile id."),
+  parent: z.string().optional()
+    .describe("A fan-out batch: the task with this id plus every task delegated with it as parent."),
+  archived: z.enum(["active", "only", "include"]).default("active"),
+});
+
 const taskFieldSchema = z.array(z.enum(TASK_FIELD_KEYS)).optional()
   .describe(
     "The response shape. Defaults to a small acknowledgement; supplying any `fields` replaces " +
     "the default, it does not add to it. `[\"all\"]` returns the full record. " +
     "Heavy groups that cost real context: `prompt`, `shippedPrompt`, `output`, `attempts`.",
+  );
+
+// The one routing input the caller knows better than Inter: how hard the work
+// is. Left out, Inter reads it as standard — the level most delegated work sits
+// at, and low on purpose, because an over-powered success costs far more than a
+// cheap retry.
+const difficultySchema = z.enum(DIFFICULTIES).optional()
+  .describe(
+    "How hard this work is, which decides the model and how much it thinks. " +
+    "mechanical: the change is fully specified, just apply it — renames, formatting, a diff you " +
+    "already know. standard (assumed when you leave this out): a named target and a clear " +
+    "endpoint, but the worker decides how. hard: the shape of the answer is part of the work — " +
+    "design, root-cause, a cross-cutting refactor. critical: being wrong is expensive and hard to " +
+    "spot — security, concurrency, migrations, data loss.",
   );
 
 // The delegate contract, described once. The MCP tool and the REST dispatch
@@ -120,11 +163,12 @@ const delegateToolSchema = z.object({
     ),
   allowQuestions: z.boolean().default(true)
     .describe("Whether the worker may pause in needs_input to ask. False makes it guess or stop."),
+  difficulty: difficultySchema,
   effort: z.enum(["minimal", "low", "medium", "high", "xhigh", "max"]).optional()
     .describe(
-      "Reasoning effort for this run. Honoured by claude, codex, opencode, and pi; antigravity " +
-      "ignores it because its level is baked into the model id. Ladders differ per provider, " +
-      "so call profiles with include: [\"models\"] and read the model's efforts before choosing.",
+      "Reasoning effort for this run, when you want to set it yourself. Left out, Inter reads it " +
+      "off difficulty and the chosen model's own levels. Honoured by claude, codex, opencode, and " +
+      "pi; antigravity ignores it because its level is baked into the model id.",
     ),
   tldr: z.string().min(1).max(200).optional()
     .describe(
@@ -147,7 +191,7 @@ const delegateToolSchema = z.object({
 // tool treats it as an optional hint, and the GUI is not the one writing
 // prompts, so title stays optional even though the tool requires it.
 const delegateBodySchema = delegateToolSchema
-  .omit({ preference: true, effort: true, fields: true })
+  .omit({ preference: true, difficulty: true, effort: true, fields: true })
   .extend({
     profile: z.string().min(1),
     title: z.string().min(1).max(60).optional(),
@@ -211,7 +255,7 @@ Bun.serve({
         // full rows (prompt + output per task) for the list rows, and the app
         // fetches one task in full only when it is opened.
         tasks: summary
-          ? listTaskSummaries({ archived: archiveFilter(url.searchParams.get("archived")) }).map(publicTaskSummary)
+          ? listTaskSummaries({ limit: 200, archived: archiveFilter(url.searchParams.get("archived")) }).map(publicTaskSummary)
           : listTasks(archiveFilter(url.searchParams.get("archived"))),
         // Why a provider is being avoided, and what each cwd is allowed to
         // touch — both cheap reads, both previously invisible in the app.
@@ -483,39 +527,35 @@ async function createMcpServer(): Promise<McpServer> {
   server.registerTool("delegate", {
     description: DELEGATE_DESCRIPTION,
     inputSchema: delegateToolSchema,
-  }, async ({ profile, model, preference, prompt, cwd, parent, scope, allowQuestions, effort, tldr, title, timeoutMs, fields }) => {
+  }, async ({ profile, model, preference, prompt, cwd, parent, scope, allowQuestions, difficulty, effort, tldr, title, timeoutMs, fields }) => {
     const resolvedFields = fields ?? DEFAULT_DELEGATE_FIELDS;
-    if (profile) {
-      // The caller named the account but not the model. Let the project policy
-      // pick that profile's best model for this task class instead of falling
-      // back to its single static default, which ignores difficulty entirely.
-      const chosen = model ?? await routeModel(prompt, { preference, cwd, profileId: profile })
-        .then((route) => route.model)
-        .catch(() => undefined);
-      const task = await delegate(profile, prompt, cwd, chosen, parent, { scope, allowQuestions, effort, tldr, title, timeoutMs });
-      return result({ ...startedTask(task, resolvedFields), ...(await warningsFor(cwd, task)) });
-    }
-    const selection = await routeModel(prompt, { preference, modelHint: model, cwd });
-    const task = await delegate(selection.profileId, prompt, cwd, selection.model, parent, {
+    const plan = await planDispatch({ prompt, cwd, profile, model, preference, difficulty, effort });
+    const task = await delegate(plan.profileId, prompt, cwd, plan.model, parent, {
       scope,
       allowQuestions,
-      effort,
+      effort: plan.effort,
       tldr,
       title,
       timeoutMs,
+      selection: plan.decision,
     });
-    return result({ ...startedTask(task, resolvedFields), selection, ...(await warningsFor(cwd, task)) });
+    return result({
+      ...startedTask(task, resolvedFields),
+      selection: stateStore().taskSelection(task.id),
+      ...dispatchWarnings(task, plan.warnings),
+    });
   });
   server.registerTool("route", {
-    description: "Choose a profile and model for a proposed task without starting it. Use before delegate to compare providers by quality, cost, speed, and available rate-limit headroom, especially when the current provider is low on usage.",
+    description: "Choose a profile and model for a proposed task without starting it. Use before delegate to compare providers by quality, cost, speed, and available rate-limit headroom, especially when the current provider is low on usage. Returns what it would pick, the reasoning level it would ask for, and why each account it passed over was ruled out.",
     inputSchema: z.object({
       prompt: z.string().min(1).max(64_000),
       modelHint: z.string().min(1).max(200).optional(),
       preference: z.enum(["balanced", "quality", "cost", "speed"]).optional(),
+      difficulty: difficultySchema,
       cwd: z.string().min(1),
     }),
-  }, async ({ prompt, modelHint, preference, cwd }) => result(
-    await routeModel(prompt, { modelHint, preference, cwd }),
+  }, async ({ prompt, modelHint, preference, difficulty, cwd }) => result(
+    await routeModel(prompt, { modelHint, preference, difficulty, cwd }),
   ));
   server.registerTool("inspect", {
     description: "Get one task's record: output, scope, grant, spend, and completion. By default the three heaviest fields (prompt, shippedPrompt and attempts) are opt-in — pass `fields: [\"all\"]` for the full snapshot. The read that a settled watch line or a wait response hands off to.",
@@ -563,15 +603,7 @@ async function createMcpServer(): Promise<McpServer> {
   }, async () => result({ status: "ok", version: VERSION, mcpContractVersion: MCP_CONTRACT_VERSION }));
   server.registerTool("tasks", {
     description: "Find recent delegated tasks by state, time, profile, or fan-out batch. Returns concise summaries for discovery; use inspect for one task in full, or background watch to follow active work.",
-    inputSchema: z.object({
-      limit: z.number().int().min(1).max(100).default(20),
-      state: taskStateSchema.optional().describe("Only tasks currently in this state."),
-      since: z.string().datetime().optional().describe("Only tasks updated at or after this ISO timestamp."),
-      profile: z.string().optional().describe("Only tasks sent to this profile id."),
-      parent: z.string().optional()
-        .describe("A fan-out batch: the task with this id plus every task delegated with it as parent."),
-      archived: z.enum(["active", "only", "include"]).default("active"),
-    }),
+    inputSchema: tasksToolQuerySchema,
   }, async (query) => result(listTaskSummaries(query).map(publicTaskSummary)));
   server.registerTool("memory", {
     description: "Read or update durable project facts shared across Inter callers and delegated workers. Delegation automatically includes active memories for its cwd. Store decisions, constraints, and conventions; never store secrets or transient task status. Use expectedVersion to prevent concurrent overwrites.",
@@ -698,6 +730,169 @@ async function createMcpServer(): Promise<McpServer> {
     });
   });
   return server;
+}
+
+interface DispatchPlan {
+  profileId: string;
+  /** Left out only when nothing could choose one, so the account's default runs. */
+  model?: string;
+  effort?: string;
+  decision: SelectionDecision;
+  warnings: string[];
+}
+
+/**
+ * Where this task goes, and the record of how that was decided. Three levels of
+ * caller authority, all preserved: naming a profile and a model is absolute and
+ * only ever warned about, naming a profile leaves the model to the project
+ * policy, and naming neither leaves the whole choice to Inter.
+ */
+async function planDispatch(input: {
+  prompt: string;
+  cwd: string;
+  profile?: string;
+  model?: string;
+  preference?: RoutePreference;
+  difficulty?: Difficulty;
+  effort?: string;
+}): Promise<DispatchPlan> {
+  const { prompt, cwd, preference } = input;
+  const difficulty = input.difficulty ?? DEFAULT_DIFFICULTY;
+  const source = input.difficulty ? "caller" : "default";
+
+  if (!input.profile) {
+    const route = await routeModel(prompt, { preference, modelHint: input.model, cwd, difficulty });
+    return {
+      profileId: route.profileId,
+      model: route.model,
+      effort: input.effort ?? route.effort,
+      decision: decisionFromRoute("router", route, source, input.effort),
+      warnings: route.warnings,
+    };
+  }
+
+  if (!input.model) {
+    // Naming the account leaves the model to the project policy's allow order
+    // for this kind of work, which beats the account's single static default.
+    // A policy that can offer nothing usable is a warning, never a refusal.
+    try {
+      const route = await routeModel(prompt, { preference, cwd, profileId: input.profile, difficulty });
+      return {
+        profileId: input.profile,
+        model: route.model,
+        effort: input.effort ?? route.effort,
+        decision: decisionFromRoute("caller-profile", route, source, input.effort),
+        warnings: route.warnings,
+      };
+    } catch (error) {
+      const warning = `Could not choose a model on ${input.profile}: ${
+        error instanceof Error ? error.message : String(error)
+      }. Ran the account's own default model instead.`;
+      return {
+        profileId: input.profile,
+        ...(input.effort ? { effort: input.effort } : {}),
+        decision: {
+          decidedBy: "caller-profile",
+          routerVersion: ROUTER_VERSION,
+          difficulty,
+          difficultySource: source,
+          heuristicClass: classifyTask(prompt).taskClass,
+          heuristicAgreed: true,
+          floor: difficultyFloor(difficulty),
+          floorRelaxed: false,
+          preference: preference ?? "balanced",
+          effortSource: input.effort ? "caller" : "none",
+          effortReason: input.effort
+            ? "the caller set it"
+            : "no model could be chosen on this account, so no reasoning level was read off one",
+          quotaUsedPercent: null,
+          warnings: [warning],
+        },
+        warnings: [warning],
+      };
+    }
+  }
+
+  const audit = await auditNamedRoute(prompt, {
+    cwd,
+    profileId: input.profile,
+    model: input.model,
+    difficulty,
+    ...(input.effort ? { effort: input.effort } : {}),
+  });
+  return {
+    profileId: input.profile,
+    model: input.model,
+    effort: input.effort ?? audit.effort,
+    decision: decisionFromAudit(audit, source, input.effort),
+    warnings: audit.warnings,
+  };
+}
+
+function decisionFromRoute(
+  decidedBy: "router" | "caller-profile",
+  route: ModelRoute,
+  difficultySource: "caller" | "default",
+  callerEffort?: string,
+): SelectionDecision {
+  return {
+    decidedBy,
+    routerVersion: ROUTER_VERSION,
+    difficulty: route.difficulty,
+    difficultySource,
+    heuristicClass: route.taskClass,
+    heuristicAgreed: route.heuristicAgreed,
+    floor: route.floor,
+    floorRelaxed: route.floorRelaxed,
+    preference: route.preference,
+    effortSource: callerEffort ? "caller" : route.effort ? "projected" : "none",
+    effortReason: callerEffort ? "the caller set it" : route.effortReason,
+    quotaUsedPercent: route.quotaUsedPercent,
+    ...(route.candidates.length > 1
+      ? { runnersUp: route.candidates.slice(1).map(({ profileId, model }) => ({ profileId, model })) }
+      : {}),
+    ...(route.rejected.length ? { rejected: route.rejected, rejectedCount: route.rejectedCount } : {}),
+    ...(route.policyPath ? { policyPath: route.policyPath } : {}),
+    ...(route.warnings.length ? { warnings: route.warnings } : {}),
+  };
+}
+
+function decisionFromAudit(
+  audit: NamedRouteAudit,
+  difficultySource: "caller" | "default",
+  callerEffort?: string,
+): SelectionDecision {
+  return {
+    decidedBy: "caller-explicit",
+    routerVersion: ROUTER_VERSION,
+    difficulty: audit.difficulty,
+    difficultySource,
+    heuristicClass: audit.taskClass,
+    heuristicAgreed: audit.heuristicAgreed,
+    floor: audit.floor,
+    floorRelaxed: false,
+    preference: audit.preference,
+    effortSource: callerEffort ? "caller" : audit.effort ? "projected" : "none",
+    effortReason: callerEffort ? "the caller set it" : audit.effortReason,
+    quotaUsedPercent: audit.quotaUsedPercent,
+    ...(audit.rejected.length
+      ? { rejected: audit.rejected, rejectedCount: audit.rejected.length }
+      : {}),
+    ...(audit.policyPath ? { policyPath: audit.policyPath } : {}),
+    ...(audit.warnings.length ? { warnings: audit.warnings } : {}),
+  };
+}
+
+/**
+ * What the caller should repeat back to the user after a dispatch: how the scope
+ * was reached, plus whatever the selection filters found wrong with the
+ * destination. Those filters advise on the caller-named path and never block it,
+ * so the warning is the only place an out-of-credits account shows up.
+ */
+function dispatchWarnings(task: Task, selectionWarnings: string[]): { warnings?: string[] } {
+  const inheritance = scopeInheritanceWarning(task);
+  const warnings = [...(inheritance ? [inheritance] : []), ...selectionWarnings];
+  return warnings.length > 0 ? { warnings } : {};
 }
 
 /** Everything about this dispatch the caller should repeat back to the user. */

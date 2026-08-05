@@ -20,7 +20,7 @@ import { deniedScopePaths, promptReadPaths } from "./prompt-paths";
 import { stateStore, type StateStore, type TaskListQuery } from "./store";
 import { promptWithMemories } from "./memories";
 import { TaskWaiter, type TaskWaitResult, type WaitUntil } from "./task-waiter";
-import type { Profile, Task, TaskScope, TaskSummary } from "./types";
+import type { Profile, SelectionDecision, Task, TaskScope, TaskSummary } from "./types";
 
 const MAX_EVENT_LINE = 64 * 1024;
 const MAX_EVENTS = 5_000;
@@ -57,6 +57,12 @@ export interface DelegateOptions {
   timeoutMs?: number;
   /** Reasoning effort. Only codex and opencode expose a lever for it. */
   effort?: string;
+  /**
+   * How this destination was decided. Stored with the task minus the chosen
+   * pair, which is filled in from the row itself so the record can never claim a
+   * profile or model the task did not actually run on.
+   */
+  selection?: SelectionDecision;
   /** Caller's one-line handle for the task, what a human reads instead of the prompt. */
   tldr?: string;
   /** Short label for the task, what a sidebar reads at a glance. */
@@ -340,6 +346,16 @@ export async function delegate(
     options,
   );
   stateStore().createTask(task);
+  if (options.selection) {
+    stateStore().recordTaskSelection(task.id, {
+      ...options.selection,
+      chosen: {
+        profileId: task.profileId,
+        model: task.model,
+        ...(task.effort ? { effort: task.effort } : {}),
+      },
+    });
+  }
   if (autoReads?.length) {
     appendTaskEvent(task.id, "scope_auto_completed", task.state, {
       added: autoReads,

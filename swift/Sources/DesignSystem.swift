@@ -33,6 +33,19 @@ enum Surface {
     }
 }
 
+/// The trace's one stroke: a 2pt rule that stands in for a container. Signals,
+/// quotes, and handoffs draw one of these on the page's edge instead of a
+/// filled surface — the color is all that varies.
+struct AccentRule: View {
+    var color: Color = Color(nsColor: .separatorColor)
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 1)
+            .fill(color)
+            .frame(width: 2)
+    }
+}
+
 // The app's voice: every machine-produced string — ids, paths, commands, models,
 // env values, tool names — asks for the monospaced face at its call site, and
 // prose stays in the system face, which is 20% narrower and easier to read
@@ -54,27 +67,42 @@ extension EnvironmentValues {
     }
 }
 
-/// macOS point sizes for the text styles this app uses.
+/// macOS point sizes for the text styles this app uses, hand-tuned as one
+/// ladder: the reading sizes (body 13, callout 12, caption 10) hold their
+/// system positions — this is a native tool, and the platform's optical
+/// sizing and tracking are tuned for those — while the identity tier steps
+/// one notch above system (title3 16, title2 18, title 24, largeTitle 28) so
+/// a task title or a markdown heading separates from prose, headline clears
+/// body by a full point instead of sharing it, and the tertiary tier drops a
+/// point (caption2 9, footnote 11 vs. subheadline 11.5) so timestamps and
+/// meta stay behind content in size as well as color. Weights are part of
+/// the ladder too, so hierarchy never leans on size alone: bold for the
+/// display sizes, semibold for identity, medium for the one subheading.
 private enum TextStyleSize {
     static func base(_ style: Font.TextStyle) -> CGFloat {
         switch style {
-        case .largeTitle: 26
-        case .title: 22
-        case .title2: 17
-        case .title3: 15
-        case .headline: 13
+        case .largeTitle: 28
+        case .title: 24
+        case .title2: 18
+        case .title3: 16
+        case .headline: 14
         case .body: 13
         case .callout: 12
-        case .subheadline: 11
-        case .footnote: 10
+        case .subheadline: 11.5
+        case .footnote: 11
         case .caption: 10
-        case .caption2: 10
+        case .caption2: 9
         @unknown default: 13
         }
     }
 
     static func weight(_ style: Font.TextStyle) -> Font.Weight {
-        style == .headline ? .semibold : .regular
+        switch style {
+        case .largeTitle, .title, .title2: .bold
+        case .title3, .headline: .semibold
+        case .subheadline: .medium
+        default: .regular
+        }
     }
 }
 
