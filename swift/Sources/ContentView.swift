@@ -97,6 +97,7 @@ struct ContentView: View {
             // the toolbar, keeps the whole column one plane.
             .scrollContentBackground(.hidden)
             .background { Surface.sidebar.ignoresSafeArea() }
+            .background(SplitViewDividerHider())
             .navigationSplitViewColumnWidth(min: 240, ideal: 260)
             // Graphite-style selection. The system accent turns a scanned list into
             // a blue slab; a neutral fill keeps the type as the loudest thing.

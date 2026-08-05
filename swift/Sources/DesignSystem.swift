@@ -33,6 +33,39 @@ enum Surface {
     }
 }
 
+/// `NavigationSplitView` draws its pane-dividing hairline through the AppKit
+/// `NSSplitView` it builds internally; SwiftUI exposes no modifier to hide it.
+/// The two panes' background shades already carry the separation, so this
+/// suppresses the divider's drawn color without touching its draggable hit
+/// area — dragging keeps resizing the sidebar exactly as before.
+private final class HairlineHiddenSplitView: NSSplitView {
+    override var dividerColor: NSColor { .clear }
+}
+
+/// Invisible helper view. Add it anywhere inside a `NavigationSplitView` pane
+/// via `.background(SplitViewDividerHider())` and it walks up to the enclosing
+/// `NSSplitView` to hide its divider line.
+struct SplitViewDividerHider: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        NSView(frame: .zero)
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            var view: NSView? = nsView
+            while let current = view {
+                if let splitView = current as? NSSplitView {
+                    if object_getClass(splitView) !== HairlineHiddenSplitView.self {
+                        object_setClass(splitView, HairlineHiddenSplitView.self)
+                    }
+                    return
+                }
+                view = current.superview
+            }
+        }
+    }
+}
+
 /// The trace's one stroke: a 2pt rule that stands in for a container. Signals,
 /// quotes, and handoffs draw one of these on the page's edge instead of a
 /// filled surface — the color is all that varies.
