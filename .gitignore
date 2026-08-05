@@ -39,3 +39,6 @@ tests/.probe/
 .plans/
 scratchpad/
 *.original.md
+
+# Internal development notes — local only, not published
+docs/internal/

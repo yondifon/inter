@@ -4,10 +4,10 @@
 npm `@earendil-works/pi-coding-agent`. Inter drives it in JSON mode, one shot per
 task, exactly like the other four providers.
 
-Every flag below traces to [`pi-provider-research.md`](pi-provider-research.md),
-which cites pi's own source for each. The flags, the event stream, resume, tool
-calls, and model listing were then **exercised against pi 0.82.1** — see
-[Verified](#verified) and [Still unverified](#still-unverified).
+Every flag below was traced to pi's own source during development. The flags,
+the event stream, resume, tool calls, and model listing were then **exercised
+against pi 0.82.1** — see [Verified](#verified) and
+[Still unverified](#still-unverified).
 
 ## Dispatch
 

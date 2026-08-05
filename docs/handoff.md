@@ -7,8 +7,8 @@ stranded — the only path used to be a fresh `delegate` with a hand-written
 prompt.
 
 On 2026-08-03 that cost a real run: three opus/max reviews on `claude-work`, two
-killed by `You've hit your session limit · resets 12:40am (Africa/Douala)`. One
-had spent **43 turns and $5.05**, had read `store.ts`, `events.ts`, `tasks.ts`
+killed by `You've hit your session limit · resets 12:40am (America/Chicago)`. One
+had spent **dozens of turns and real money**, had read `store.ts`, `events.ts`, `tasks.ts`
 and the test suite, and had formed its findings. On disk: nothing — it died
 mid-write. Profile `default` sat at 3% session / 8% week the whole time.
 Recovery was a full re-dispatch from zero.
@@ -28,9 +28,9 @@ task, and the caller should choose knowingly:
 
 Which is why every `rate_limit` failure now carries **`completion.resetsAt`** —
 the ISO time the window clears. It is parsed from whatever the provider said:
-an epoch stamp (`Claude AI usage limit reached|1754308800`), a countdown
+an epoch stamp (`Claude AI usage limit reached|1753999200`), a countdown
 (`resets in 48m 15s`), or a wall clock with the zone it was printed in
-(`resets 12:40am (Africa/Douala)`), and failing all three, from the stream's own
+(`resets 12:40am (America/Chicago)`), and failing all three, from the stream's own
 `rate_limit_event`. It rides `completion`, so it appears wherever the failure
 already does — `wait`, `inspect`, the failed event, and the app's trace. The
 same time becomes the profile's `retryAt`, replacing a flat ten-minute guess

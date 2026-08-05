@@ -66,7 +66,7 @@ Someone reading the event stream sees the correction and who made it.
 ## Example
 
 A task built the whole feature, never signed off, and sits in
-`blocked`/`unverified` after $5.75 of correct work. The caller checks the diff
+`blocked`/`unverified` after an afternoon of correct work. The caller checks the diff
 and calls:
 
 ```

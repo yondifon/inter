@@ -21,8 +21,8 @@ final class TaskGroupingTests: XCTestCase {
         )
     }
 
-    private let inter = "/Users/malico/desgn/inter"
-    private let site = "/Users/malico/work/site"
+    private let inter = "/Users/dev/desgn/inter"
+    private let site = "/Users/dev/work/site"
 
     func testProjectsCountTasksInFirstSeenOrder() {
         let projects = TaskOrganizer.projects(in: [
@@ -60,7 +60,7 @@ final class TaskGroupingTests: XCTestCase {
     func testStaleFilterFallsBackToEveryTask() {
         let groups = TaskOrganizer.organize(
             tasks: [item("1", cwd: inter)],
-            project: "/Users/malico/deleted-checkout",
+            project: "/Users/dev/deleted-checkout",
             grouping: .none
         )
         XCTAssertEqual(
@@ -377,7 +377,7 @@ final class TaskGroupingTests: XCTestCase {
 
     func testProjectNameFallsBackToTheWholePathWhenUnsplittable() {
         XCTAssertEqual(TaskOrganizer.projectName("inter"), "inter")
-        XCTAssertEqual(TaskOrganizer.projectName("/Users/malico/desgn/inter/"), "inter")
+        XCTAssertEqual(TaskOrganizer.projectName("/Users/dev/desgn/inter/"), "inter")
     }
 
     func testArchiveSelectionMovesToTheNextTask() {

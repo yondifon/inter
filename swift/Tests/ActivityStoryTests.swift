@@ -76,7 +76,7 @@ final class ActivityStoryTests: XCTestCase {
     /// The hook and the result both carry a failed call's error; the row says
     /// it once.
     func testOutcomeIsDroppedWhenTheRowAlreadyStatesIt() {
-        let error = "File does not exist. Note: your current working directory is /Users/malico/desgn/kii."
+        let error = "File does not exist. Note: your current working directory is /Users/dev/desgn/kii."
         let story = ActivityStory.compose([
             event(1, kind: "file", title: "Read file", detail: "…/kii/AGENTS.md",
                   presentation: TaskEventPresentationSnapshot(type: "file", path: "…/kii/AGENTS.md"),
@@ -101,7 +101,7 @@ final class ActivityStoryTests: XCTestCase {
     /// `{ type: "tool", outcome: … }`. The opening event still named the
     /// path; the merged row has to keep it.
     func testBareToolCloseKeepsTheOpeningFilePresentation() {
-        let opened = TaskEventPresentationSnapshot(type: "file", path: "/Users/malico/desgn/inter/src/watch.ts")
+        let opened = TaskEventPresentationSnapshot(type: "file", path: "/Users/dev/desgn/inter/src/watch.ts")
         let closed = TaskEventPresentationSnapshot(type: "tool", outcome: "120 lines read")
         let story = ActivityStory.compose([
             event(1, kind: "file", title: "Read file", phase: "started",
@@ -113,7 +113,7 @@ final class ActivityStoryTests: XCTestCase {
         XCTAssertEqual(rows.map(\.id), [1])
         XCTAssertEqual(rows[0].kind, "file")
         XCTAssertEqual(rows[0].presentation?.type, "file")
-        XCTAssertEqual(rows[0].presentation?.path, "/Users/malico/desgn/inter/src/watch.ts")
+        XCTAssertEqual(rows[0].presentation?.path, "/Users/dev/desgn/inter/src/watch.ts")
         XCTAssertEqual(rows[0].presentation?.outcome, "120 lines read")
     }
 

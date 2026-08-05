@@ -20,7 +20,7 @@ function fixtureTask(index: number, overrides: Partial<Task> = {}): Task {
     effort: "max",
     prompt: `Refactor the store module. ${"context ".repeat(500)}`,
     shippedPrompt: `Refactor the store module. ${"context ".repeat(560)}`,
-    cwd: "/Users/malico/desgn/inter",
+    cwd: "/Users/dev/desgn/inter",
     state: "running",
     output: "",
     scope: { read: ["**"], write: ["src/**", "tests/**"] },

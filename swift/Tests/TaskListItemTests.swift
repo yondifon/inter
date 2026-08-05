@@ -10,7 +10,7 @@ final class TaskListItemTests: XCTestCase {
             "id": "abc-123",
             "profileId": "worker-1",
             "model": "claude-sonnet-5",
-            "cwd": "/Users/malico/desgn/inter",
+            "cwd": "/Users/dev/desgn/inter",
             "state": "running",
             "promptPreview": "Ship the landing page\\nwith three sections",
             "tldr": "Build a marketing site",

@@ -1061,7 +1061,7 @@ describe("task event views", () => {
           sessionID: "ses_035691fdbffeYv2l2Kjpxg0EGq",
           messageID: "msg_fca96e14f001RiFCTFOeQCavx1",
           state: {
-            input: { action: "list", cwd: "/Users/malico/desgn/inter" },
+            input: { action: "list", cwd: "/Users/dev/desgn/inter" },
             metadata: { truncated: false },
             output: "[{ \"key\": \"delegation-model-preference\" }]",
             status: "completed",
