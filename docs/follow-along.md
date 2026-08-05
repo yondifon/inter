@@ -75,12 +75,14 @@ agent can read for near-zero cost — degraded, but never silent:
 inter watch 8f2c1a94-... > /tmp/task.watch 2>&1 &
 ```
 
-`watch` reads the same SQLite store the broker writes rather than calling the
-broker over HTTP, so a caller holding a task id gets an answer even when nothing
-is listening on the port. It opens that store as an observer: the broker's
-startup duties — profile seeding and interrupted-task recovery — stay with the
-broker, because a second process running recovery would fail every task it came
-to watch.
+`watch` connects to the broker's unix event socket at `~/.inter/inter.sock` for
+instant push delivery with zero database access and zero polling. When the
+socket is absent — broker not running, or started before socket support — it
+falls back to reading the same SQLite store the broker writes, so a caller
+holding a task id still gets an answer even when nothing is listening on the
+port. It opens that store as an observer: the broker's startup duties — profile
+seeding and interrupted-task recovery — stay with the broker, because a second
+process running recovery would fail every task it came to watch.
 
 ## 2. The MCP `wait` — when you genuinely want to block
 
