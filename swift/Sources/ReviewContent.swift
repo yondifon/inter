@@ -56,11 +56,22 @@ indirect enum JSONValue: Decodable, Equatable {
         case .object(let values): "\(values.count) field\(values.count == 1 ? "" : "s")"
         case .array(let values): "\(values.count) item\(values.count == 1 ? "" : "s")"
         case .string(let value): value
-        case .number(let value):
-            value.rounded() == value ? String(Int(value)) : String(value)
+        case .number(let value): Self.numberSummary(value)
         case .boolean(let value): value ? "true" : "false"
         case .null: "—"
         }
+    }
+
+    /// Whole doubles print as integers — but an Int cast is exact only inside
+    /// Int64's range, and out of it (1e20 is a whole double) it would trap, so
+    /// out-of-range wholes fall through to the digits formatter. Six
+    /// significant digits: "0.30000000000000004" reads "0.3", never the float
+    /// garbage `String(value)` would print.
+    private static func numberSummary(_ value: Double) -> String {
+        if value.rounded() == value, value >= Double(Int64.min), value < Double(Int64.max) {
+            return String(Int64(value))
+        }
+        return String(format: "%.6g", value)
     }
 
     var children: [(String, JSONValue)] {
@@ -327,13 +338,17 @@ private struct MarkdownBlockView: View {
     }
 
     private func list(items: [String], ordered: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        // The marker column is sized by the widest ordinal in the list: 20pt
+        // fits "1.", a three-digit "100." overflows it, so the column grows
+        // one 10pt glyph per extra digit and stays right-aligned throughout.
+        let markerWidth = (ordered ? CGFloat(items.count.description.count + 1) : 2) * 10 * uiScale
+        return VStack(alignment: .leading, spacing: 6) {
             ForEach(Array(items.enumerated()), id: \.offset) { index, item in
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(ordered ? "\(index + 1)." : "•")
                         .scaledFont(.body, monospacedDigit: true)
                         .foregroundStyle(.secondary)
-                        .frame(width: 20 * uiScale, alignment: .trailing)
+                        .frame(width: markerWidth, alignment: .trailing)
                     inline(item)
                         .scaledFont(.body)
                 }
@@ -419,6 +434,8 @@ private struct JSONTreeRow: View {
                         } label: {
                             HStack(spacing: 5) {
                                 Text(name).scaledFont(.callout, weight: .medium).lineLimit(1)
+                                    .help(name)
+                                    .textSelection(.enabled)
                                 Image(systemName: expanded ? "chevron.down" : "chevron.right")
                                     .scaledFont(.caption2, weight: .semibold)
                                     .foregroundStyle(.tertiary)
@@ -431,6 +448,8 @@ private struct JSONTreeRow: View {
                         .accessibilityLabel(expanded ? "Collapse \(name)" : "Expand \(name)")
                     } else {
                         Text(name).scaledFont(.callout, weight: .medium).lineLimit(1)
+                            .help(name)
+                            .textSelection(.enabled)
                     }
                 }
                 .padding(.leading, CGFloat(depth) * 16 * uiScale)

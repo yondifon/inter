@@ -41,12 +41,19 @@ struct ProjectMemoryView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Surface.content)
         .searchable(text: $query, prompt: "Filter memories")
-        .task(id: project.cwd) {
+        // Refetch when the store's snapshot for this cwd changes, so the table
+        // and the header count stay in agreement — not just on first appearance.
+        .task(id: memoryInfo) {
             loaded = false
             selection = nil
             memories = await store.memories(cwd: project.cwd)
             loaded = true
         }
+    }
+
+    /// The store's live memory info for this project; nil until the poll sees it.
+    private var memoryInfo: MemoryProjectSnapshot? {
+        store.memoryProjects.first { $0.cwd == project.cwd }
     }
 
     private var header: some View {
@@ -101,7 +108,7 @@ struct ProjectMemoryView: View {
                 Text(memory.key).scaledFont(.callout, weight: .semibold, design: .monospaced)
                 Spacer(minLength: 8)
                 Text("v\(memory.version) · \(updated(memory.updatedAt))")
-                    .scaledFont(.caption).foregroundStyle(.secondary)
+                    .scaledFont(.caption, monospacedDigit: true).foregroundStyle(.secondary)
                 CopyIconButton(text: memory.value, label: "Copy value")
             }
             ScrollView {

@@ -54,6 +54,10 @@ struct TaskDetail: View {
     @State private var confirmingCancel = false
     @State private var showingResumeSheet = false
     @State private var showingActionError = false
+    /// In-flight resume/cancel calls — the pressed control swaps to a spinner
+    /// so the run's settle reads as busy instead of dead.
+    @State private var resumeInFlight = false
+    @State private var cancelInFlight = false
     /// Whether activity opens on its newest event. Fixed when the task opens: a
     /// run that lands while it is being read would otherwise yank the trace back
     /// to the top under the reader.
@@ -68,6 +72,11 @@ struct TaskDetail: View {
     /// pending re-run when events land mid-compose.
     @State private var composeInFlight = false
     @State private var pendingCompose = false
+    /// Bumped when the pane starts on a new task, so an in-flight compose from
+    /// the previous task is dropped instead of painting its blocks over the new
+    /// task's trace. State, not a plain property: only State storage is shared
+    /// between the view's copies, so the guard reads the current identity.
+    @State private var composeGeneration = 0
     @Environment(\.uiScale) private var uiScale
 
     init(taskId: String, listItem: TaskListItem, store: ProfileStore, setArchived: @escaping (String, Bool) -> Void) {
@@ -115,6 +124,9 @@ struct TaskDetail: View {
                 // and fades when idle, so a long trace gives position feedback
                 // without a permanent rail.
                 .scrollIndicators(.automatic)
+                // The jump pills float over the trace's bottom edge, so content
+                // scrolls clear of them instead of hiding behind the control.
+                .contentMargins(.bottom, 56 * uiScale, for: .scrollContent)
                 .id("\(taskId)-\(section.rawValue)")
                 .transition(.opacity)
                 // Scrolling to a sentinel at the end of the list put the view past the
@@ -221,15 +233,18 @@ struct TaskDetail: View {
     /// than spending the top of every task on ids the reader rarely needs.
     private var header: some View {
         HStack(spacing: 8) {
-            StateMarker(state: state, speaks: !state.wantsLabelBesideName)
+            StateMarker(state: state)
                 .help(state.label)
             Text(resolvedLabel)
                 .scaledFont(.title3, weight: .semibold)
                 .lineLimit(1)
-            if state.wantsLabelBesideName {
-                TaskStateChip(state: state)
-            }
-            TaskMetaChip(text: workerLabel, label: "Worker") {
+                .help(resolvedLabel)
+            // Always present — a chip that appears and vanishes between states
+            // shoves every chip right of it, and the header animates the move.
+            // The label and tint already distinguish settled states, so the
+            // marker no longer needs to speak them on its own.
+            TaskStateChip(state: state)
+            TaskMetaChip(text: workerLabel, label: "Worker", full: workerLabel) {
                 if let provider = worker?.provider {
                     ProviderLogo(provider: provider, size: 10 * uiScale)
                 } else {
@@ -237,7 +252,7 @@ struct TaskDetail: View {
                         .font(.system(size: 9 * uiScale, weight: .medium))
                 }
             }
-            TaskMetaChip(text: resolvedModel, label: "Model") {
+            TaskMetaChip(text: resolvedModel, label: "Model", full: resolvedModel) {
                 Image(systemName: "cpu").font(.system(size: 9 * uiScale, weight: .medium))
             }
             // The reasoning level the run was dispatched with is part of its
@@ -261,11 +276,23 @@ struct TaskDetail: View {
                 )
             }
             if canResume {
-                IconButton(symbol: "arrow.clockwise", label: "Resume task") { resumeAction() }
+                if resumeInFlight {
+                    ProgressView().controlSize(.small)
+                        .frame(width: 24 * uiScale, height: 24 * uiScale)
+                        .help("Resuming task…")
+                } else {
+                    IconButton(symbol: "arrow.clockwise", label: "Resume task") { resumeAction() }
+                }
             }
             if canCancel {
-                IconButton(symbol: "xmark.octagon", label: "Cancel task", tint: AnyShapeStyle(.red)) {
-                    confirmingCancel = true
+                if cancelInFlight {
+                    ProgressView().controlSize(.small)
+                        .frame(width: 24 * uiScale, height: 24 * uiScale)
+                        .help("Cancelling task…")
+                } else {
+                    IconButton(symbol: "xmark.octagon", label: "Cancel task", tint: AnyShapeStyle(.red)) {
+                        confirmingCancel = true
+                    }
                 }
             }
             IconButton(symbol: "folder", label: "Open folder") {
@@ -334,6 +361,8 @@ struct TaskDetail: View {
     }
 
     private func performCancel() async {
+        cancelInFlight = true
+        defer { cancelInFlight = false }
         guard await store.cancelTask(taskId) else {
             showingActionError = true
             return
@@ -341,6 +370,8 @@ struct TaskDetail: View {
     }
 
     private func performResume(instruction: String?) async {
+        resumeInFlight = true
+        defer { resumeInFlight = false }
         guard await store.resumeTask(taskId, instruction: instruction) else {
             showingActionError = true
             return
@@ -401,7 +432,7 @@ struct TaskDetail: View {
             }
             if story.blocks.count > visibleBlockLimit {
                 Text("Showing the newest \(visibleBlockLimit) of \(story.blocks.count) blocks")
-                    .scaledFont(.caption).foregroundStyle(.tertiary)
+                    .scaledFont(.caption, monospacedDigit: true).foregroundStyle(.tertiary)
                     .padding(.bottom, 2)
             }
             LazyVStack(alignment: .leading, spacing: 10) {
@@ -414,11 +445,11 @@ struct TaskDetail: View {
                 if !story.technical.isEmpty {
                     Button(showingTechnicalEvents
                            ? "Hide technical events"
-                           : "Show \(story.technical.count) technical events") {
+                           : "Show \(story.technical.count) technical \(story.technical.count == 1 ? "event" : "events")") {
                         showingTechnicalEvents.toggle()
                     }
                     .buttonStyle(.plain)
-                    .scaledFont(.caption)
+                    .scaledFont(.caption, monospacedDigit: true)
                     .foregroundStyle(.secondary)
                     .padding(.top, 2)
                 }
@@ -641,6 +672,7 @@ struct TaskDetail: View {
         hasEarlier = false
         loadingEarlier = false
         catchUpDone = false
+        composeGeneration += 1
     }
 
     // MARK: - Compose coalescing
@@ -654,20 +686,39 @@ struct TaskDetail: View {
         }
         composeInFlight = true
         let snapshot = events
+        // The pane keeps its identity when the sidebar switches tasks, so a
+        // compose that finishes after the switch must not paint the previous
+        // task's blocks over the new task's trace.
+        let generation = composeGeneration
         Task.detached(priority: .userInitiated) {
             let result = ActivityStory.compose(snapshot)
-            await self.applyComposition(result)
+            await self.applyComposition(result, generation: generation)
         }
     }
 
     @MainActor
-    private func applyComposition(_ comp: ActivityStory.Composition) {
+    private func applyComposition(_ comp: ActivityStory.Composition, generation: Int) {
+        guard generation == composeGeneration else {
+            composeInFlight = false
+            pendingCompose = false
+            return
+        }
         story = comp
         composeInFlight = false
         if pendingCompose {
             pendingCompose = false
             scheduleCompose()
         }
+    }
+}
+
+/// Full date-time for tooltips. EventClock in ActivityStory formats only the
+/// time of day; a full formatter would live next to it, but that file is under
+/// concurrent edit, so the formatting line is mirrored here instead.
+private enum DetailClock {
+    static func dateTime(_ value: String) -> String {
+        guard let date = EventClock.date(value) else { return value }
+        return date.formatted(date: .abbreviated, time: .standard)
     }
 }
 
@@ -699,6 +750,10 @@ private struct ScrollJumpControl: View {
 private struct ResumeSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var instruction = ""
+    @FocusState private var instructionFocused: Bool
+    /// Return can fire both the field's submit and the default-action shortcut;
+    /// the flag keeps a double trigger from resuming twice.
+    @State private var submitted = false
     let onResume: (String?) -> Void
 
     var body: some View {
@@ -707,18 +762,18 @@ private struct ResumeSheet: View {
                 Text("Resume task").font(.title3.weight(.semibold))
                 Spacer()
                 Button("Cancel") { dismiss() }
-                Button("Resume") {
-                    let value = trimmedInstruction
-                    dismiss()
-                    onResume(value)
-                }
-                .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.cancelAction)
+                Button("Resume") { submit() }
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
             }
             .padding(20)
             Divider()
             TextField("Instruction for the worker (optional)", text: $instruction, axis: .vertical)
                 .lineLimit(3...8)
                 .textFieldStyle(.plain)
+                .focused($instructionFocused)
+                .onSubmit(submit)
                 .padding(20)
             Text("The worker sees this at the head of the continued session. Leave it blank to continue as-is.")
                 .scaledFont(.caption)
@@ -728,6 +783,15 @@ private struct ResumeSheet: View {
         }
         .frame(width: 480)
         .background(Surface.content)
+        .onAppear { instructionFocused = true }
+    }
+
+    private func submit() {
+        guard !submitted else { return }
+        submitted = true
+        let value = trimmedInstruction
+        dismiss()
+        onResume(value)
     }
 
     private var trimmedInstruction: String? {
@@ -743,6 +807,7 @@ private struct NeedsInputBanner: View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "questionmark.bubble.fill")
                 .foregroundStyle(.orange)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 3) {
                 Text("Worker needs input").scaledFont(.callout, weight: .semibold)
                 Text(question).scaledFont(.callout).textSelection(.enabled)
@@ -754,6 +819,9 @@ private struct NeedsInputBanner: View {
         }
         .padding(12)
         .background(.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: Radius.small))
+        .onAppear {
+            AccessibilityNotification.Announcement("Task needs input").post()
+        }
     }
 }
 
@@ -830,7 +898,7 @@ private struct ActivityWorkRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
+            HStack(alignment: .center, spacing: 8) {
                 if isQuote {
                     quoteContent
                 } else {
@@ -869,7 +937,7 @@ private struct ActivityWorkRow: View {
                 Text(EventClock.time(event.createdAt))
                     .scaledFont(.caption2, design: .monospaced)
                     .foregroundStyle(.tertiary)
-                    .help(event.createdAt)
+                    .help(DetailClock.dateTime(event.createdAt))
             }
             if let presentation = blockPresentation {
                 TaskEventPresentationView(presentation: presentation)
@@ -978,8 +1046,11 @@ private struct ActivityReasoningRow: View {
     }
 
     private var label: String {
-        var parts = [pulse.detail.replacingOccurrences(of: "~", with: "Reasoned ~")]
-        if let seconds = pulse.seconds { parts.append("\(seconds)s") }
+        // compose() keeps either a counter ("~5.2k tokens") or the prose
+        // fallback "Thinking"; only counters get the prefix, so a counter
+        // without the tilde still reads "Reasoned 5.2k tokens".
+        var parts = [pulse.detail == "Thinking" ? "Thinking" : "Reasoned \(pulse.detail)"]
+        if let seconds = pulse.seconds, seconds > 0 { parts.append(ActivityFormat.duration(seconds * 1000)) }
         return parts.joined(separator: " · ")
     }
 }
@@ -990,7 +1061,7 @@ private struct ActivitySignalCard: View {
     let event: TaskEventSnapshot
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 9) {
+        HStack(alignment: .center, spacing: 9) {
             EventIcon(symbol: symbol, weight: .semibold)
                 .foregroundStyle(tint)
                 .accessibilityHidden(true)
@@ -1005,7 +1076,7 @@ private struct ActivitySignalCard: View {
             Text(EventClock.time(event.createdAt))
                 .scaledFont(.caption2, design: .monospaced)
                 .foregroundStyle(.tertiary)
-                .help(event.createdAt)
+                .help(DetailClock.dateTime(event.createdAt))
         }
         .padding(.vertical, 10)
         .padding(.horizontal, 14)
@@ -1123,7 +1194,7 @@ private struct ActivityReceiptCard: View {
             }
             HStack(alignment: .top, spacing: 0) {
                 ForEach(Array(stats.enumerated()), id: \.offset) { index, stat in
-                    if index > 0 { Divider().frame(maxHeight: 34).padding(.horizontal, 14) }
+                    if index > 0 { Divider().padding(.horizontal, 14) }
                     VStack(alignment: .leading, spacing: 2) {
                         Text(stat.value)
                             .scaledFont(.title3, weight: .semibold, monospacedDigit: true)
@@ -1162,7 +1233,7 @@ private struct ActivityReceiptCard: View {
     private var receiptTimestamp: some View {
         Text(EventClock.time(event.createdAt))
             .scaledFont(.caption2, design: .monospaced).foregroundStyle(.tertiary)
-            .help(event.createdAt)
+            .help(DetailClock.dateTime(event.createdAt))
     }
 
     private var stats: [(value: String, label: String)] {
@@ -1177,7 +1248,7 @@ private struct ActivityReceiptCard: View {
         if thinkingTokens > 0 { values.append(("~\(ActivityFormat.count(thinkingTokens))", "reasoning")) }
         if let input = presentation.tokensIn { values.append((ActivityFormat.count(input), "tokens in")) }
         if let cached = presentation.tokensCached { values.append((ActivityFormat.count(cached), "cached")) }
-        return values.isEmpty ? [(event.detail ?? "—", "summary")] : Array(values.prefix(6))
+        return values.isEmpty ? [(event.detail ?? "—", "summary")] : values
     }
 }
 
@@ -1203,19 +1274,28 @@ struct TaskEventPresentationView: View {
             }
             .textSelection(.enabled)
         case "command":
-            VStack(alignment: .leading, spacing: 3) {
-                Text(presentation.command ?? "Command")
-                    .scaledFont(.caption, design: .monospaced)
-                    .lineLimit(2)
-                    .textSelection(.enabled)
-                if presentation.status != nil || presentation.exitCode != nil || presentation.outcome != nil {
-                    Text([commandStatus, presentation.outcome].compactMap { $0 }
-                        .filter { !$0.isEmpty }.joined(separator: " · "))
-                        .scaledFont(.caption2).foregroundStyle(.secondary)
+            if presentation.command == nil,
+               presentation.status == nil,
+               presentation.exitCode == nil,
+               presentation.outcome == nil {
+                EmptyView()
+            } else {
+                VStack(alignment: .leading, spacing: 3) {
+                    if let command = presentation.command {
+                        Text(command)
+                            .scaledFont(.caption, design: .monospaced)
+                            .lineLimit(2)
+                            .textSelection(.enabled)
+                    }
+                    if presentation.status != nil || presentation.exitCode != nil || presentation.outcome != nil {
+                        Text([commandStatus, presentation.outcome].compactMap { $0 }
+                            .filter { !$0.isEmpty }.joined(separator: " · "))
+                            .scaledFont(.caption2).foregroundStyle(.secondary)
+                    }
                 }
+                .padding(.horizontal, 7).padding(.vertical, 5)
+                .background(Surface.sunken, in: RoundedRectangle(cornerRadius: Radius.small))
             }
-            .padding(.horizontal, 7).padding(.vertical, 5)
-            .background(Surface.sunken, in: RoundedRectangle(cornerRadius: Radius.small))
         case "message":
             Text(presentation.text ?? "")
                 .scaledFont(.caption)
@@ -1231,13 +1311,19 @@ struct TaskEventPresentationView: View {
                 .textSelection(.enabled)
         case "todo":
             HStack(spacing: 8) {
-                ProgressView(
-                    value: Double(presentation.completed ?? 0),
-                    total: Double(max(presentation.total ?? 0, 1))
-                )
-                .frame(width: 72 * uiScale)
-                Text("\(presentation.completed ?? 0) of \(presentation.total ?? 0) complete")
-                    .scaledFont(.caption, monospacedDigit: true).foregroundStyle(.secondary)
+                if let total = presentation.total, total > 0 {
+                    ProgressView(
+                        value: Double(presentation.completed ?? 0),
+                        total: Double(total)
+                    )
+                    .frame(width: 72 * uiScale)
+                    Text("\(presentation.completed ?? 0) of \(total) complete")
+                        .scaledFont(.caption, monospacedDigit: true).foregroundStyle(.secondary)
+                } else {
+                    // No denominator — a full bar with a zero total would lie.
+                    Text(todoSummary)
+                        .scaledFont(.caption, monospacedDigit: true).foregroundStyle(.secondary)
+                }
                 if let active = presentation.text {
                     Text(active).scaledFont(.caption).foregroundStyle(.secondary)
                         .lineLimit(1).truncationMode(.tail)
@@ -1246,6 +1332,11 @@ struct TaskEventPresentationView: View {
         default:
             EmptyView()
         }
+    }
+
+    private var todoSummary: String {
+        let done = presentation.completed ?? 0
+        return done > 0 ? "\(done) done" : "No todo items yet"
     }
 
     private var commandStatus: String {

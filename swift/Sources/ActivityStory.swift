@@ -12,8 +12,9 @@ enum ActivityStory {
     /// Consecutive `Thinking` progress events collapsed to one line. `detail`
     /// is the last event's counter, so the line always shows the final tally
     /// — unless the provider's reasoning events carry prose instead of a
-    /// counter, in which case `detail` falls back to `"Thinking"` and
-    /// `updates`/`seconds` tell the story instead.
+    /// counter, in which case `detail` falls back to `"Thinking"` with the
+    /// run's update count folded in (`"Thinking · 3 updates"`), and `seconds`
+    /// tells the duration instead.
     struct ReasoningPulse: Hashable, Sendable {
         let id: Int
         let detail: String
@@ -54,12 +55,13 @@ enum ActivityStory {
             // last detail would otherwise be a full paragraph of raw reasoning
             // on what is meant to be a single quiet line. Only a detail shaped
             // like a counter (claude's `~5.2k tokens so far`) is safe to show;
-            // anything else falls back to "Thinking" and lets `updates` and
-            // `seconds`, already rendered alongside it, carry the summary.
+            // anything else falls back to "Thinking" — with the run's update
+            // count folded into the line, since nothing else renders it — and
+            // lets `seconds`, already appended alongside, carry the duration.
             let detail = isCounter(rawDetail) ? rawDetail.replacingOccurrences(of: " so far", with: "") : "Thinking"
             let line = ReasoningPulse(
                 id: first.id,
-                detail: detail,
+                detail: detail == "Thinking" && pulse.count > 1 ? "Thinking · \(pulse.count) updates" : detail,
                 updates: pulse.count,
                 seconds: seconds(from: first.createdAt, to: last.createdAt)
             )
@@ -447,21 +449,34 @@ enum EventClock {
 
     static func time(_ value: String) -> String {
         guard let date = date(value) else { return value }
-        return date.formatted(date: .omitted, time: .standard)
+        // The trace reads as a timeline of one day; a timestamp from another
+        // day gets the date back so the story doesn't blur days together.
+        if Calendar.current.isDateInToday(date) {
+            return date.formatted(date: .omitted, time: .standard)
+        }
+        return date.formatted(date: .abbreviated, time: .shortened)
     }
 }
 
 /// Number formatting for receipt stats, matching the broker's compact style.
 enum ActivityFormat {
     static func count(_ value: Int) -> String {
-        if value >= 1_000_000 { return String(format: "%.1fM", Double(value) / 1_000_000) }
-        if value >= 10_000 { return "\(Int((Double(value) / 1_000).rounded()))k" }
-        if value >= 1_000 { return String(format: "%.1fk", Double(value) / 1_000) }
+        // One rule for the whole k bucket: 1,000…999,499 always rounds to a
+        // whole k, so 9,999 → "10k" and 10,000 → "10k" agree instead of the
+        // small bucket printing "10.0k". The M bucket starts where rounding
+        // would otherwise fabricate "1000k": 999,500+ rolls to "1.0M".
+        if value >= 999_500 { return String(format: "%.1fM", Double(value) / 1_000_000) }
+        if value >= 1_000 { return "\(Int((Double(value) / 1_000).rounded()))k" }
         return String(value)
     }
 
     static func cost(_ value: Double) -> String {
-        value >= 0.01 || value == 0 ? String(format: "$%.2f", value) : String(format: "$%.4f", value)
+        // A sub-ten-thousandth of a cent rounds to "$0.0000" at four decimals,
+        // which reads as free. Nothing is free at $0.00005 — "~$0" keeps the
+        // trace honest, and only exactly zero stays "$0.00".
+        if value == 0 { return "$0.00" }
+        if value < 0.0001 { return "~$0" }
+        return value >= 0.01 ? String(format: "$%.2f", value) : String(format: "$%.4f", value)
     }
 
     static func duration(_ ms: Int) -> String {

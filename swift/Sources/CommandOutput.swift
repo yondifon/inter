@@ -87,7 +87,7 @@ struct CommandOutputView: View {
                         SectionLabel(text: stream.isError ? "stderr" : "stdout")
                     }
                     if stream.elided > 0 {
-                        Text("\(stream.elided) earlier lines")
+                        Text(stream.elided == 1 ? "1 earlier line" : "\(stream.elided) earlier lines")
                             .scaledFont(.caption2, design: .monospaced)
                             .foregroundStyle(.tertiary)
                     }

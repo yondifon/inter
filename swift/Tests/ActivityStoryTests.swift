@@ -218,7 +218,9 @@ final class ActivityStoryTests: XCTestCase {
         guard case .reasoning(let pulse) = story.blocks.first, story.blocks.count == 1 else {
             return XCTFail("expected one pulse line, got \(story.blocks)")
         }
-        XCTAssertEqual(pulse.detail, "Thinking")
+        // Prose stays off the line; the update count is meta, not leakage —
+        // it's what makes a long silent think distinguishable from a stall.
+        XCTAssertEqual(pulse.detail, "Thinking · 3 updates")
         XCTAssertEqual(pulse.updates, 3)
         XCTAssertEqual(pulse.seconds, 2)
     }

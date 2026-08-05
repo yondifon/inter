@@ -70,12 +70,20 @@ final class ProfileStore {
         await refresh()
     }
 
-    func delete(_ profile: Profile) async {
+    func delete(_ profile: Profile) async -> Bool {
         let id = profile.id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? profile.id
         var request = URLRequest(url: InterServer.api("profiles/\(id)"))
         request.httpMethod = "DELETE"
-        _ = try? await URLSession.shared.data(for: request)
-        await refresh()
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+                return false
+            }
+            await refresh()
+            return true
+        } catch {
+            return false
+        }
     }
 
     func setArchived(_ id: String, _ archived: Bool) async -> Bool {

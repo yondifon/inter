@@ -26,7 +26,7 @@ struct ContentView: View {
             List(selection: $selection) {
                 Section {
                     if visibleTasks.isEmpty {
-                        Text(showArchivedTasks ? "No archived tasks" : "No tasks yet")
+                        Text(emptyTasksText)
                             .scaledFont(.callout).foregroundStyle(.tertiary)
                     } else {
                         ForEach(taskGroups) { group in
@@ -37,7 +37,7 @@ struct ContentView: View {
                                     collapsed: collapsedGroups.contains(group.id)
                                 ) { toggleCollapse(group.id) }
                                     .padding(.top, 8)
-                                    .help(group.id)
+                                    .help(group.fullTitle ?? group.title ?? group.id)
                             }
                             ForEach(TaskOrganizer.visibleTasks(in: group, collapsed: collapsedGroups)) { task in
                                 TaskRow(
@@ -144,7 +144,7 @@ struct ContentView: View {
             Button("Cancel Task", role: .destructive) {
                 Task { await performCancel(id) }
             }
-            Button("Keep Running", role: .cancel) {}
+            Button("Don’t Cancel", role: .cancel) {}
         } message: { _ in
             Text("This stops the worker’s process tree. The task can be resumed later.")
         }
@@ -162,6 +162,15 @@ struct ContentView: View {
 
     private var activeProjectName: String? {
         TaskOrganizer.activeProjectName(tasks: visibleTasks, project: projectFilter.isEmpty ? nil : projectFilter)
+    }
+
+    /// The filter can outlive its project's rows — an empty filtered list is
+    /// still a filtered list, so the empty state says whose rows are missing.
+    private var emptyTasksText: String {
+        guard projectFilter.isEmpty else {
+            return showArchivedTasks ? "No archived tasks in this project" : "No tasks in this project"
+        }
+        return showArchivedTasks ? "No archived tasks" : "No tasks yet"
     }
 
     private var grouping: TaskGrouping { TaskGrouping(rawValue: groupingRaw) ?? .parent }
@@ -257,6 +266,8 @@ struct ContentView: View {
                   : "line.3.horizontal.decrease")
                 .scaledFont(.caption2, weight: .semibold)
                 .foregroundStyle(isFiltering ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary))
+                .frame(width: 24 * uiScale, height: 24 * uiScale)
+                .contentShape(Rectangle())
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
@@ -265,7 +276,7 @@ struct ContentView: View {
         .accessibilityLabel("Filter and group tasks by project")
     }
 
-    private var isFiltering: Bool { activeProjectName != nil || grouping != .parent }
+    private var isFiltering: Bool { !projectFilter.isEmpty || grouping != .parent }
 
     /// Broker health is app-wide, so it sits at the foot of the sidebar instead of
     /// the toolbar, where it landed on the detail side of the divider and read as
@@ -288,7 +299,7 @@ struct ContentView: View {
     }
 
     private var statusText: String {
-        switch broker.status { case .running: "Broker online"; case .starting: "Starting…"; case .stopped: "Broker offline" }
+        switch broker.status { case .running: "Broker running"; case .starting: "Starting…"; case .stopped: "Broker offline" }
     }
     private var statusColor: Color {
         switch broker.status { case .running: .green; case .starting: .orange; case .stopped: .red }
@@ -360,7 +371,7 @@ private struct TaskRow: View {
             }
         }
         .padding(.vertical, 5)
-        .help(task.hoverText)
+        .help(helpText)
         .accessibilityLabel("\(title). \(state.label). \(worker), \(task.model).")
     }
 
@@ -376,6 +387,12 @@ private struct TaskRow: View {
             : [worker, task.shortModel]
         return parts.joined(separator: " · ")
     }
+
+    /// The row clips the meta line to one line, so the hover carries it whole —
+    /// a long model name is otherwise unrecoverable.
+    private var helpText: String {
+        "\(task.hoverText)\n\n\(meta)"
+    }
     private var title: String {
         task.displayLabel
     }
@@ -390,12 +407,14 @@ private struct InstallResultsView: View {
             HStack {
                 Text("Global MCP install").font(.title3.weight(.semibold))
                 Spacer()
-                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+                    .keyboardShortcut(.cancelAction)
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     ForEach(Array(results.enumerated()), id: \.offset) { _, result in
-                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        HStack(alignment: .center, spacing: 8) {
                             Image(systemName: result.success ? "checkmark.circle.fill" : "xmark.circle.fill")
                                 .foregroundStyle(result.success ? .green : .red)
                                 .accessibilityHidden(true)

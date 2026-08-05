@@ -14,7 +14,7 @@ struct SettingsView: View {
     @State private var selection: SettingsSelection?
     @State private var editing: Profile?
     @State private var adding = false
-    @State private var workersExpanded = true
+    @AppStorage("settingsWorkersExpanded") private var workersExpanded = true
 
     var body: some View {
         NavigationSplitView {
@@ -135,14 +135,16 @@ struct AboutPage: View {
                         .foregroundStyle(.secondary)
                 }
             } else {
-                ProgressView().controlSize(.small)
+                ProgressView("Checking broker…").controlSize(.small)
             }
 
             Spacer()
         }
         .padding(32)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .task { await fetch() }
+        // Re-run when the broker state settles, so a start that outlived the
+        // one-shot fetch still reconciles to "Broker running".
+        .task(id: broker.status) { await fetch() }
     }
 
     private var appVersion: String {
@@ -168,6 +170,7 @@ private struct ProfileDetail: View {
     let edit: () -> Void
 
     @State private var confirmingDelete = false
+    @State private var deleteFailed = false
     @Environment(\.uiScale) private var uiScale
 
     var body: some View {
@@ -188,6 +191,8 @@ private struct ProfileDetail: View {
                         Button("Delete Worker…", role: .destructive) { confirmingDelete = true }
                     } label: {
                         Image(systemName: "ellipsis")
+                            .frame(width: 24 * uiScale, height: 24 * uiScale)
+                            .contentShape(Rectangle())
                     }
                     .menuStyle(.borderlessButton)
                     .menuIndicator(.hidden)
@@ -229,10 +234,17 @@ private struct ProfileDetail: View {
         .formStyle(.grouped)
         .scrollIndicators(.never)
         .confirmationDialog("Delete “\(profile.label)”?", isPresented: $confirmingDelete) {
-            Button("Delete", role: .destructive) { Task { await store.delete(profile) } }
+            Button("Delete", role: .destructive) {
+                Task {
+                    if !(await store.delete(profile)) { deleteFailed = true }
+                }
+            }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Delegated tasks can no longer use this worker. This can’t be undone.")
+        }
+        .alert("Couldn’t delete worker.", isPresented: $deleteFailed) {
+            Button("OK", role: .cancel) {}
         }
     }
 }
@@ -242,19 +254,15 @@ private struct EnvironmentRow: View {
     let value: String
     @State private var revealed = false
 
-    private var isSecret: Bool {
-        ["TOKEN", "KEY", "SECRET", "PASSWORD", "CREDENTIAL"].contains { key.uppercased().contains($0) }
-    }
-
     var body: some View {
         LabeledContent {
             HStack(spacing: 8) {
-                Text(isSecret && !revealed ? String(repeating: "•", count: 10) : value)
+                Text(isSecretEnvKey(key) && !revealed ? String(repeating: "•", count: 10) : value)
                     .scaledFont(.body, design: .monospaced)
                     .textSelection(.enabled)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                if isSecret {
+                if isSecretEnvKey(key) {
                     IconButton(
                         symbol: revealed ? "eye.slash" : "eye",
                         label: revealed ? "Hide value" : "Reveal value"
@@ -296,22 +304,33 @@ private struct EnabledToggle: View {
     let profile: Profile
     let store: ProfileStore
     @State private var saveFailed = false
+    // Mirrors the intended value until the ~2s poll confirms it, so the toggle
+    // does not snap back while the save is in flight.
+    @State private var pendingEnabled: Bool?
 
     var body: some View {
         Toggle("Enabled", isOn: Binding(
-            get: { profile.enabled },
+            get: { pendingEnabled ?? profile.enabled },
             set: { value in
+                pendingEnabled = value
                 var changed = profile
                 changed.enabled = value
                 Task {
-                    do { try await store.save(changed, isNew: false) } catch { saveFailed = true }
+                    do { try await store.save(changed, isNew: false) } catch {
+                        pendingEnabled = nil
+                        saveFailed = true
+                    }
                 }
             }
         ))
         .toggleStyle(.switch)
         .labelsHidden()
         .accessibilityLabel("Enabled")
-        .help(profile.enabled ? "Accepts delegated tasks" : "Hidden from delegate")
+        .help(profile.enabled ? "Accepts delegated tasks" : "Doesn't accept delegated tasks")
+        // The poll caught up — the mirror can drop.
+        .onChange(of: profile.enabled) { _, newValue in
+            if newValue == pendingEnabled { pendingEnabled = nil }
+        }
         .alert("Couldn’t change worker state.", isPresented: $saveFailed) {
             Button("OK", role: .cancel) {}
         }

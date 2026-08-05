@@ -294,6 +294,12 @@ struct PulsingDot: View {
 
 // MARK: - Controls
 
+/// Env keys that name credentials (TOKEN, KEY, SECRET, …) render masked
+/// wherever they are edited or displayed. The name decides, not the value.
+func isSecretEnvKey(_ key: String) -> Bool {
+    ["TOKEN", "KEY", "SECRET", "PASSWORD", "CREDENTIAL"].contains { key.uppercased().contains($0) }
+}
+
 /// Icon-only control with a real hit target and a real accessibility name.
 /// `.help` is a tooltip, not a label, so both are set here.
 struct IconButton: View {
@@ -393,6 +399,7 @@ struct CopyIconButton: View {
     var symbol: String = "doc.on.doc"
 
     @State private var copied = false
+    @State private var resetTask: Task<Void, Never>?
 
     var body: some View {
         IconButton(
@@ -403,8 +410,12 @@ struct CopyIconButton: View {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(text, forType: .string)
             withAnimation(.easeOut(duration: 0.15)) { copied = true }
-            Task {
+            // Each click replaces the pending reset, so a rapid second copy
+            // keeps “Copied” up for its own full beat.
+            resetTask?.cancel()
+            resetTask = Task {
                 try? await Task.sleep(for: .seconds(1.2))
+                guard !Task.isCancelled else { return }
                 withAnimation(.easeOut(duration: 0.15)) { copied = false }
             }
         }

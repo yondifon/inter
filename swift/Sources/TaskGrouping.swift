@@ -22,7 +22,7 @@ enum TaskGrouping: String, CaseIterable, Identifiable {
         case .parent: "Parent task"
         case .project: "Project"
         case .status: "Status"
-        case .none: "Nothing"
+        case .none: "None"
         }
     }
 }
@@ -32,6 +32,9 @@ struct TaskGroup: Identifiable {
     let id: String
     let title: String?
     let tasks: [TaskListItem]
+    /// Untruncated form of `title`, for the header tooltip. A heading clipped
+    /// at the sidebar limit would otherwise lose the rest of the sentence.
+    var fullTitle: String? = nil
 }
 
 /// Collapse state for the sidebar's task groups, kept per grouping mode because
@@ -165,7 +168,9 @@ enum TaskOrganizer {
         }
         return groups.map { group in
             let solo = group.tasks.count == 1 && group.tasks[0].parentTaskId == nil
-            return solo ? TaskGroup(id: group.id, title: nil, tasks: group.tasks) : group
+            if solo { return TaskGroup(id: group.id, title: nil, tasks: group.tasks) }
+            let root = self.root(of: group.tasks[0], in: byID)
+            return TaskGroup(id: group.id, title: group.title, tasks: group.tasks, fullTitle: Self.fullHeading(for: root))
         }
     }
 
@@ -236,10 +241,14 @@ enum TaskOrganizer {
         return []
     }
 
+    /// First line of a label, trimmed — the heading before the length cap.
+    private static func headingText(_ label: String) -> String {
+        label.components(separatedBy: .newlines).first?.trimmingCharacters(in: .whitespaces) ?? label
+    }
+
     /// First line of a prompt, short enough for a 260pt sidebar heading.
     static func heading(_ prompt: String) -> String {
-        let line = prompt.components(separatedBy: .newlines).first?
-            .trimmingCharacters(in: .whitespaces) ?? prompt
+        let line = headingText(prompt)
         guard line.count > headingLimit else { return line }
         return "\(line.prefix(headingLimit - 1))…"
     }
@@ -248,6 +257,11 @@ enum TaskOrganizer {
     /// it has one, otherwise the prompt's first line.
     static func heading(for task: TaskListItem) -> String {
         heading(task.displayLabel)
+    }
+
+    /// The heading without the length cap, for the header's tooltip.
+    static func fullHeading(for task: TaskListItem) -> String {
+        headingText(task.displayLabel)
     }
 
     /// Keeps keyboard and reading flow after a row leaves the sidebar. Prefer the

@@ -55,14 +55,29 @@ final class BrokerManager {
         Task {
             for _ in 0..<20 {
                 try? await Task.sleep(for: .milliseconds(350))
-                if let url = URL(string: "\(InterServer.baseURL)/health"),
-                   (try? await URLSession.shared.data(from: url)) != nil {
+                if await healthReachable() {
+                    status = .running
+                    return
+                }
+            }
+            // A slow broker start can outlast the fast window. While the process
+            // is still alive, keep probing on a slower cadence instead of giving
+            // up — the indicator must not stay red while everything works. If the
+            // process dies, the termination handler flips `.stopped` itself.
+            while process?.isRunning == true {
+                try? await Task.sleep(for: .seconds(2))
+                if await healthReachable() {
                     status = .running
                     return
                 }
             }
             status = .stopped
         }
+    }
+
+    private func healthReachable() async -> Bool {
+        guard let url = URL(string: "\(InterServer.baseURL)/health") else { return false }
+        return (try? await URLSession.shared.data(from: url)) != nil
     }
 
     func fetchHealth() async -> BrokerHealth? {

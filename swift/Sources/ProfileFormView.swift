@@ -13,6 +13,7 @@ struct ProfileFormView: View {
     @State private var profile: Profile
     @State private var envRows: [EnvRow]
     @State private var saveError: String?
+    @FocusState private var nameFocused: Bool
 
     init(store: ProfileStore, profile: Profile? = nil) {
         self.store = store
@@ -27,14 +28,19 @@ struct ProfileFormView: View {
             HStack {
                 Text(original == nil ? "Add worker" : "Edit worker").font(.title3.weight(.semibold))
                 Spacer()
-                Button("Cancel") { dismiss() }
-                Button("Save") { save() }.buttonStyle(.borderedProminent).disabled(!valid)
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Save") { save() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!valid)
+                    .keyboardShortcut(.defaultAction)
             }
             .padding(20)
 
             Form {
                 Section("Worker") {
                     TextField("Name", text: $profile.label)
+                        .focused($nameFocused)
+                        .onSubmit { if valid { save() } }
                     Picker("CLI", selection: $profile.provider) {
                         ForEach(Provider.allCases) { Text($0.label).tag($0) }
                     }
@@ -51,7 +57,12 @@ struct ProfileFormView: View {
                     ForEach($envRows) { $row in
                         HStack {
                             TextField("ENV_NAME", text: $row.key).font(.system(.body, design: .monospaced))
-                            TextField("Value or path", text: $row.value).font(.system(.body, design: .monospaced))
+                            if isSecretEnvKey(row.key) {
+                                SecureField("Value or path", text: $row.value)
+                                    .font(.system(.body, design: .monospaced))
+                            } else {
+                                TextField("Value or path", text: $row.value).font(.system(.body, design: .monospaced))
+                            }
                             IconButton(symbol: "minus.circle", label: "Remove \(row.key.isEmpty ? "variable" : row.key)") {
                                 envRows.removeAll { $0.id == row.id }
                             }
@@ -71,6 +82,7 @@ struct ProfileFormView: View {
         .scrollIndicators(.never)
         }
         .frame(width: 560, height: 540)
+        .onAppear { nameFocused = true }
     }
 
     private var valid: Bool {
@@ -81,6 +93,7 @@ struct ProfileFormView: View {
     }
 
     private func save() {
+        guard valid else { return }
         profile.env = Dictionary(uniqueKeysWithValues: envRows
             .filter { !$0.key.trimmingCharacters(in: .whitespaces).isEmpty }
             .map { ($0.key.trimmingCharacters(in: .whitespaces), $0.value) })
