@@ -115,12 +115,11 @@ enum ToolIcon {
 /// their font and differ in intrinsic proportions, so the same font size
 /// still draws a `brain` larger than a `terminal`; a fixed frame with the
 /// symbol scaled to fit and centered is what actually pins them to one
-/// visual size. The box edge is the size the trace's signal marks and the
-/// MCP fallback glyph (callout, 12 pt) already read at, plus a little room
-/// so tall glyphs like `text.book.closed` shrink into the box instead of
-/// stretching the row. Sits here rather than in DesignSystem.swift beside
-/// `IconButton` because that file is under concurrent edit; it can move
-/// there once that settles.
+/// visual size. The box edge is the size the MCP fallback glyph (callout,
+/// 12 pt) already reads at, plus a little room so tall glyphs like
+/// `text.book.closed` shrink into the box instead of stretching the row.
+/// Sits here rather than in DesignSystem.swift beside `IconButton` because
+/// that file is under concurrent edit; it can move there once that settles.
 struct EventIcon: View {
     /// Box edge, in points at uiScale 1.
     static let box: CGFloat = 14

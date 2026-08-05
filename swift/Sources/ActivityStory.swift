@@ -325,9 +325,12 @@ enum ActivityStory {
 
     /// Bookkeeping the run states elsewhere: the worker and its session are named
     /// in the header, and archiving is something the reader did, not the worker.
+    /// Starting or resuming a session is the same class of fact — it says the
+    /// machinery is alive, not that the machinery did anything.
     private static let bookkeeping: Set<String> = [
         "Task queued", "Worker started", "Worker spawned", "Task completed",
-        "Session Captured", "Archived", "Handoff brief built",
+        "Session started", "Session Reused", "Session Captured", "Archived",
+        "Handoff brief built",
     ]
 
     private static func isTechnical(_ event: TaskEventSnapshot) -> Bool {
@@ -477,6 +480,15 @@ enum ActivityFormat {
         if value == 0 { return "$0.00" }
         if value < 0.0001 { return "~$0" }
         return value >= 0.01 ? String(format: "$%.2f", value) : String(format: "$%.4f", value)
+    }
+
+    /// Byte counts a truncated payload value carries — kept alongside
+    /// count, cost, and duration rather than in the file that reads them, so
+    /// every number in the trace is rounded by one shared rule.
+    static func bytes(_ value: Int) -> String {
+        if value >= 1_024 * 1_024 { return String(format: "%.1f MB", Double(value) / (1_024 * 1_024)) }
+        if value >= 1_024 { return "\(Int((Double(value) / 1_024).rounded())) KB" }
+        return "\(value) B"
     }
 
     static func duration(_ ms: Int) -> String {

@@ -52,6 +52,7 @@ import { mcpWaitBlockMs } from "./mcp-wait";
 import { loadRoutingPolicy } from "./routing-policy";
 import { runWatch, watchCommand } from "./watch";
 import { runInflight } from "./inflight";
+import { runCleanup, scheduledCleanupDays, startScheduledCleanup } from "./cleanup";
 import { helpText, isHelpRequest, unknownCommandMessage } from "./cli-help";
 import { startEventSocket } from "./event-socket";
 import { BUILD_STAMP, MCP_CONTRACT_VERSION, VERSION } from "./version";
@@ -487,6 +488,12 @@ export function startBroker() {
   if (eventSocket.path) {
     console.log(`event socket bound: ${eventSocket.path}`);
   }
+
+  // Off unless INTER_CLEANUP_DAYS names a retention. Nothing is deleted on a
+  // default install, and the broker's own store handle does the work so the
+  // pass can never open a second writer against the live database.
+  const cleanupDays = scheduledCleanupDays();
+  if (cleanupDays !== undefined) startScheduledCleanup(stateStore(), cleanupDays);
 
   if (process.argv.includes("--stdio")) {
     serveStdio(() => createMcpServer());
@@ -956,9 +963,9 @@ function archiveFilter(value: string | null): "active" | "only" | "include" {
  * Runs one command and reports the exit code, or `undefined` when the process
  * should stay up because the broker is now serving.
  *
- * `watch` and `inflight` never touch the port: both read the same SQLite store
- * the broker writes, so a caller holding a task id still gets an answer when
- * nothing is listening. `version` reads the build off disk rather than off the
+ * `watch`, `inflight` and `cleanup` never touch the port: all three go straight
+ * to the same SQLite store the broker writes, so a caller holding a task id
+ * still gets an answer when nothing is listening. `version` reads the build off disk rather than off the
  * port, which is the comparison `make install` makes before calling an install
  * done. `--stdio` is a flag MCP client configs pass, not a command.
  */
@@ -966,6 +973,7 @@ async function runCli(argv: readonly string[]): Promise<number | undefined> {
   const command = argv[0];
   if (command === "watch") return runWatch(argv.slice(1));
   if (command === "inflight") return runInflight();
+  if (command === "cleanup") return runCleanup(argv.slice(1));
   if (command === "version") {
     console.log(JSON.stringify(healthReport));
     return 0;

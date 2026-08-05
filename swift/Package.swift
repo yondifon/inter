@@ -6,7 +6,7 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [.executable(name: "Inter", targets: ["Inter"])],
     targets: [
-        .executableTarget(name: "Inter", path: "Sources"),
+        .executableTarget(name: "Inter", path: "Sources", resources: [.copy("Resources/Fonts")]),
         .testTarget(name: "InterTests", dependencies: ["Inter"], path: "Tests"),
     ]
 )

@@ -2,23 +2,16 @@ import AppKit
 import Foundation
 import SwiftUI
 
+/// Declaration order is the tab strip's order: activity leads because it is
+/// where a run is read, and the prompt and the answer sit behind it.
 enum TaskDetailSection: String, CaseIterable, Identifiable {
+    case activity
     case request
     case response
-    case activity
 
     var id: Self { self }
 
-    /// Three silhouettes that stay apart with no word under them: what was sent,
-    /// what came back, what happened. All outline, all the same stroke weight.
-    var symbol: String {
-        switch self {
-        case .request: "paperplane"
-        case .response: "text.bubble"
-        case .activity: "list.bullet"
-        }
-    }
-
+    /// The tab strip's visible name for the section.
     var label: String {
         switch self {
         case .request: "Request"
@@ -127,8 +120,12 @@ struct TaskDetail: View {
                 // The jump pills float over the trace's bottom edge, so content
                 // scrolls clear of them instead of hiding behind the control.
                 .contentMargins(.bottom, 56 * uiScale, for: .scrollContent)
+                // A new section gets a new scroll view, so it opens at its own
+                // anchor instead of the previous section's offset. The swap stays
+                // unanimated: a cross-fade holds both sections on screen at their
+                // own offsets, and the outgoing one's trailing text lands over the
+                // incoming one's content.
                 .id("\(taskId)-\(section.rawValue)")
-                .transition(.opacity)
                 // Scrolling to a sentinel at the end of the list put the view past the
                 // content whenever the rows under it had not been measured yet — the
                 // panel opened blank, and nothing re-clamped it. The anchor asks for
@@ -238,7 +235,7 @@ struct TaskDetail: View {
             StateMarker(state: state, speaks: true)
                 .help(state.label)
             Text(resolvedLabel)
-                .scaledFont(.title3, weight: .semibold)
+                .scaledFont(.body, weight: .semibold)
                 .lineLimit(1)
                 .help(resolvedLabel)
             // No state chip: the marker beside the title already carries the
@@ -247,26 +244,26 @@ struct TaskDetail: View {
             // shoved every chip right of it.
             TaskMetaChip(text: workerLabel, label: "Worker", full: workerLabel) {
                 if let provider = worker?.provider {
-                    ProviderLogo(provider: provider, size: 10 * uiScale)
+                    ProviderLogo(provider: provider, size: 9 * uiScale)
                 } else {
                     Image(systemName: "person.crop.circle")
-                        .font(.system(size: 9 * uiScale, weight: .medium))
+                        .font(.system(size: 8 * uiScale, weight: .medium))
                 }
             }
             TaskMetaChip(text: resolvedModel, label: "Model", full: resolvedModel) {
-                Image(systemName: "cpu").font(.system(size: 9 * uiScale, weight: .medium))
+                Image(systemName: "cpu").font(.system(size: 8 * uiScale, weight: .medium))
             }
             // The reasoning level the run was dispatched with is part of its
             // identity like the model, and absent when the caller set none.
             if let effort = task?.effort, !effort.isEmpty {
                 TaskMetaChip(text: effort, label: "Effort") {
-                    Image(systemName: "brain").font(.system(size: 9 * uiScale, weight: .medium))
+                    Image(systemName: "brain").font(.system(size: 8 * uiScale, weight: .medium))
                 }
             }
             // Where a run touched files is part of its identity, not a detail: two
             // tasks with the same worker, model and prompt differ only by folder.
             TaskMetaChip(text: resolvedDisplayPath, label: "Folder", full: resolvedCwd, maxChars: 28) {
-                Image(systemName: "folder").font(.system(size: 9 * uiScale, weight: .medium))
+                Image(systemName: "folder").font(.system(size: 8 * uiScale, weight: .medium))
             }
             Spacer(minLength: 8)
             if let resumeCommand {
@@ -275,6 +272,7 @@ struct TaskDetail: View {
                     label: "Copy resume command — \(resumeCommand)",
                     symbol: "doc.on.clipboard"
                 )
+                .font(.system(size: 14 * uiScale))
             }
             if canResume {
                 if resumeInFlight {
@@ -283,6 +281,7 @@ struct TaskDetail: View {
                         .help("Resuming task…")
                 } else {
                     IconButton(symbol: "arrow.clockwise", label: "Resume task") { resumeAction() }
+                        .font(.system(size: 14 * uiScale))
                 }
             }
             if canCancel {
@@ -294,20 +293,24 @@ struct TaskDetail: View {
                     IconButton(symbol: "xmark.octagon", label: "Cancel task", tint: AnyShapeStyle(.red)) {
                         confirmingCancel = true
                     }
+                    .font(.system(size: 14 * uiScale))
                 }
             }
             IconButton(symbol: "folder", label: "Open folder") {
                 NSWorkspace.shared.open(URL(fileURLWithPath: resolvedCwd))
             }
+            .font(.system(size: 14 * uiScale))
             IconButton(
                 symbol: resolvedArchivedAt == nil ? "archivebox" : "arrow.uturn.backward",
                 label: resolvedArchivedAt == nil ? "Archive task" : "Restore task"
             ) {
                 setArchived(taskId, resolvedArchivedAt == nil)
             }
+            .font(.system(size: 14 * uiScale))
             IconButton(symbol: "ellipsis", label: "Run details", rotation: .degrees(90)) {
                 showingRunFacts.toggle()
             }
+            .font(.system(size: 14 * uiScale))
             .popover(isPresented: $showingRunFacts, arrowEdge: .bottom) { runFactsPopover }
         }
     }
@@ -380,7 +383,11 @@ struct TaskDetail: View {
     }
 
     @ViewBuilder private var eventContent: some View {
-        if loading {
+        // The branch below renders `story`, but events land before the compose
+        // that turns them into blocks does. Until the first composition arrives
+        // the trace has nothing to draw, so the wait belongs with the spinner —
+        // not in the branch that assumes composed blocks exist.
+        if loading || awaitingFirstComposition {
             TaskPanel {
                 HStack { ProgressView().controlSize(.small); Text("Loading trace…").foregroundStyle(.secondary) }
                     .frame(minHeight: 56)
@@ -467,6 +474,13 @@ struct TaskDetail: View {
     /// what the user can scroll to (LazyVStack renders on demand).
     private var displayedBlocks: [ActivityBlock] {
         Array(story.blocks.suffix(visibleBlockLimit))
+    }
+
+    /// Events are in hand but the composition that renders them is not. A run
+    /// whose events all compose away to nothing is not waiting — it has its
+    /// answer, and an empty story is that answer.
+    private var awaitingFirstComposition: Bool {
+        composeInFlight && !events.isEmpty && story.blocks.isEmpty && story.technical.isEmpty
     }
 
     /// Zero-height anchor at the content's edge, the jump control's target. A
@@ -808,9 +822,6 @@ private struct NeedsInputBanner: View {
         HStack(alignment: .top, spacing: 10) {
             AccentRule(color: .orange)
                 .accessibilityHidden(true)
-            Image(systemName: "questionmark.bubble.fill")
-                .foregroundStyle(.orange)
-                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 3) {
                 Text("Worker needs input").scaledFont(.callout, weight: .semibold)
                 Text(question).scaledFont(.callout).textSelection(.enabled)
@@ -909,25 +920,22 @@ private struct ActivityWorkRow: View {
                 } else {
                     // The verb is a label and the subject — a path, a
                     // command — is the content a reader scans for, so the
-                    // two never look alike: the verb is semibold secondary
-                    // in the system face, the subject regular primary in
-                    // mono. Failure still needs to read at a glance, so it
-                    // keeps the same red the glyph used to carry.
+                    // two never look alike: the verb sits a rung below body
+                    // text at medium weight and secondary color, the subject
+                    // regular primary in mono. Failure still needs to read
+                    // at a glance, so both the verb and an unrecognized
+                    // title stay the same red.
                     if let verb = verb {
                         Text(verb)
-                            .scaledFont(.callout, weight: .semibold)
+                            .scaledFont(.callout, weight: .regular)
                             .foregroundStyle(event.phase == "failed" ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
                             .lineLimit(1)
                             .layoutPriority(1)
-                    } else if let symbolName = ToolIcon.symbolName(for: event) {
-                        EventIcon(symbol: symbolName, weight: .semibold)
-                            .foregroundStyle(event.phase == "failed" ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
-                            .layoutPriority(1)
-                            .help(event.title)
-                            .accessibilityLabel(event.title)
                     } else {
-                        // An unrecognized title keeps itself as the row's
-                        // name — never an invented verb.
+                        // An unrecognized title keeps itself as the row name
+                        // — never an invented verb, and never a glyph in its
+                        // place: an MCP call title is the only thing that
+                        // says which tool ran.
                         Text(event.title)
                             .scaledFont(.callout, weight: .medium, design: .monospaced)
                             .foregroundStyle(event.phase == "failed" ? AnyShapeStyle(.red) : AnyShapeStyle(.primary))
@@ -1070,16 +1078,15 @@ private struct ActivityReasoningRow: View {
 
 /// Retries, rate limits, stalls, questions, and broker failures read as a
 /// tinted 2pt rule on the page's edge plus the line itself — color stays a
-/// hairline here, never a filled strip.
+/// hairline here, never a filled strip. A glyph beside the rule would say the
+/// same thing a third time: the rule's tint already marks severity, and the
+/// title already names what happened.
 private struct ActivitySignalCard: View {
     let event: TaskEventSnapshot
 
     var body: some View {
         HStack(alignment: .center, spacing: 9) {
             AccentRule(color: tint)
-                .accessibilityHidden(true)
-            EventIcon(symbol: symbol, weight: .semibold)
-                .foregroundStyle(tint)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(event.title).scaledFont(.callout, weight: .medium)
@@ -1108,16 +1115,6 @@ private struct ActivitySignalCard: View {
         case "error": .red
         case "info": .secondary
         default: .orange
-        }
-    }
-
-    private var symbol: String {
-        switch event.title {
-        case "Worker needs input": "questionmark.bubble"
-        case "Rate limit": "hourglass"
-        case "API retry": "arrow.clockwise"
-        case "Heartbeat": "zzz"
-        default: "exclamationmark.triangle"
         }
     }
 }
@@ -1219,7 +1216,7 @@ private struct ActivityReceiptCard: View {
                 }
             }
             if let warning = event.presentation?.text {
-                Label(warning, systemImage: "hand.raised")
+                Text(warning)
                     .scaledFont(.caption, weight: .medium)
                     .foregroundStyle(.orange)
             }
@@ -1411,77 +1408,82 @@ private struct TaskMetaChip<Icon: View>: View {
     }
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 3 * uiScale) {
             icon
             Text(displayText)
                 .scaledFont(.caption2, design: .monospaced)
                 .lineLimit(1)
         }
         .foregroundStyle(.secondary)
-        .padding(.horizontal, 7 * uiScale)
-        .padding(.vertical, 3 * uiScale)
-        .background(Surface.sunken, in: Capsule())
+        // The text is already on the ladder's bottom rung, so the chip's size is
+        // set by what surrounds it: padding, the gap, and the icon.
+        .padding(.horizontal, 5 * uiScale)
+        .padding(.vertical, 2 * uiScale)
+        .background(Surface.sunken, in: RoundedRectangle(cornerRadius: Radius.small))
         .help(full.map { "\(label) — \($0)" } ?? label)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(label): \(full ?? text)")
     }
 }
 
-/// Icon per tab, one lifted pill for the current section. Three sections is few
-/// enough to learn by glyph; the name lives on as the tooltip and the VoiceOver
-/// label, so nothing is lost by dropping the word.
+/// Named tabs under a sliding rule. Three sections is few enough to spell out,
+/// and a word is read where an outline glyph this small has to be learned first.
+/// No well and no filled pill: the current section is the one at full strength
+/// with the rule under it, so the strip reads as a line of text rather than a
+/// third box in a header that already has two.
 private struct TaskSectionTabs: View {
     @Binding var selection: TaskDetailSection
     let hasError: Bool
-    @Namespace private var pillNamespace
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.uiScale) private var uiScale
 
     var body: some View {
-        HStack(spacing: 2 * uiScale) {
+        HStack(spacing: 14 * uiScale) {
             ForEach(TaskDetailSection.allCases) { section in
                 tab(section)
             }
         }
-        .padding(2 * uiScale)
-        .background(Surface.sunken, in: RoundedRectangle(cornerRadius: Radius.medium))
+        // Scoped to the strip: an animation wide enough to reach the section's
+        // content would cross-fade two scroll views over each other.
         .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 1), value: selection)
     }
 
     private func tab(_ section: TaskDetailSection) -> some View {
         let selected = section == selection
         return Button {
-            withAnimation(.easeOut(duration: 0.2)) { selection = section }
+            selection = section
         } label: {
-            Image(systemName: symbol(section))
-                .font(.system(size: 11 * uiScale, weight: .regular))
-                .foregroundStyle(tint(section))
-                .frame(width: 32 * uiScale, height: 24 * uiScale)
-                .background {
-                    if selected {
-                        RoundedRectangle(cornerRadius: Radius.small)
-                            .fill(Surface.panel)
-                            .matchedGeometryEffect(id: "sectionPill", in: pillNamespace)
-                    }
+            HStack(spacing: 4 * uiScale) {
+                if hasError, section == .response {
+                    Image(systemName: TaskState.failed.symbol)
+                        .font(.system(size: 9 * uiScale, weight: .semibold))
                 }
-                .contentShape(.rect)
+                // Weight carries the selection, and the hidden bold copy under
+                // it reserves the wider of the two widths — so the strip holds
+                // still instead of shifting sideways as the weight changes.
+                Text(label(section))
+                    .scaledFont(.footnote, weight: .semibold)
+                    .hidden()
+                    .overlay {
+                        Text(label(section))
+                            .scaledFont(.footnote, weight: selected ? .semibold : .regular)
+                    }
+            }
+            .foregroundStyle(tint(section))
+            .padding(.vertical, 4 * uiScale)
+            .contentShape(.rect)
         }
         .buttonStyle(.plain)
-        .help(label(section))
         .accessibilityLabel(label(section))
         .accessibilityAddTraits(selected ? [.isSelected] : [])
-    }
-
-    private func symbol(_ section: TaskDetailSection) -> String {
-        hasError && section == .response ? TaskState.failed.symbol : section.symbol
     }
 
     private func label(_ section: TaskDetailSection) -> String {
         hasError && section == .response ? "Error" : section.label
     }
 
-    /// The error tab is the one place a tab earns color; its glyph changes too, and
-    /// the tooltip and VoiceOver label both read "Error".
+    /// The error tab is the one place a tab earns color, and it keeps a glyph
+    /// beside the word so the signal survives without it.
     private func tint(_ section: TaskDetailSection) -> AnyShapeStyle {
         hasError && section == .response
             ? AnyShapeStyle(TaskState.failed.tint)

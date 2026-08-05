@@ -25,7 +25,7 @@ struct ProjectMemoryView: View {
                 ContentUnavailableView(
                     "No memories",
                     systemImage: "brain",
-                    description: Text("Nothing has been stored for this project yet.")
+                    description: Text("A memory lands here when an agent stores one. Nothing sits here until then.")
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if visible.isEmpty {
@@ -100,6 +100,7 @@ struct ProjectMemoryView: View {
             .width(min: 60 * uiScale, ideal: 70 * uiScale)
         }
         .scrollIndicators(.never)
+        .background(TableRowBackgroundHider())
     }
 
     private func valuePanel(_ memory: MemorySnapshot) -> some View {
@@ -135,6 +136,33 @@ struct ProjectMemoryView: View {
 
     private var selected: MemorySnapshot? {
         visible.first { $0.id == selection }
+    }
+
+    /// SwiftUI `Table` runs on an `NSTableView`, which paints alternating
+    /// row fills and a row for empty space by default; the app's surfaces don't
+    /// stripe, so neither should this one.
+    private struct TableRowBackgroundHider: NSViewRepresentable {
+        func makeNSView(context: Context) -> NSView {
+            NSView(frame: .zero)
+        }
+
+        func updateNSView(_ nsView: NSView, context: Context) {
+            DispatchQueue.main.async {
+                var view: NSView? = nsView
+                while let current = view {
+                    if let table = current as? NSTableView {
+                        table.usesAlternatingRowBackgroundColors = false
+                        return
+                    }
+                    if let scrollView = current as? NSScrollView,
+                       let table = scrollView.documentView as? NSTableView {
+                        table.usesAlternatingRowBackgroundColors = false
+                        return
+                    }
+                    view = current.superview
+                }
+            }
+        }
     }
 
     /// A memory is edited across days, so a wall-clock time alone would not say

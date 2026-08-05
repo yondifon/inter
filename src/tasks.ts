@@ -651,19 +651,13 @@ async function runTask(
             eventCaptureStopped = true;
             return;
           }
-          // One oversized payload — a large file read echoed back as a tool
-          // result — must cost only that line, not the rest of the trace.
-          if (line.length > MAX_EVENT_LINE) {
-            if (!oversizedLine) {
-              oversizedLine = true;
-              appendTaskEvent(task.id, "event_dropped", task.state, {
-                bytes: line.length,
-                limit: MAX_EVENT_LINE,
-              });
-              eventCount++;
-            }
-            return;
-          }
+          // A line over MAX_EVENT_LINE still reaches the shared bound at
+          // write time (store.ts's addTaskEvent, via boundEventPayload) —
+          // truncated there, not dropped here. `oversizedLine` only feeds
+          // the bootstrap-retry guard below: seeing one confirms the worker
+          // was producing real output, so a nonzero exit isn't a fresh
+          // bootstrap failure.
+          if (line.length > MAX_EVENT_LINE) oversizedLine = true;
           // Only the parse is expected to fail: a provider can print
           // anything, and a bad line costs that line alone. Everything after
           // it is deliberate work — a failed event write is a real fault,

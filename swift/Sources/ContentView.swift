@@ -2,8 +2,6 @@ import SwiftUI
 
 private enum SidebarSelection: Hashable {
     case task(String)
-    /// Identified by cwd, which is what a project's memories are keyed to.
-    case project(String)
 }
 
 struct ContentView: View {
@@ -14,6 +12,7 @@ struct ContentView: View {
     @State private var selection: SidebarSelection?
     @State private var installResults: [MCPConfigInjector.InstallResult] = []
     @State private var showingInstall = false
+    @State private var showingMemories = false
     @AppStorage("taskProjectFilter") private var projectFilter = ""
     @AppStorage("taskGrouping") private var groupingRaw = TaskGrouping.parent.rawValue
     @AppStorage("collapsedTaskGroups") private var collapsedRaw = ""
@@ -28,7 +27,7 @@ struct ContentView: View {
                 Section {
                     if visibleTasks.isEmpty {
                         Text(emptyTasksText)
-                            .scaledFont(.callout).foregroundStyle(.tertiary)
+                            .scaledFont(.footnote).foregroundStyle(.tertiary)
                     } else {
                         ForEach(taskGroups) { group in
                             if let title = group.title {
@@ -43,9 +42,11 @@ struct ContentView: View {
                             ForEach(TaskOrganizer.visibleTasks(in: group, collapsed: collapsedGroups)) { task in
                                 TaskRow(
                                     task: task,
-                                    worker: store.profiles.first { $0.id == task.profileId }?.label ?? task.profileId
+                                    worker: store.profiles.first { $0.id == task.profileId }?.label ?? task.profileId,
+                                    provider: store.profiles.first { $0.id == task.profileId }?.provider
                                 )
                                 .tag(SidebarSelection.task(task.id))
+                                .listRowBackground(sidebarRowFill(selected: selection == .task(task.id)))
                                 .contextMenu {
                                     if canCancel(task) {
                                         Button("Cancel Task", systemImage: "xmark.circle", role: .destructive) {
@@ -67,26 +68,28 @@ struct ContentView: View {
                     }
                 } header: {
                     HStack(spacing: 6) {
-                        SidebarSectionLabel(text: activeProjectName ?? (showArchivedTasks ? "Archived tasks" : "Recent tasks"))
+                        SidebarSectionLabel(
+                            text: activeProjectName ?? (showArchivedTasks ? "Archived tasks" : "Recent tasks"),
+                            dense: true
+                        )
                         Spacer(minLength: 0)
-                        if !store.tasks.isEmpty { projectMenu }
-                    }
-                    .padding(.top, 10)
-                    .padding(.bottom, 2)
-                }
-                Section {
-                    if store.memoryProjects.isEmpty {
-                        Text("No project memories yet")
-                            .scaledFont(.callout).foregroundStyle(.tertiary)
-                    } else {
-                        ForEach(store.memoryProjects) { project in
-                            ProjectRow(project: project).tag(SidebarSelection.project(project.cwd))
+                        if !store.tasks.isEmpty {
+                            HStack(spacing: 4) {
+                                filterMenu
+                                groupMenu
+                            }
                         }
                     }
-                } header: {
-                    SidebarSectionLabel(text: "Projects")
-                        .padding(.top, 10)
-                        .padding(.bottom, 2)
+                    // The chips carry their own height, so this header needs less
+                    // padding above them than the label-only one below it.
+                    .padding(.top, 6)
+                    .padding(.bottom, 2)
+                    // The header sits outside the List's row-inset chrome, so it needs
+                    // its own trailing offset to land on the same edge as a row's
+                    // trailing content (the group count below); a row gets this for
+                    // free, the header does not.
+                    .padding(.trailing, Self.sidebarRowTrailingInset)
+                    .background(SystemSelectionHider())
                 }
             }
             .listStyle(.sidebar)
@@ -100,9 +103,6 @@ struct ContentView: View {
             .background { Surface.sidebar.ignoresSafeArea() }
             .background(SplitViewDividerHider())
             .navigationSplitViewColumnWidth(min: 240, ideal: 260)
-            // Graphite-style selection. The system accent turns a scanned list into
-            // a blue slab; a neutral fill keeps the type as the loudest thing.
-            .tint(Color(nsColor: .quaternaryLabelColor))
             .toolbar {
                 ToolbarItem {
                     Button("Install MCP", systemImage: "link.badge.plus") {
@@ -111,6 +111,14 @@ struct ContentView: View {
                     }
                     .labelStyle(.iconOnly)
                     .help("Add Inter to every CLI's global MCP config")
+                }
+                ToolbarItem {
+                    Button("Project Memories", systemImage: "brain") {
+                        showingMemories = true
+                    }
+                    .labelStyle(.iconOnly)
+                    .help("See what each project remembers")
+                    .accessibilityLabel("See what each project remembers")
                 }
                 ToolbarItem {
                     Button("Settings…", systemImage: "gearshape", action: openSettings)
@@ -123,15 +131,12 @@ struct ContentView: View {
                let item = store.tasks.first(where: { $0.id == id }) {
                 TaskDetail(taskId: id, listItem: item, store: store, setArchived: setArchived)
                     .id(id)
-            } else if case let .project(cwd) = selection,
-                      let project = store.memoryProjects.first(where: { $0.cwd == cwd }) {
-                ProjectMemoryView(project: project, store: store)
-                    .id(project.cwd)
             } else {
-                ContentUnavailableView("Choose a task or project", systemImage: "point.3.connected.trianglepath.dotted")
+                ContentUnavailableView("Choose a task", systemImage: "point.3.connected.trianglepath.dotted")
             }
         }
         .sheet(isPresented: $showingInstall) { InstallResultsView(results: installResults) }
+        .sheet(isPresented: $showingMemories) { ProjectMemoriesSheet(store: store) }
         .task { store.start() }
         // Cancel from the context menu always confirms first (EC-004).
         .confirmationDialog(
@@ -248,9 +253,42 @@ struct ContentView: View {
         }
     }
 
-    /// Filtering and grouping belong to the task list, so the control sits on the
-    /// list's own header rather than in the window toolbar with the global actions.
-    private var projectMenu: some View {
+    /// Matches the trailing edge a List row gets automatically (leading is already
+    /// consistent between header and row; only the trailing side drifts).
+    private static let sidebarRowTrailingInset: CGFloat = 16
+
+    /// Explicit point size, not `scaledFont`: that ladder is tuned for reading-length
+    /// text, and a symbol sized off text metrics doesn't carry the same weight.
+    private func sidebarIconFont() -> Font {
+        .system(size: 15 * uiScale, weight: .semibold)
+    }
+
+    /// The system draws no selection fill in this list (`SystemSelectionHider`),
+    /// so the current row is marked here instead: a neutral rounded fill, inset
+    /// from the column edges, that leaves the row's text and state dot at the
+    /// colors they carry when the row is not selected.
+    private func sidebarRowFill(selected: Bool) -> some View {
+        RoundedRectangle(cornerRadius: Radius.small)
+            .fill(selected ? Surface.selection : Color.clear)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 1)
+    }
+
+    /// Both menus rest on a raised chip. A bare symbol on the sidebar fill has
+    /// only its own stroke to hold it apart from the ground, which reads as more
+    /// header rather than as a control; the chip gives it a control-shaped edge
+    /// and full-strength ink keeps the stroke itself legible. A control holding a
+    /// non-default value swaps the raised chip for a recessed one and fills its
+    /// symbol.
+    private func sidebarMenuChip(active: Bool) -> some View {
+        RoundedRectangle(cornerRadius: Radius.small)
+            .fill(active ? Surface.selection : Surface.panel)
+    }
+
+    /// Status (active/archived) and project both narrow which rows show, so they
+    /// share one menu; grouping changes how the same rows are arranged and gets
+    /// its own. The rightmost control owns the shared trailing edge.
+    private var filterMenu: some View {
         Menu {
             Picker("Tasks", selection: $showArchivedTasks) {
                 Text("Active").tag(false)
@@ -265,7 +303,24 @@ struct ContentView: View {
                 }
             }
             .pickerStyle(.inline)
-            Divider()
+        } label: {
+            Image(systemName: isFiltering ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
+                .font(sidebarIconFont())
+                .imageScale(.large)
+                .foregroundStyle(Color.primary)
+                .frame(width: 28 * uiScale, height: 28 * uiScale)
+                .background(sidebarMenuChip(active: isFiltering))
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Filter tasks by project or status")
+        .accessibilityLabel("Filter tasks by project or status")
+    }
+
+    private var groupMenu: some View {
+        Menu {
             Picker("Group by", selection: $groupingRaw) {
                 ForEach(TaskGrouping.allCases) { option in
                     Text(option.label).tag(option.rawValue)
@@ -273,22 +328,23 @@ struct ContentView: View {
             }
             .pickerStyle(.inline)
         } label: {
-            Image(systemName: isFiltering
-                  ? "line.3.horizontal.decrease.circle.fill"
-                  : "line.3.horizontal.decrease")
-                .scaledFont(.callout, weight: .semibold)
-                .foregroundStyle(isFiltering ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
-                .frame(width: 24 * uiScale, height: 24 * uiScale)
+            Image(systemName: isGroupingCustom ? "rectangle.3.group.fill" : "rectangle.3.group")
+                .font(sidebarIconFont())
+                .imageScale(.large)
+                .foregroundStyle(Color.primary)
+                .frame(width: 28 * uiScale, height: 28 * uiScale)
+                .background(sidebarMenuChip(active: isGroupingCustom))
                 .contentShape(Rectangle())
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help("Filter and group tasks by project")
-        .accessibilityLabel("Filter and group tasks by project")
+        .help("Group tasks")
+        .accessibilityLabel("Group tasks")
     }
 
-    private var isFiltering: Bool { !projectFilter.isEmpty || grouping != .parent }
+    private var isFiltering: Bool { !projectFilter.isEmpty || showArchivedTasks }
+    private var isGroupingCustom: Bool { grouping != .parent }
 
     /// Broker health is app-wide, so it sits at the foot of the sidebar instead of
     /// the toolbar, where it landed on the detail side of the divider and read as
@@ -332,7 +388,7 @@ private struct TaskGroupHeader: View {
                 get: { !collapsed },
                 set: { expanded in if expanded != !collapsed { toggle() } }
             ),
-            label: { SidebarSectionLabel(text: title) },
+            label: { SidebarSectionLabel(text: title, dense: true) },
             trailing: {
                 Text("\(count)")
                     .scaledFont(.caption2, design: .monospaced)
@@ -343,43 +399,34 @@ private struct TaskGroupHeader: View {
     }
 }
 
-private struct ProjectRow: View {
-    let project: MemoryProjectSnapshot
-    @Environment(\.uiScale) private var uiScale
-
-    var body: some View {
-        HStack(spacing: 9) {
-            Image(systemName: "folder")
-                .scaledFont(.callout)
-                .foregroundStyle(.secondary)
-                .accessibilityHidden(true)
-                .frame(width: 18 * uiScale, alignment: .center)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(project.name).scaledFont(.body).lineLimit(1)
-                Text("\(project.count) memor\(project.count == 1 ? "y" : "ies")")
-                    .scaledFont(.caption, design: .monospaced)
-                    .foregroundStyle(.tertiary).lineLimit(1)
-            }
-        }
-        .padding(.vertical, 5)
-        .help(project.cwd)
-    }
-}
-
 private struct TaskRow: View {
     let task: TaskListItem
     let worker: String
+    let provider: Provider?
     @Environment(\.uiScale) private var uiScale
 
     var body: some View {
         HStack(spacing: 9) {
-            StateMarker(state: state)
+            StateMarker(state: state, diameter: 6)
                 .frame(width: 18 * uiScale, alignment: .center)
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).scaledFont(.body).lineLimit(1)
-                Text(meta)
-                    .scaledFont(.caption, design: .monospaced)
-                    .foregroundStyle(.tertiary).lineLimit(1)
+                Text(title).scaledFont(.callout).lineLimit(1)
+                HStack(spacing: 3 * uiScale) {
+                    if let metaPrefix {
+                        Text(metaPrefix)
+                    }
+                    // Fixed width whether or not a mark draws, so rows with and
+                    // without one still align on the worker name.
+                    Group {
+                        if let provider {
+                            ProviderLogo(provider: provider, size: 7 * uiScale)
+                        }
+                    }
+                    .frame(width: 7 * uiScale, alignment: .center)
+                    Text(metaSuffix)
+                }
+                .scaledFont(.caption2, design: .monospaced)
+                .foregroundStyle(.tertiary).lineLimit(1)
             }
         }
         .padding(.vertical, 5)
@@ -393,6 +440,10 @@ private struct TaskRow: View {
     /// a word on their state. Which model ran is worth the width the task id used
     /// to take: a worker's model can change between runs, and the id is one click
     /// away in the task's run details.
+    private var metaPrefix: String? {
+        state.wantsLabelInList ? "\(state.label) ·" : nil
+    }
+    private var metaSuffix: String { "\(worker) · \(task.shortModel)" }
     private var meta: String {
         let parts = state.wantsLabelInList
             ? [state.label, worker, task.shortModel]
@@ -446,6 +497,82 @@ private struct UpdateBanner: View {
             Rectangle().fill(Color(nsColor: .separatorColor)).frame(height: 1)
         }
         .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+}
+
+/// A project's memories, in a sheet: a picker column of projects on the left,
+/// the chosen one's memories on the right. Master-detail rather than a plain
+/// list-then-push, because a reader comparing what two projects remember
+/// shouldn't lose the list to see the second one.
+private struct ProjectMemoriesSheet: View {
+    let store: ProfileStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var selection: String?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            titleBar
+            NavigationSplitView {
+                List(store.memoryProjects, selection: $selection) { project in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(project.name)
+                            .scaledFont(.callout).lineLimit(1)
+                        Text("\(project.count) memor\(project.count == 1 ? "y" : "ies")")
+                            .scaledFont(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    .tag(project.cwd)
+                    .background(SystemSelectionHider())
+                    .listRowBackground(rowFill(selected: selection == project.cwd))
+                }
+                .listStyle(.sidebar)
+                .scrollContentBackground(.hidden)
+                .scrollIndicators(.never)
+                .background { Surface.sidebar }
+                .navigationSplitViewColumnWidth(min: 180, ideal: 220)
+            } detail: {
+            if let cwd = selection, let project = store.memoryProjects.first(where: { $0.cwd == cwd }) {
+                ProjectMemoryView(project: project, store: store)
+                    .id(project.cwd)
+            } else if store.memoryProjects.isEmpty {
+                ContentUnavailableView(
+                    "No project memories yet",
+                    systemImage: "brain",
+                    description: Text("Once a project stores something worth remembering, it will show up here.")
+                )
+            } else {
+                ContentUnavailableView("Choose a project", systemImage: "folder")
+            }
+        }
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+            }
+        }
+        .background { Surface.content.ignoresSafeArea() }
+        .frame(minWidth: 760, minHeight: 480)
+    }
+    }
+
+    /// The sheet's own top edge; a NavigationSplitView carries no title of its
+    /// own, and this is a sheet, not a view inside the window that reports where
+    /// it sits.
+    private var titleBar: some View {
+        HStack(spacing: 8) {
+            Text("Project Memories").scaledFont(.title3, weight: .semibold)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+    }
+
+    /// Same neutral pill the task sidebar uses to mark the current row; the
+    /// selection state drives it and the highlight style is hidden on the list.
+    private func rowFill(selected: Bool) -> some View {
+        RoundedRectangle(cornerRadius: Radius.small)
+            .fill(selected ? Surface.selection : Color.clear)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 1)
     }
 }
 

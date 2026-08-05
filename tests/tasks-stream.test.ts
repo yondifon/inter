@@ -79,6 +79,36 @@ describe("stdout line handler", () => {
       .toContain("agent.hello");
   });
 
+  test("an oversized line is truncated and stored, not silently dropped", async () => {
+    const root = mkdtempSync(join(tmpdir(), "inter-lines-"));
+    scratch.push(root);
+    process.env.INTER_DB = join(root, "inter.db");
+    process.env.INTER_ROOTS = root;
+    stateStore().saveProfiles([{
+      ...streamProfile,
+      // A single JSON line whose "big" field is ~100 KB, well over the 64 KB
+      // stdout line cap this suite exists to exercise.
+      command: [
+        "/bin/sh", "-c",
+        "big=$(head -c 100000 /dev/zero | tr '\\0' 'a'); " +
+          "printf '{\"type\":\"hello\",\"big\":\"%s\"}\\n' \"$big\"; " +
+          "printf 'INTER_RESULT: completed\\n'",
+      ],
+    }]);
+
+    const task = await delegate("noop", "prompt", root);
+    const done = await settled(task.id);
+    expect(done.state).toBe("completed");
+    const events = stateStore().listTaskEvents(task.id);
+    // The oversized line reached storage under its own event type — it was
+    // truncated at write time, never dropped.
+    expect(events.map(({ type }) => type)).toContain("agent.hello");
+    expect(events.map(({ type }) => type)).not.toContain("event_dropped");
+    const stored = events.find(({ type }) => type === "agent.hello")!;
+    expect((stored.payload as { big: string }).big.length).toBeLessThan(100_000);
+    expect((stored.payload as { big: string }).big).toContain("…[truncated: kept");
+  });
+
   test("a failed event write fails the run loudly instead of vanishing", async () => {
     const root = mkdtempSync(join(tmpdir(), "inter-lines-"));
     scratch.push(root);

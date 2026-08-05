@@ -3,7 +3,7 @@
  * command list here is the one the unknown-command error names, so a typo can
  * never be told about a command help does not print.
  */
-export const COMMAND_NAMES = ["serve", "watch", "inflight", "version", "help"] as const;
+export const COMMAND_NAMES = ["serve", "watch", "inflight", "cleanup", "version", "help"] as const;
 
 /** Every spelling that means "tell me what this is". */
 const HELP_FLAGS = new Set(["help", "--help", "-h"]);
@@ -26,6 +26,8 @@ Usage: inter <command> [options]
                        id to see its options.
   inflight             List the tasks still running, so you know what stopping
                        the service would interrupt.
+  cleanup              Free the disk that old finished work is holding. Shows
+                       what would go and deletes nothing until you say so.
   version              Print which build of Inter this is.
   help                 Print this.
 

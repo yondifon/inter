@@ -267,6 +267,20 @@ describe("valid bodies still succeed", () => {
     expect(events.at(-1)?.type).toBe("agent.hook");
   });
 
+  test("POST /api/hooks/:id truncates an oversized payload instead of storing it whole", async () => {
+    const response = await post(`/api/hooks/${taskId}`, JSON.stringify({
+      hook_event_name: "PostToolUse",
+      tool_name: "Read",
+      tool_response: { content: "line of file content\n".repeat(6_000) },
+    }));
+    expect(response.status).toBe(200);
+    const stored = stateStore().listTaskEvents(taskId).at(-1)!;
+    expect(stored.type).toBe("agent.hook");
+    const content = (stored.payload as { tool_response: { content: string } }).tool_response.content;
+    expect(content).toContain("…[truncated: kept");
+    expect(Buffer.byteLength(JSON.stringify(stored.payload))).toBeLessThan(6_000 * 21);
+  });
+
   // Last: saveConfig replaces the whole profile list, so nothing that needs
   // the seeded surface-fake profile may run after it.
   test("POST /api/profiles returns 201 with the created profile", async () => {

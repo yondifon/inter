@@ -1,9 +1,10 @@
-import { chmodSync, existsSync, mkdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { Database } from "bun:sqlite";
 import { discoverProfiles } from "./profile-discovery";
 import { sessionIdFrom } from "./adapters";
+import { boundEventPayload } from "./event-bounds";
 import {
   configureDatabase,
   configureReadOnlyDatabase,
@@ -82,6 +83,80 @@ const MAX_ATTEMPTS = 10;
 
 const GRANT_COLUMNS = "id, cwd, profile_id, scope_json, created_at, last_used_at, use_count";
 
+/**
+ * The only states whose history cleanup may ever delete. `queued`, `running`,
+ * `needs_input`, `answered` and `blocked` are absent on purpose: each is work
+ * that is still moving or still waiting on a person, and no age makes it stale.
+ *
+ * Deliberately not `settled` from public-task — that helper counts `blocked` and
+ * `needs_input` as settled so a watcher stops following them, which is a
+ * different question from whether the work is finished with.
+ */
+const DELETABLE_STATES = "('completed','failed','cancelled')";
+
+/**
+ * The three gates a task passes before its history can go: the run finished, it
+ * was archived — a hand action meaning "done with this", because age alone is
+ * never consent — and it has not changed since the cutoff. Written once and
+ * applied to a parent, its children, and the held-back count, so no caller can
+ * be reasoning about a different rule than the delete is.
+ *
+ * Carries one `?` for the cutoff, per use.
+ */
+function settledAndArchived(table: string): string {
+  return `${table}.state IN ${DELETABLE_STATES}
+    AND ${table}.archived_at IS NOT NULL
+    AND ${table}.updated_at < ?`;
+}
+
+/**
+ * Which tasks cleanup may touch, written once so the preview and the delete
+ * cannot disagree: the gates above, plus one lineage rule. A task that fanned
+ * work out keeps its history for as long as any task delegated under it fails
+ * those gates — reading a batch's origin is how its children are understood,
+ * and a child still running has no business losing its parent's trace. The
+ * check is one level deep, matching the one-level fan-out `delegate` creates,
+ * and a deeper tree only ever holds more back than it deletes.
+ *
+ * Takes the cutoff twice: once for the task, once for its children.
+ */
+const ELIGIBLE_TASK_IDS = `
+  SELECT parent.id FROM tasks parent
+  WHERE ${settledAndArchived("parent")}
+    AND NOT EXISTS (
+      SELECT 1 FROM tasks child
+      WHERE child.parent_task_id = parent.id
+        AND NOT (${settledAndArchived("child")})
+    )
+`;
+
+/** What a cleanup would remove, or did. Counts a person can read back. */
+export interface CleanupPlan {
+  /** A task must have stopped changing before this to qualify. */
+  cutoff: string;
+  tasks: number;
+  /** Eligible task counts per final state, largest group first. */
+  byState: Array<{ state: TaskState; tasks: number }>;
+  /** Rows of recorded activity — every step of every run that qualifies. */
+  events: number;
+  /** Roughly what those rows hold, before index and row overhead. */
+  bytes: number;
+  /** Finished, archived and old enough, kept because a task under them is not. */
+  heldBack: number;
+}
+
+/** A cleanup that already ran, kept so an unattended pass is still answerable for. */
+export interface CleanupRecord extends CleanupPlan {
+  finishedAt: string;
+}
+
+export interface CleanupResult extends CleanupRecord {
+  fileBytesBefore: number;
+  fileBytesAfter: number;
+}
+
+const LAST_CLEANUP_KEY = "cleanup_last_run";
+
 // What a task reads when its worker provably did not survive the broker. The
 // wording predates worker identity and is kept exactly: this is still the only
 // honest thing to say about a run whose process is gone.
@@ -107,6 +182,13 @@ export interface StateStoreOptions {
    * driving, which is the opposite of watching them.
    */
   observe?: boolean;
+  /**
+   * Open able to write, but without claiming those same startup duties. Cleanup
+   * deletes, so it cannot use observe mode, and it must not settle interrupted
+   * tasks: a live broker owns those workers, and a maintenance command that
+   * reaped them would destroy running work in the name of reclaiming disk.
+   */
+  maintenance?: boolean;
 }
 
 /** A task that would lose its worker if the broker were restarted right now. */
@@ -157,10 +239,19 @@ export class StateStore {
       this.database = this.openObserve();
       return;
     }
+    // A mistyped path must not materialise an empty database for a command
+    // whose whole job is to operate on an existing one.
+    if (options.maintenance && !existsSync(this.path)) {
+      throw new Error(`no database at ${this.path}; run the broker once to create it, or fix INTER_DB`);
+    }
     mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
     this.database = new Database(this.path, { create: true, strict: true });
     try { chmodSync(this.path, 0o600); } catch {}
     configureDatabase(this.database);
+    if (options.maintenance) {
+      migrateDatabase(this.database);
+      return;
+    }
     if (migrateDatabase(this.database).needsSessionBackfill) {
       this.backfillTaskSessionIds();
       this.database.query(`
@@ -934,6 +1025,104 @@ export class StateStore {
     return this.getTask(id)!;
   }
 
+  /**
+   * What a cleanup at this cutoff would remove, without removing anything. The
+   * execution path reads the same plan through the same query, so a preview a
+   * caller acts on describes the delete they get.
+   */
+  cleanupPlan(cutoff: string): CleanupPlan {
+    const byState = this.database.query<{ state: TaskState; tasks: number }, [string, string]>(`
+      SELECT state, COUNT(*) AS tasks FROM tasks
+      WHERE id IN (${ELIGIBLE_TASK_IDS})
+      GROUP BY state
+      ORDER BY tasks DESC, state
+    `).all(cutoff, cutoff);
+    const totals = this.database.query<{ events: number; bytes: number }, [string, string]>(`
+      SELECT COUNT(*) AS events, COALESCE(SUM(LENGTH(CAST(payload AS BLOB))), 0) AS bytes
+      FROM task_events
+      WHERE task_id IN (${ELIGIBLE_TASK_IDS})
+    `).get(cutoff, cutoff)!;
+    const tasks = byState.reduce((total, row) => total + row.tasks, 0);
+    // Everything the gates pass, before lineage holds any back. The difference
+    // is what a person is owed an explanation for.
+    const candidates = this.database.query<{ tasks: number }, [string]>(`
+      SELECT COUNT(*) AS tasks FROM tasks WHERE ${settledAndArchived("tasks")}
+    `).get(cutoff)!.tasks;
+    return { cutoff, tasks, byState, events: totals.events, bytes: totals.bytes, heldBack: candidates - tasks };
+  }
+
+  /**
+   * Permanently deletes the recorded activity of every eligible task, and
+   * reports exactly what went. Irreversible: there is no archive behind this and
+   * nothing to restore from.
+   *
+   * Task rows survive — cleanup reclaims what a finished run's step-by-step
+   * trace occupies, never the record that the run happened. Memories, scope
+   * grants and profiles are outside the statement entirely.
+   *
+   * The plan is read inside the delete's own transaction so the counts a caller
+   * is handed are the counts the database lost, and a mismatch aborts rather
+   * than reports a number it cannot stand behind.
+   */
+  deleteSettledTaskActivity(cutoff: string): CleanupResult {
+    const fileBytesBefore = this.fileBytes();
+    const finishedAt = new Date().toISOString();
+    let plan: CleanupPlan | undefined;
+    this.transaction(() => {
+      const planned = this.cleanupPlan(cutoff);
+      const removed = this.database.query(`
+        DELETE FROM task_events WHERE task_id IN (${ELIGIBLE_TASK_IDS})
+      `).run(cutoff, cutoff).changes;
+      if (removed !== planned.events) {
+        throw new Error(
+          `cleanup aborted: expected to remove ${planned.events} records, the delete touched ${removed}`,
+        );
+      }
+      plan = planned;
+      // Only a pass that removed something is worth remembering: a run that
+      // found nothing would otherwise overwrite the record of the run that did.
+      if (planned.events > 0) {
+        this.database.query(`
+          INSERT INTO settings(key, value) VALUES (?, ?)
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        `).run(LAST_CLEANUP_KEY, JSON.stringify({ ...planned, finishedAt }));
+      }
+    });
+    // SQLite holds freed pages inside the file, so a delete alone leaves it the
+    // size it was. VACUUM rewrites the file and takes an exclusive lock for the
+    // rewrite, which is worth paying only when something was actually removed.
+    // In WAL mode the rewrite lands in the write-ahead log, so the checkpoint is
+    // what actually shrinks the file a person sees on disk.
+    if (plan!.events > 0) {
+      this.database.exec("VACUUM");
+      this.database.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    }
+    return { ...plan!, finishedAt, fileBytesBefore, fileBytesAfter: this.fileBytes() };
+  }
+
+  /** What the last cleanup removed, so an unattended run is still answerable for. */
+  lastCleanup(): CleanupRecord | undefined {
+    const row = this.database.query<{ value: string }, [string]>(
+      "SELECT value FROM settings WHERE key = ?",
+    ).get(LAST_CLEANUP_KEY);
+    return row ? JSON.parse(row.value) as CleanupRecord : undefined;
+  }
+
+  /**
+   * What this database costs on disk. The write-ahead log counts: freed pages
+   * live there until a checkpoint, so measuring the main file alone would
+   * report a reclaim that has not happened yet.
+   */
+  private fileBytes(): number {
+    return [this.path, `${this.path}-wal`].reduce((total, file) => {
+      try {
+        return total + statSync(file).size;
+      } catch {
+        return total;
+      }
+    }, 0);
+  }
+
   listTaskEvents(taskId: string, afterId = 0, limit = 5_001): TaskEvent[] {
     const rows = this.database.query<{
       id: number;
@@ -1275,7 +1464,7 @@ export class StateStore {
     this.database.query(`
       INSERT INTO task_events(task_id, event_type, state, payload)
       VALUES (?, ?, ?, ?)
-    `).run(taskId, type, state, JSON.stringify(payload));
+    `).run(taskId, type, state, JSON.stringify(boundEventPayload(payload)));
   }
 
   private transaction(action: () => void): void {
