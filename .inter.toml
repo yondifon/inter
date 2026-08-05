@@ -13,8 +13,11 @@ version = 1
 # raise effort rather than reaching for a bigger model when one of those needs
 # more thinking. Kimi is reserved for the reasoning class alone — it costs like
 # a frontier model and buys nothing on work that is merely long. Luna leads on
-# codex. Pi and opencode reach the same catalog, so pi is the second account to
-# route to when opencode is spent.
+# codex everywhere but reasoning, which leads with sol — codex's deep tier, and
+# the only codex model that scores like opus and kimi rather than beside luna.
+# Terra is deliberately absent: it scores identically to luna, so listing both
+# would only make the file longer. Pi and opencode reach the same catalog, so
+# pi is the second account to route to when opencode is spent.
 
 [routes.mechanical]
 preference = "speed"
@@ -73,5 +76,6 @@ allow = [
   { provider = "opencode", model = "opencode-go/kimi-k3" },
   { provider = "pi", model = "opencode-go/kimi-k3" },
   { provider = "claude", model = "opus" },
+  { provider = "codex", model = "gpt-5.6-sol" },
   { provider = "codex", model = "gpt-5.6-luna" },
 ]

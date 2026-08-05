@@ -62,16 +62,18 @@ export function watchCommand(
   // argv[1] is how this process was actually started — except in a compiled
   // binary, where Bun rewrites it to the embedded script under /$bunfs, a
   // path that exists on nobody's disk. The binary's real name lives in
-  // execPath then. The installed binary answers to `inter` whether it was
-  // launched through the PATH link or as the bundle's `inter-server`;
-  // anything else is a checkout, which gets the invocation that works in it.
-  const name = entry?.startsWith("/$bunfs/")
+  // execPath then.
+  const compiled = entry?.startsWith("/$bunfs/") === true;
+  const name = compiled
     ? basename(execPath)
     : entry && basename(entry).replace(/\.[cm]?[jt]s$/, "");
-  const command = name === "inter" || name === "inter-server"
-    ? "inter"
-    : `bun run ${join(import.meta.dir, "cli.ts")}`;
-  return `${command} watch ${taskIds}`;
+  // The installed binary answers to `inter` whether it was launched through the
+  // PATH link or as the bundle's `inter-server`.
+  if (name === "inter" || name === "inter-server") return `inter watch ${taskIds}`;
+  // A compiled binary under any other name is still runnable by its own path,
+  // and that path is the only thing about it that exists on disk.
+  if (compiled) return `${execPath} watch ${taskIds}`;
+  return `bun run ${join(import.meta.dir, "cli.ts")} watch ${taskIds}`;
 }
 
 export function watchUsage(): string {

@@ -14,19 +14,18 @@ There are two ways to follow a task. Use the first one by default.
 
 ## 1. Background the `watch` subcommand — the default
 
-`package.json` declares an `inter` bin, but nothing links it and `make install`
-ships an app bundle rather than a CLI, so `inter` is on nobody's PATH until they
-link it themselves. Until then the invocation is the entry point directly:
+`make install` links the compiled binary onto your PATH as `inter`, and that
+binary carries its own runtime — no Bun, no checkout, no `bunx`:
 
 ```sh
-bun run src/cli.ts watch 8f2c1a94-... --timeout 30m &
+inter watch 8f2c1a94-... --timeout 30m &
 ```
 
-The rest of this page writes `inter watch` for brevity; substitute
-`bun run src/cli.ts watch` unless the bin is linked. `watchCommand()` in
-`src/watch.ts` derives whichever of the two applies from `process.argv[1]`, and
-both the usage text and the `wait` tool description print it from there — so
-neither can name a command that does not run.
+In a checkout that has not been installed, the same command is
+`bun run src/cli.ts watch`. `watchCommand()` in `src/watch.ts` derives whichever
+applies from how the process started, and both the usage text and the `wait`
+tool description print it from there — so neither can name a command that does
+not run.
 
 A blocked process costs nothing while it sleeps: no tokens, no turn, no
 context. Every client Inter serves has a shell, so this needs no client

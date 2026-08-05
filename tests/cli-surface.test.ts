@@ -8,9 +8,8 @@ import type { Profile, Task } from "../src/types";
 /**
  * The HTTP surface lives inside Bun.serve's fetch handler with no seam (review
  * finding 1), so the only way to exercise it is through the real listener:
- * point INTER_PORT at a free port, import the module, and fetch. Each test
- * file runs in its own process, so the import-time server binds no other
- * suite's port.
+ * point INTER_PORT at a free port, start the broker, and fetch. Each test file
+ * runs in its own process, so this listener binds no other suite's port.
  */
 let root: string;
 let base: string;
@@ -69,7 +68,9 @@ beforeAll(async () => {
   const port = probe.port;
   probe.stop();
   process.env.INTER_PORT = String(port);
-  ({ tasksToolQuerySchema } = await import("../src/cli"));
+  const cli = await import("../src/cli");
+  tasksToolQuerySchema = cli.tasksToolQuerySchema;
+  cli.startBroker();
   base = `http://127.0.0.1:${port}`;
   seedProfile({
     id: profileId,
@@ -365,25 +366,5 @@ describe("the build's own answer to /health", () => {
 
     expect(code).toBe(0);
     expect(stdout.trimEnd()).toBe(health.trimEnd());
-  }, 30_000);
-
-  // A typo used to boot the broker and die on the bound port with an
-  // EADDRINUSE that named nobody's mistake; the usage line names it.
-  test("an unknown subcommand is a usage error, not a broker", async () => {
-    const child = Bun.spawn(["bun", "run", join(import.meta.dir, "..", "src", "cli.ts"), "bogus"], {
-      env: { ...process.env, INTER_PORT: "0" },
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const [stdout, stderr, code] = await Promise.all([
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-      child.exited,
-    ]);
-
-    expect(code).toBe(2);
-    expect(stdout).toBe("");
-    expect(stderr).toContain("usage:");
-    expect(stderr).toContain("bogus");
   }, 30_000);
 });

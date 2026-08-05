@@ -77,7 +77,7 @@ beforeAll(async () => {
   const probe = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data: () => {} } });
   const port = probe.port;
   probe.stop();
-  broker = Bun.spawn(["bun", "run", CLI], {
+  broker = Bun.spawn(["bun", "run", CLI, "serve"], {
     env: { ...process.env, INTER_PORT: String(port) },
     stdout: "pipe",
     stderr: "pipe",

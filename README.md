@@ -68,6 +68,19 @@ edit, and enable profiles. No accounts are hardcoded. Each profile stores its
 provider, default model, and environment variables; secret-like values
 (`KEY`, `TOKEN`, `SECRET`, `PASS`) are masked on every surface.
 
+## Command line
+
+`make install` links the compiled binary onto your PATH as `inter`. It carries
+its own runtime, so every command below works with no Bun and no checkout.
+
+| Command | What it does |
+| --- | --- |
+| `inter` | Print help — what Inter is, the commands, and a first run. |
+| `inter serve` | Run the broker. The menu-bar app starts it for you. |
+| `inter watch <task-id>...` | Wait for a task; prints one line when it settles. |
+| `inter inflight` | List the tasks still running, so you know what a restart interrupts. |
+| `inter version` | Print which build this is. |
+
 ## Following a task
 
 A delegated task runs unattended. Following it should cost nothing while it
@@ -148,9 +161,9 @@ response payload. Defaults are minimal — `cancel` returns just `id` and
 ```
 
 - **Broker** (`src/cli.ts`): TypeScript/Bun HTTP server on loopback-only
-  `127.0.0.1:7331`. Handles delegation, lifecycle, MCP, and REST. Stateless MCP
-  handler — one fresh server per request so dynamic profile tools always reflect
-  current settings.
+  `127.0.0.1:7331`, started by `inter serve`. Handles delegation, lifecycle,
+  MCP, and REST. Stateless MCP handler — one fresh server per request so
+  dynamic profile tools always reflect current settings.
 - **Providers**: Claude Code, Codex, OpenCode, Antigravity, and Pi. Each
   spawned as a sandboxed subprocess with per-task read/write scope enforced by
   `sandbox-exec`. Scope is relative to the task's `cwd`; literal file paths stay

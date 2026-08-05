@@ -94,13 +94,13 @@ final class BrokerManager {
     private func resolveServer() -> (executable: String, arguments: [String])? {
         if let resources = Bundle.main.resourcePath {
             let bundled = (resources as NSString).appendingPathComponent("inter-server")
-            if FileManager.default.fileExists(atPath: bundled) { return (bundled, []) }
+            if FileManager.default.fileExists(atPath: bundled) { return (bundled, ["serve"]) }
         }
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
         let source = root.appendingPathComponent("src/cli.ts").path
         guard FileManager.default.fileExists(atPath: source), let bun = findBun() else { return nil }
-        return (bun, ["run", source])
+        return (bun, ["run", source, "serve"])
     }
 
     private func findBun() -> String? {

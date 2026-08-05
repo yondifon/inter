@@ -7,7 +7,7 @@
     "inter": "./src/cli.ts"
   },
   "scripts": {
-    "start": "bun run src/cli.ts",
+    "start": "bun run src/cli.ts serve",
     "typecheck": "tsc --noEmit",
     "test": "bun test"
   },

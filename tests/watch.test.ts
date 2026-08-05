@@ -113,6 +113,13 @@ describe("watchCommand", () => {
     expect(watchCommand("abc", "/$bunfs/root/cli.ts", "/Users/x/.local/bin/inter")).toBe("inter watch abc");
   });
 
+  test("a compiled binary under any other name is named by its own path", () => {
+    // A release artifact, or a copy someone renamed: `bun` may not be installed
+    // at all, and /$bunfs/root/cli.ts is not a file. The executable is.
+    expect(watchCommand("abc", "/$bunfs/root/cli.ts", "/opt/inter-macos-arm64"))
+      .toBe("/opt/inter-macos-arm64 watch abc");
+  });
+
   test("falls back to bun run from a checkout, and to the same with no invocation at all", () => {
     const fallback = `bun run ${join(import.meta.dir, "..", "src", "cli.ts")} watch abc`;
     expect(watchCommand("abc", "/Users/x/desgn/inter/src/cli.ts")).toBe(fallback);

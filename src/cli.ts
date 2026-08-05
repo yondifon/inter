@@ -52,6 +52,7 @@ import { mcpWaitBlockMs } from "./mcp-wait";
 import { loadRoutingPolicy } from "./routing-policy";
 import { runWatch, watchCommand } from "./watch";
 import { runInflight } from "./inflight";
+import { helpText, isHelpRequest, unknownCommandMessage } from "./cli-help";
 import { startEventSocket } from "./event-socket";
 import { BUILD_STAMP, MCP_CONTRACT_VERSION, VERSION } from "./version";
 
@@ -60,40 +61,6 @@ const port = Number(Bun.env.INTER_PORT ?? 7331);
 // the port, `version` prints it from the binary on disk, and `make install`
 // fails when those two disagree. One literal, so the two cannot drift.
 const healthReport = { status: "ok", version: VERSION, mcpContractVersion: MCP_CONTRACT_VERSION, build: BUILD_STAMP } as const;
-
-// `watch` is the one invocation that is not the broker. It reads the same
-// SQLite store the broker writes, rather than calling the broker over HTTP, so
-// a caller holding a task id gets an answer even when nothing is listening on
-// the port — and the deadline belongs to the process, not to a request. It must
-// therefore claim the process before Bun.serve binds anything.
-if (process.argv[2] === "watch") {
-  process.exit(await runWatch(process.argv.slice(3)));
-}
-
-// `inflight` reports what a broker restart would cost, so it must not be one:
-// it reads the store as an observer and exits non-zero when work is at risk,
-// which is what lets `make install` warn before it kills anything.
-if (process.argv[2] === "inflight") {
-  process.exit(runInflight());
-}
-
-// `version` is the binary's own answer to /health, read from disk rather than
-// from the port — the comparison `make install` makes before it calls an
-// install done. It claims the process before Bun.serve binds for the same
-// reason `watch` does.
-if (process.argv[2] === "version") {
-  console.log(JSON.stringify(healthReport));
-  process.exit(0);
-}
-
-// Anything else in argv[2] is a typo reaching for a subcommand, and booting
-// the broker anyway dies on the bound port with an EADDRINUSE that says
-// nothing about the mistake. `--stdio` is a flag for MCP client configs, not
-// a subcommand, and no argument at all is the app bundle launching the broker.
-if (process.argv[2] !== undefined && process.argv[2] !== "--stdio") {
-  console.error(`unknown command '${process.argv[2]}' — usage: inter [watch <taskId...> | inflight | version]`);
-  process.exit(2);
-}
 
 // A foreground MCP call still owns the caller's agent turn, which is why
 // `until: "attention"` matters: it returns the instant the task needs the
@@ -233,7 +200,7 @@ const mcpHandler = createMcpHandler(() => createMcpServer(), {
   onerror: (error) => console.error("mcp request failed", error),
 });
 
-Bun.serve({
+const serveOptions = {
   port,
   hostname: "127.0.0.1",
   idleTimeout: 255,
@@ -501,20 +468,29 @@ Bun.serve({
     }
     return new Response("Not found", { status: 404 });
   },
-});
+} satisfies Parameters<typeof Bun.serve>[0];
 
-// The port bind is the single-instance lock; the socket unlink after it can
-// never steal a live broker's socket (D-007). The socket is an accelerator —
-// watch falls back to DB polling when it is absent.
-const eventSocket = startEventSocket({
-  hello: { version: VERSION, mcpContractVersion: MCP_CONTRACT_VERSION },
-});
-if (eventSocket.path) {
-  console.log(`event socket bound: ${eventSocket.path}`);
-}
+/**
+ * Everything `serve` binds. Nothing here runs at import, so a command that is
+ * not the broker — and every suite that imports this module — costs no port,
+ * no socket, and no store.
+ */
+export function startBroker() {
+  Bun.serve(serveOptions);
 
-if (process.argv.includes("--stdio")) {
-  serveStdio(() => createMcpServer());
+  // The port bind is the single-instance lock; the socket unlink after it can
+  // never steal a live broker's socket (D-007). The socket is an accelerator —
+  // watch falls back to DB polling when it is absent.
+  const eventSocket = startEventSocket({
+    hello: { version: VERSION, mcpContractVersion: MCP_CONTRACT_VERSION },
+  });
+  if (eventSocket.path) {
+    console.log(`event socket bound: ${eventSocket.path}`);
+  }
+
+  if (process.argv.includes("--stdio")) {
+    serveStdio(() => createMcpServer());
+  }
 }
 
 async function createMcpServer(): Promise<McpServer> {
@@ -974,4 +950,41 @@ function publicProfile(profile: Profile): Profile {
 
 function archiveFilter(value: string | null): "active" | "only" | "include" {
   return value === "only" || value === "include" ? value : "active";
+}
+
+/**
+ * Runs one command and reports the exit code, or `undefined` when the process
+ * should stay up because the broker is now serving.
+ *
+ * `watch` and `inflight` never touch the port: both read the same SQLite store
+ * the broker writes, so a caller holding a task id still gets an answer when
+ * nothing is listening. `version` reads the build off disk rather than off the
+ * port, which is the comparison `make install` makes before calling an install
+ * done. `--stdio` is a flag MCP client configs pass, not a command.
+ */
+async function runCli(argv: readonly string[]): Promise<number | undefined> {
+  const command = argv[0];
+  if (command === "watch") return runWatch(argv.slice(1));
+  if (command === "inflight") return runInflight();
+  if (command === "version") {
+    console.log(JSON.stringify(healthReport));
+    return 0;
+  }
+  if (command === undefined || isHelpRequest(command)) {
+    console.log(helpText());
+    return 0;
+  }
+  if (command !== "serve" && command !== "--stdio") {
+    console.error(unknownCommandMessage(command));
+    return 2;
+  }
+  startBroker();
+  return undefined;
+}
+
+// Last in the module so every declaration a command reaches for is already
+// initialised; importing this file runs no command at all.
+if (import.meta.main) {
+  const code = await runCli(process.argv.slice(2));
+  if (code !== undefined) process.exit(code);
 }
