@@ -27,6 +27,12 @@ bundle: server swift-build app-icon
 	cp swift/.build/release/Inter $(APP)/Contents/MacOS/Inter
 	cp $(DIST)/inter-server $(APP)/Contents/Resources/inter-server
 	cp $(DIST)/Inter.icns $(APP)/Contents/Resources/Inter.icns
+	@# SwiftPM's `resources:` target (the bundled IBM Plex typeface) builds a
+	@# `.bundle` next to the release binary; `Bundle.module`'s generated
+	@# accessor looks for it there, so it has to land in the same spot inside
+	@# the app. Globbed rather than named, since the exact bundle name is
+	@# derived from the package and target names.
+	cp -R swift/.build/release/*.bundle $(APP)/Contents/Resources/ 2>/dev/null || true
 	@commit=$$(git rev-parse HEAD); \
 	sed -e "s/{{COMMIT}}/$$commit/g" \
 		-e "s|{{REPO}}|$(CURDIR)|g" \

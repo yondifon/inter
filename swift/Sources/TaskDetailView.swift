@@ -242,16 +242,15 @@ struct TaskDetail: View {
             // state — pulsing while live, tinted and shaped once settled — and
             // spelling it out again cost a chip that resized between states and
             // shoved every chip right of it.
-            TaskMetaChip(text: workerLabel, label: "Worker", full: workerLabel) {
+            // Worker and model share one chip: the list the reader clicked from
+            // already named the pair, so here it confirms instead of teaching.
+            TaskMetaChip(text: identityLine, label: "Worker and model", full: identityLine) {
                 if let provider = worker?.provider {
                     ProviderLogo(provider: provider, size: 9 * uiScale)
                 } else {
                     Image(systemName: "person.crop.circle")
                         .font(.system(size: 8 * uiScale, weight: .medium))
                 }
-            }
-            TaskMetaChip(text: resolvedModel, label: "Model", full: resolvedModel) {
-                Image(systemName: "cpu").font(.system(size: 8 * uiScale, weight: .medium))
             }
             // The reasoning level the run was dispatched with is part of its
             // identity like the model, and absent when the caller set none.
@@ -272,7 +271,7 @@ struct TaskDetail: View {
                     label: "Copy resume command — \(resumeCommand)",
                     symbol: "doc.on.clipboard"
                 )
-                .font(.system(size: 14 * uiScale))
+                .font(.system(size: 12 * uiScale))
             }
             if canResume {
                 if resumeInFlight {
@@ -281,7 +280,7 @@ struct TaskDetail: View {
                         .help("Resuming task…")
                 } else {
                     IconButton(symbol: "arrow.clockwise", label: "Resume task") { resumeAction() }
-                        .font(.system(size: 14 * uiScale))
+                        .font(.system(size: 12 * uiScale))
                 }
             }
             if canCancel {
@@ -293,24 +292,24 @@ struct TaskDetail: View {
                     IconButton(symbol: "xmark.octagon", label: "Cancel task", tint: AnyShapeStyle(.red)) {
                         confirmingCancel = true
                     }
-                    .font(.system(size: 14 * uiScale))
+                    .font(.system(size: 12 * uiScale))
                 }
             }
             IconButton(symbol: "folder", label: "Open folder") {
                 NSWorkspace.shared.open(URL(fileURLWithPath: resolvedCwd))
             }
-            .font(.system(size: 14 * uiScale))
+            .font(.system(size: 12 * uiScale))
             IconButton(
                 symbol: resolvedArchivedAt == nil ? "archivebox" : "arrow.uturn.backward",
                 label: resolvedArchivedAt == nil ? "Archive task" : "Restore task"
             ) {
                 setArchived(taskId, resolvedArchivedAt == nil)
             }
-            .font(.system(size: 14 * uiScale))
+            .font(.system(size: 12 * uiScale))
             IconButton(symbol: "ellipsis", label: "Run details", rotation: .degrees(90)) {
                 showingRunFacts.toggle()
             }
-            .font(.system(size: 14 * uiScale))
+            .font(.system(size: 12 * uiScale))
             .popover(isPresented: $showingRunFacts, arrowEdge: .bottom) { runFactsPopover }
         }
     }
@@ -503,6 +502,10 @@ struct TaskDetail: View {
     private var resolvedModel: String {
         task?.model ?? listItem.model
     }
+
+    /// The pair the header shows in one chip, echoing the list's own `worker · model`
+    /// line so the reader sees the same facts they scanned a moment ago.
+    private var identityLine: String { "\(workerLabel) · \(resolvedModel)" }
 
     /// Fields shared across summary and full-detail rows, falling back from the
     /// fetched snapshot to the sidebar's list item.
