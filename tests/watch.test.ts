@@ -38,6 +38,21 @@ async function watch(argv: string[]): Promise<{ code: number; out: string[]; err
   return { code, out, err };
 }
 
+/**
+ * Watch stdout is NDJSON — one object per line — so assertions parse the lines
+ * back and assert fields instead of matching JSON strings by eye.
+ */
+function settledLine(line: string): {
+  type: "settled"; task: string; state: string;
+  question?: string; error?: string; title?: string; archived?: boolean;
+} {
+  return JSON.parse(line) as ReturnType<typeof settledLine>;
+}
+
+function eventLine(line: string): { type: "event"; kind: string; task: string; text: string } {
+  return JSON.parse(line) as ReturnType<typeof eventLine>;
+}
+
 beforeAll(() => {
   root = mkdtempSync(join(tmpdir(), "inter-watch-"));
   process.env.INTER_DB = join(root, "inter.db");
@@ -106,21 +121,25 @@ describe("watchCommand", () => {
 });
 
 describe("what watch reports", () => {
-  test("a completed task exits 0 with one bare line", async () => {
+  test("a completed task exits 0 with one settled line", async () => {
     const task = seedTask("completed", { output: "the whole answer, ".repeat(500) });
     const { code, out, err } = await watch([task.id]);
 
     expect(code).toBe(0);
-    expect(out).toEqual([`${task.id} completed`]);
+    expect(out).toHaveLength(1);
+    expect(settledLine(out[0]!)).toEqual({ type: "settled", task: task.id, state: "completed" });
     expect(err).toEqual([]);
   });
 
-  test("a question comes back on the same line as the id", async () => {
+  test("a question comes back on the settled line", async () => {
     const task = seedTask("needs_input", { question: "Which database\nshould I target?" });
     const { code, out } = await watch([task.id]);
 
     expect(code).toBe(0);
-    expect(out).toEqual([`${task.id} needs_input Which database should I target?`]);
+    expect(settledLine(out[0]!)).toEqual({
+      type: "settled", task: task.id, state: "needs_input",
+      question: "Which database should I target?",
+    });
   });
 
   test("a failure carries its error", async () => {
@@ -128,7 +147,9 @@ describe("what watch reports", () => {
     const { code, out } = await watch([task.id]);
 
     expect(code).toBe(0);
-    expect(out).toEqual([`${task.id} failed timeout after 600000ms`]);
+    expect(settledLine(out[0]!)).toEqual({
+      type: "settled", task: task.id, state: "failed", error: "timeout after 600000ms",
+    });
   });
 
   test("a cancelled task settles too", async () => {
@@ -136,7 +157,9 @@ describe("what watch reports", () => {
     const { code, out } = await watch([task.id]);
 
     expect(code).toBe(0);
-    expect(out).toEqual([`${task.id} cancelled cancelled by the user`]);
+    expect(settledLine(out[0]!)).toEqual({
+      type: "settled", task: task.id, state: "cancelled", error: "cancelled by the user",
+    });
   });
 
   test("nothing to report exits non-zero and prints nothing at all", async () => {
@@ -156,7 +179,8 @@ describe("what watch reports", () => {
     const { code, out } = await watch([done.id, running.id, "--timeout", "200"]);
 
     expect(code).toBe(0);
-    expect(out).toEqual([`${done.id} completed`]);
+    expect(out).toHaveLength(1);
+    expect(settledLine(out[0]!)).toEqual({ type: "settled", task: done.id, state: "completed" });
   });
 
   test("an unknown id is a usage failure, not a silent timeout", async () => {
@@ -176,7 +200,9 @@ describe("what watch reports", () => {
     const { code, out } = await watch([task.id]);
 
     expect(code).toBe(0);
-    expect(out).toEqual([`${task.id} completed (archived) — Port the parser`]);
+    expect(settledLine(out[0]!)).toEqual({
+      type: "settled", task: task.id, state: "completed", title: "Port the parser", archived: true,
+    });
   });
 
   test("a title rides along so a fan-out's lines tell each other apart", async () => {
@@ -185,10 +211,14 @@ describe("what watch reports", () => {
     const { code, out } = await watch([first.id, second.id]);
 
     expect(code).toBe(0);
-    expect(out).toEqual([
-      `${first.id} completed — Port the parser`,
-      `${second.id} needs_input Which database? — Wire the store`,
-    ]);
+    expect(out).toHaveLength(2);
+    expect(settledLine(out[0]!)).toEqual({
+      type: "settled", task: first.id, state: "completed", title: "Port the parser",
+    });
+    expect(settledLine(out[1]!)).toEqual({
+      type: "settled", task: second.id, state: "needs_input",
+      question: "Which database?", title: "Wire the store",
+    });
   });
 
   test("bad arguments exit 2 and say how to use it", async () => {
@@ -234,14 +264,21 @@ describe("what watch streams", () => {
     });
 
     expect(code).toBe(0);
-    expect(out).toEqual([
-      "Worker spawned: antigravity",
-      "Agent error: Your workspace is out of credits",
+    expect(out).toHaveLength(5);
+    expect(eventLine(out[0]!)).toEqual({
+      type: "event", kind: "lifecycle", task: task.id, text: "Worker spawned: antigravity",
+    });
+    expect(eventLine(out[1]!)).toEqual({
+      type: "event", kind: "error", task: task.id, text: "Agent error: Your workspace is out of credits",
+    });
+    expect(eventLine(out[2]!)).toEqual({
       // Collapsed onto one line, because one event is one line.
-      "Write refused by scope: write outside scope: /etc/hosts",
-      "Task completed",
-      `${task.id} completed`,
-    ]);
+      type: "event", kind: "error", task: task.id, text: "Write refused by scope: write outside scope: /etc/hosts",
+    });
+    expect(eventLine(out[3]!)).toEqual({
+      type: "event", kind: "lifecycle", task: task.id, text: "Task completed",
+    });
+    expect(settledLine(out[4]!)).toEqual({ type: "settled", task: task.id, state: "completed" });
     expect(err).toEqual([]);
   });
 
@@ -289,10 +326,12 @@ describe("what watch streams", () => {
     // The rows already in the store belong to `inspect`. Replaying them would
     // bury the news under a trace that runs to thousands of lines.
     expect(code).toBe(0);
-    expect(out).toEqual(["Task completed", `${task.id} completed`]);
+    expect(out).toHaveLength(2);
+    expect(eventLine(out[0]!)).toEqual({ type: "event", kind: "lifecycle", task: task.id, text: "Task completed" });
+    expect(settledLine(out[1]!)).toEqual({ type: "settled", task: task.id, state: "completed" });
   });
 
-  test("a fan-out labels each event with the task it came from", async () => {
+  test("a fan-out's events each carry the full task id", async () => {
     const first = seedTask("running");
     const second = seedTask("running");
     const { code, out } = await streaming([first.id, second.id, "--timeout", "5s"], () => {
@@ -303,14 +342,17 @@ describe("what watch streams", () => {
     });
 
     expect(code).toBe(0);
-    expect(out).toEqual([
-      `${first.id.slice(0, 8)} Worker spawned: antigravity`,
-      `${second.id.slice(0, 8)} Worker spawned: kimi`,
-      `${first.id.slice(0, 8)} Task completed`,
-      `${second.id.slice(0, 8)} Task completed`,
-      `${first.id} completed`,
-      `${second.id} completed`,
-    ]);
+    expect(out).toHaveLength(6);
+    expect(eventLine(out[0]!)).toEqual({
+      type: "event", kind: "lifecycle", task: first.id, text: "Worker spawned: antigravity",
+    });
+    expect(eventLine(out[1]!)).toEqual({
+      type: "event", kind: "lifecycle", task: second.id, text: "Worker spawned: kimi",
+    });
+    expect(eventLine(out[2]!)).toEqual({ type: "event", kind: "lifecycle", task: first.id, text: "Task completed" });
+    expect(eventLine(out[3]!)).toEqual({ type: "event", kind: "lifecycle", task: second.id, text: "Task completed" });
+    expect(settledLine(out[4]!)).toEqual({ type: "settled", task: first.id, state: "completed" });
+    expect(settledLine(out[5]!)).toEqual({ type: "settled", task: second.id, state: "completed" });
   });
 
   test("drains a backlog bigger than one batch before reporting the settle", async () => {
@@ -326,10 +368,10 @@ describe("what watch streams", () => {
     // the settle line has to come last or the trace reads out of order.
     expect(code).toBe(0);
     expect(out.length).toBe(152);
-    expect(out[0]).toBe("Worker spawned: step 0");
-    expect(out[149]).toBe("Worker spawned: step 149");
-    expect(out[150]).toBe("Task completed");
-    expect(out[151]).toBe(`${task.id} completed`);
+    expect(eventLine(out[0]!).text).toBe("Worker spawned: step 0");
+    expect(eventLine(out[149]!).text).toBe("Worker spawned: step 149");
+    expect(eventLine(out[150]!).text).toBe("Task completed");
+    expect(settledLine(out[151]!)).toEqual({ type: "settled", task: task.id, state: "completed" });
   });
 
   test("the deadline still exits 1, having printed what it did see", async () => {
@@ -339,7 +381,10 @@ describe("what watch streams", () => {
     });
 
     expect(code).toBe(1);
-    expect(out).toEqual(["Worker spawned: antigravity"]);
+    expect(out).toHaveLength(1);
+    expect(eventLine(out[0]!)).toEqual({
+      type: "event", kind: "lifecycle", task: task.id, text: "Worker spawned: antigravity",
+    });
     expect(err).toEqual([]);
   });
 
@@ -389,7 +434,7 @@ describe("the actual command line", () => {
     const [stdout, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
 
     expect(code).toBe(0);
-    expect(stdout.trimEnd()).toBe(`${task.id} completed`);
+    expect(settledLine(stdout.trimEnd())).toEqual({ type: "settled", task: task.id, state: "completed" });
   }, 30_000);
 
   test("prints one line and exits 0 without ever serving HTTP", async () => {
@@ -397,7 +442,7 @@ describe("the actual command line", () => {
     const { code, stdout } = await run(task.id);
 
     expect(code).toBe(0);
-    expect(stdout.trimEnd()).toBe(`${task.id} completed`);
+    expect(settledLine(stdout.trimEnd())).toEqual({ type: "settled", task: task.id, state: "completed" });
   }, 30_000);
 
   test("exits 1 when the deadline passes with nothing to report", async () => {
@@ -522,11 +567,14 @@ describe("event socket watch", () => {
 
     expect(code).toBe(0);
     expect(err).toEqual([]);
-    // Lifecycle lines match byte-for-byte across transports.
-    // Settle lines differ only in the task UUID, which is assigned per task.
-    expect(out.slice(0, -1)).toEqual(dbOut.slice(0, -1));
+    // Event lines carry the full task id, and each transport watches its own
+    // task, so parity is byte-for-byte after the id is normalized to one
+    // placeholder: same kinds, same texts, same order across transports.
+    const eventsOf = (lines: string[]) =>
+      lines.slice(0, -1).map((l) => JSON.stringify({ ...eventLine(l), task: "<id>" }));
+    expect(eventsOf(out)).toEqual(eventsOf(dbOut));
     expect(out.length).toBe(dbOut.length);
-    expect(out.at(-1)).toContain("completed");
+    expect(settledLine(out.at(-1)!)).toMatchObject({ type: "settled", state: "completed" });
   });
 
   test("socket mode never opens the database", async () => {
@@ -546,8 +594,11 @@ describe("event socket watch", () => {
 
     // Must still stream and settle via the socket alone.
     expect(code).toBe(0);
-    expect(out).toContain("Worker spawned: antigravity");
-    expect(out.some((l) => l.includes(task.id) && l.includes("completed"))).toBe(true);
+    expect(out.some((l) => eventLine(l).text === "Worker spawned: antigravity")).toBe(true);
+    expect(out.some((l) => {
+      const parsed = settledLine(l);
+      return parsed.task === task.id && parsed.state === "completed";
+    })).toBe(true);
     expect(err).toEqual([]);
   });
 
@@ -560,7 +611,8 @@ describe("event socket watch", () => {
     });
 
     expect(code).toBe(0);
-    expect(out).toEqual([`${task.id} completed`]);
+    expect(out).toHaveLength(1);
+    expect(settledLine(out[0]!)).toEqual({ type: "settled", task: task.id, state: "completed" });
     expect(err).toEqual([]);
   });
 
@@ -587,12 +639,15 @@ describe("event socket watch", () => {
     const { code, out, err } = await running;
 
     expect(code).toBe(0);
-    expect(out).toContain("Worker spawned: antigravity");
-    expect(out).toContain("Agent error: crash");
-    expect(out).toContain("Task completed");
-    expect(out.some((l) => l.includes(task.id) && l.includes("completed"))).toBe(true);
+    expect(out.some((l) => eventLine(l).text === "Worker spawned: antigravity")).toBe(true);
+    expect(out.some((l) => eventLine(l).text === "Agent error: crash")).toBe(true);
+    expect(out.some((l) => eventLine(l).text === "Task completed")).toBe(true);
+    expect(out.some((l) => {
+      const parsed = settledLine(l);
+      return parsed.task === task.id && parsed.state === "completed";
+    })).toBe(true);
     // No duplicates: each event line appears once.
-    const spawnCount = out.filter((l) => l === "Worker spawned: antigravity").length;
+    const spawnCount = out.filter((l) => eventLine(l).text === "Worker spawned: antigravity").length;
     expect(spawnCount).toBe(1);
     // stderr must carry the failover warning.
     expect(err.some((l) => l.includes("event socket lost") && l.includes("falling back"))).toBe(true);

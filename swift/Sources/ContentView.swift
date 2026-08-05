@@ -303,24 +303,19 @@ private struct TaskGroupHeader: View {
     let toggle: () -> Void
 
     var body: some View {
-        Button(action: toggle) {
-            HStack(spacing: 6) {
-                Image(systemName: "chevron.down")
-                    .scaledFont(.caption2, weight: .semibold)
-                    .foregroundStyle(.tertiary)
-                    .rotationEffect(.degrees(collapsed ? -90 : 0))
-                SidebarSectionLabel(text: title)
-                Spacer(minLength: 0)
+        CollapsibleSection(
+            isExpanded: Binding(
+                get: { !collapsed },
+                set: { expanded in if expanded != !collapsed { toggle() } }
+            ),
+            label: { SidebarSectionLabel(text: title) },
+            trailing: {
                 Text("\(count)")
                     .scaledFont(.caption2, design: .monospaced)
                     .foregroundStyle(.tertiary)
             }
-            .contentShape(.rect)
-        }
-        .buttonStyle(.plain)
-        .animation(.snappy(duration: 0.16), value: collapsed)
+        )
         .accessibilityLabel("\(title), \(count) task\(count == 1 ? "" : "s")")
-        .accessibilityValue(collapsed ? "Collapsed" : "Expanded")
     }
 }
 

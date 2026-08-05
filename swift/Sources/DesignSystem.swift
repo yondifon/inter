@@ -320,6 +320,71 @@ struct IconButton: View {
     }
 }
 
+// MARK: - Collapsible sections
+
+/// Collapsible section header. The whole title line is the toggle — not a tiny
+/// chevron. The chevron sits a few points right of the label text, never before
+/// it and never pushed to the far edge by a spacer; it points right when
+/// collapsed and down when expanded, rotating in place so the motion reads as
+/// one thing folding. Content is rendered by the call site as its own
+/// `if isExpanded { … }`: a List only turns native `DisclosureGroup` children
+/// into real rows, so nesting tagged rows inside this view would break
+/// selection. Bindings keep the state wherever the site already owns it
+/// (settings, AppStorage-backed groups, or local state).
+struct CollapsibleSection<Label: View, Trailing: View>: View {
+    @Binding var isExpanded: Bool
+    let label: Label
+    let trailing: Trailing
+    /// Card-style sections fill the header row with the panel surface, like the
+    /// other cards in the activity timeline.
+    var panel = false
+
+    init(
+        isExpanded: Binding<Bool>,
+        @ViewBuilder label: () -> Label,
+        @ViewBuilder trailing: () -> Trailing = { EmptyView() },
+        panel: Bool = false
+    ) {
+        _isExpanded = isExpanded
+        self.label = label()
+        self.trailing = trailing()
+        self.panel = panel
+    }
+
+    var body: some View {
+        Button {
+            withAnimation(.easeOut(duration: 0.15)) { isExpanded.toggle() }
+        } label: {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                label
+                chevron
+                Spacer(minLength: 0)
+                trailing
+            }
+            .padding(panel ? EdgeInsets(top: 10, leading: 14, bottom: 10, trailing: 14) : EdgeInsets())
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background {
+                if panel {
+                    RoundedRectangle(cornerRadius: Radius.medium).fill(Surface.panel)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
+    }
+
+    /// Quiet and small — the title does the talking.
+    private var chevron: some View {
+        Image(systemName: "chevron.down")
+            .scaledFont(.caption2, weight: .semibold)
+            .foregroundStyle(.tertiary)
+            .rotationEffect(.degrees(isExpanded ? 0 : -90))
+            .animation(.easeOut(duration: 0.15), value: isExpanded)
+            .accessibilityHidden(true)
+    }
+}
+
 /// Copies text and confirms in place. Used for endpoints, paths, and env values.
 struct CopyIconButton: View {
     let text: String

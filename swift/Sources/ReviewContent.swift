@@ -414,18 +414,23 @@ private struct JSONTreeRow: View {
             HStack(spacing: 12) {
                 HStack(spacing: 5) {
                     if !value.children.isEmpty {
-                        Button { expanded.toggle() } label: {
-                            Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                                .scaledFont(.caption2, weight: .semibold)
-                                .frame(width: 20 * uiScale, height: 20 * uiScale)
-                                .contentShape(.rect)
+                        Button {
+                            withAnimation(.easeOut(duration: 0.15)) { expanded.toggle() }
+                        } label: {
+                            HStack(spacing: 5) {
+                                Text(name).scaledFont(.callout, weight: .medium).lineLimit(1)
+                                Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                                    .scaledFont(.caption2, weight: .semibold)
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(.rect)
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel(expanded ? "Collapse \(name)" : "Expand \(name)")
                     } else {
-                        Color.clear.frame(width: 20 * uiScale, height: 20 * uiScale)
+                        Text(name).scaledFont(.callout, weight: .medium).lineLimit(1)
                     }
-                    Text(name).scaledFont(.callout, weight: .medium).lineLimit(1)
                 }
                 .padding(.leading, CGFloat(depth) * 16 * uiScale)
                 .frame(maxWidth: .infinity, alignment: .leading)

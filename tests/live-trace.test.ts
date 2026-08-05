@@ -15,7 +15,7 @@ import type { Profile, Task } from "../src/types";
  */
 let root: string;
 let base: string;
-let broker: ReturnType<typeof Bun.spawn>;
+let broker: ReturnType<typeof Bun.spawn<"pipe", "pipe", "pipe">>;
 let profileId = "live-fake";
 
 const CLI = join(import.meta.dir, "..", "src", "cli.ts");

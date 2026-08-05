@@ -1,7 +1,31 @@
 import { describe, expect, test } from "bun:test";
-import { interpretWorkerOutcome, needsInputQuestion } from "../src/task-protocol";
+import { interpretWorkerOutcome, needsInputQuestion, workerPrompt } from "../src/task-protocol";
 
 const done = (output: string) => interpretWorkerOutcome(0, output, "");
+
+describe("shipped TL;DR rule", () => {
+  test("tells the worker to open its final report with a TL;DR", () => {
+    const prompt = workerPrompt("Do the work.", true);
+    expect(prompt).toContain("## User rules");
+    expect(prompt).toContain("## TL;DR");
+    expect(prompt).toContain("1-3 plain-language sentences");
+    expect(prompt).toContain("what was done or found and the outcome");
+  });
+
+  test("sits after the scope line and before the completion-marker protocol", () => {
+    const prompt = workerPrompt("Do.", true, { read: ["src/**"], write: ["src/api.ts"] });
+    expect(prompt.indexOf("operation not permitted")).toBeGreaterThan(-1);
+    expect(prompt.indexOf("## TL;DR")).toBeGreaterThan(prompt.indexOf("operation not permitted"));
+    expect(prompt.indexOf("INTER_RESULT: completed")).toBeGreaterThan(prompt.indexOf("## TL;DR"));
+    expect(prompt.indexOf("INTER_BLOCKED:")).toBeGreaterThan(prompt.indexOf("## TL;DR"));
+  });
+
+  test("scopes the rule to the final answer, not intermediate messages", () => {
+    const prompt = workerPrompt("Do.", false);
+    expect(prompt).toContain("final answer");
+    expect(prompt).toContain("not to intermediate messages");
+  });
+});
 
 describe("completion marker", () => {
   // Every one of these was observed as blocked/unverified before the marker

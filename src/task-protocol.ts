@@ -47,6 +47,10 @@ export function workerPrompt(prompt: string, allowQuestions: boolean, scope?: Ta
     "<inter_protocol>",
     "This reporting protocol is part of the task contract.",
     ...(scope ? [scopeLine(scope)] : []),
+    "",
+    "## User rules",
+    "The rules below are set by your user and apply to every delegation. Honor them for your final report.",
+    "1. Open your final report with `## TL;DR` — 1-3 plain-language sentences stating what was done or found and the outcome. Detail follows after; this applies to your final answer, not to intermediate messages.",
     allowQuestions
       ? "If a product choice, secret, destructive action, or new authority is required, stop and end with: INTER_NEEDS_INPUT: <one clear question>"
       : "Do not ask questions. If required information or authority is missing, report a blocked result.",

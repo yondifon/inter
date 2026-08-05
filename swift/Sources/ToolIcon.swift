@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 
 /// Maps a work row's title to a category glyph, so a long trace reads by
 /// shape instead of by re-reading the same handful of tool names over and
@@ -83,5 +84,35 @@ enum ToolIcon {
         let words = title.split(separator: " ")
         guard words.count >= 2 else { return false }
         return words.allSatisfy { $0.first?.isUppercase ?? false }
+    }
+}
+
+/// One box for every event icon, whatever the glyph. SF Symbols scale with
+/// their font and differ in intrinsic proportions, so the same font size
+/// still draws a `brain` larger than a `terminal`; a fixed frame with the
+/// symbol scaled to fit and centered is what actually pins them to one
+/// visual size. The box edge is the size the trace's dominant work-row
+/// icons (callout, 12 pt) already read at, plus a little room so tall
+/// glyphs like `puzzlepiece.extension` shrink into the box instead of
+/// stretching the row. Sits here rather than in DesignSystem.swift beside
+/// `IconButton` because that file is under concurrent edit; it can move
+/// there once that settles.
+struct EventIcon: View {
+    /// Box edge, in points at uiScale 1.
+    static let box: CGFloat = 14
+
+    let symbol: String
+    var weight: Font.Weight = .medium
+
+    @Environment(\.uiScale) private var uiScale
+
+    var body: some View {
+        // `.resizable()` exists only on Image, so it must come before any
+        // modifier that erases to `some View`; weight survives as fontWeight.
+        Image(systemName: symbol)
+            .resizable()
+            .scaledToFit()
+            .fontWeight(weight)
+            .frame(width: EventIcon.box * uiScale, height: EventIcon.box * uiScale)
     }
 }

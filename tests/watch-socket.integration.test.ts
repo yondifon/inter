@@ -112,7 +112,7 @@ async function proveAttached(watch: WatchProcess, taskId: string): Promise<void>
   for (let attempt = 0; attempt < 40; attempt += 1) {
     seedEvent(taskId, "worker_spawned", { provider: `probe-${attempt}` });
     try {
-      await watch.waitFor((out) => out.includes("Worker spawned: probe-"), 250);
+      await watch.waitFor((out) => hasEvent(out, (text) => text.includes("Worker spawned: probe-")), 250);
       return;
     } catch {
       // Not attached yet; try again.
@@ -121,8 +121,36 @@ async function proveAttached(watch: WatchProcess, taskId: string): Promise<void>
   throw new Error("watch never attached");
 }
 
+/**
+ * Parsed stdout lines. Watch prints NDJSON, so any line that does not parse is
+ * a trailing fragment split across a chunk boundary — skipped until the next
+ * poll finishes it.
+ */
+function jsonLines(stdout: string): Array<Record<string, unknown>> {
+  const lines: Array<Record<string, unknown>> = [];
+  for (const line of stdout.split("\n")) {
+    if (line === "") continue;
+    try {
+      lines.push(JSON.parse(line) as Record<string, unknown>);
+    } catch {
+      // Partial line; not complete yet.
+    }
+  }
+  return lines;
+}
+
+function hasEvent(stdout: string, matches: (text: string) => boolean): boolean {
+  return jsonLines(stdout).some((line) => line.type === "event" && matches(String(line.text)));
+}
+
+function hasSettled(stdout: string, taskId: string, state: string): boolean {
+  return jsonLines(stdout).some(
+    (line) => line.type === "settled" && line.task === taskId && line.state === state,
+  );
+}
+
 function countOf(haystack: string, needle: string): number {
-  return haystack.split("\n").filter((line) => line === needle).length;
+  return jsonLines(haystack).filter((line) => line.type === "event" && line.text === needle).length;
 }
 
 beforeAll(() => {
@@ -173,12 +201,12 @@ describe("watch over the event socket, end to end", () => {
     await proveAttached(watch, task.id);
 
     seedEvent(task.id, "worker_spawned", { provider: "the-real-one" });
-    await watch.waitFor((out) => out.includes("Worker spawned: the-real-one"));
+    await watch.waitFor((out) => hasEvent(out, (text) => text === "Worker spawned: the-real-one"));
     finish(task);
 
     const code = await watch.exited;
     expect(code).toBe(0);
-    expect(watch.stdout()).toContain(`${task.id} completed`);
+    expect(hasSettled(watch.stdout(), task.id, "completed")).toBe(true);
     expect(watch.stderr()).toBe("");
   }, 30_000);
 
@@ -191,13 +219,13 @@ describe("watch over the event socket, end to end", () => {
     await proveAttached(watch, task.id);
 
     seedEvent(task.id, "worker_spawned", { provider: "db-only" });
-    await watch.waitFor((out) => out.includes("Worker spawned: db-only"));
+    await watch.waitFor((out) => hasEvent(out, (text) => text === "Worker spawned: db-only"));
     finish(task);
 
     const code = await watch.exited;
     expect(code).toBe(0);
     expect(countOf(watch.stdout(), "Worker spawned: db-only")).toBe(1);
-    expect(watch.stdout()).toContain(`${task.id} completed`);
+    expect(hasSettled(watch.stdout(), task.id, "completed")).toBe(true);
     expect(watch.stderr()).toBe("");
   }, 30_000);
 
@@ -215,7 +243,7 @@ describe("watch over the event socket, end to end", () => {
     // One event over the socket, confirmed on stdout before the kill, so the
     // failover provably happens between two printed events.
     seedEvent(task.id, "worker_spawned", { provider: "before-failover" });
-    await watch.waitFor((out) => out.includes("Worker spawned: before-failover"));
+    await watch.waitFor((out) => hasEvent(out, (text) => text === "Worker spawned: before-failover"));
 
     server.stop();
     server = undefined;
@@ -223,7 +251,7 @@ describe("watch over the event socket, end to end", () => {
 
     // The rest arrives through the database.
     seedEvent(task.id, "worker_spawned", { provider: "after-failover" });
-    await watch.waitFor((out) => out.includes("Worker spawned: after-failover"));
+    await watch.waitFor((out) => hasEvent(out, (text) => text === "Worker spawned: after-failover"));
     finish(task);
 
     const code = await watch.exited;
@@ -231,7 +259,7 @@ describe("watch over the event socket, end to end", () => {
     const out = watch.stdout();
     expect(countOf(out, "Worker spawned: before-failover")).toBe(1);
     expect(countOf(out, "Worker spawned: after-failover")).toBe(1);
-    expect(out).toContain(`${task.id} completed`);
+    expect(hasSettled(out, task.id, "completed")).toBe(true);
     // Exactly one warning; the fallback itself is otherwise quiet.
     const warnings = watch.stderr().split("\n").filter((line) => line.includes("event socket lost"));
     expect(warnings.length).toBe(1);

@@ -120,10 +120,9 @@ struct TaskDetail: View {
                 // the same thing against the real content size, so it cannot overshoot,
                 // and it keeps holding the tail as events stream in.
                 .defaultScrollAnchor(followsTail && section == .activity ? .bottom : .top)
-                .overlay(alignment: .bottomTrailing) {
+                .overlay(alignment: .leading) {
                     ScrollJumpControl(proxy: proxy)
-                        .padding(.trailing, 16 * uiScale)
-                        .padding(.bottom, 16 * uiScale)
+                        .padding(.leading, 16 * uiScale)
                 }
             }
         }
@@ -669,20 +668,21 @@ struct TaskDetail: View {
     }
 }
 
-/// Floating top/bottom jump control over the trace. Always visible — the trace's
-/// length moves as events stream in, so an overflow gate would flicker across
-/// the whole run; the pill stays put so the reader always knows where it is.
+/// Floating top/bottom jump control along the trace's leading edge, vertically
+/// centred. Always visible — the trace's length moves as events stream in, so an
+/// overflow gate would flicker across the whole run; the pair stays put so the
+/// reader always knows where it is.
 private struct ScrollJumpControl: View {
     let proxy: ScrollViewProxy
 
     @Environment(\.uiScale) private var uiScale
 
     var body: some View {
-        HStack(spacing: 2 * uiScale) {
-            IconButton(symbol: "arrow.up.to.line", label: "Jump to top") {
+        VStack(spacing: 2 * uiScale) {
+            IconButton(symbol: "chevron.up", label: "Jump to top") {
                 withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("top", anchor: .top) }
             }
-            IconButton(symbol: "arrow.down.to.line", label: "Jump to bottom") {
+            IconButton(symbol: "chevron.down", label: "Jump to bottom") {
                 withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
             }
         }
@@ -839,8 +839,7 @@ private struct ActivityWorkRow: View {
                     // instead of `.primary`. Failure still needs to read at
                     // a glance, so it keeps the same red the title used.
                     if let symbolName = ToolIcon.symbolName(for: event) {
-                        Image(systemName: symbolName)
-                            .scaledFont(.callout, weight: .medium)
+                        EventIcon(symbol: symbolName)
                             .foregroundStyle(event.phase == "failed" ? AnyShapeStyle(.red) : AnyShapeStyle(.tertiary))
                             .layoutPriority(1)
                             .help(event.title)
@@ -966,7 +965,7 @@ private struct ActivityReasoningRow: View {
 
     var body: some View {
         HStack(spacing: 7) {
-            Image(systemName: "brain").scaledFont(.caption2).foregroundStyle(.tertiary)
+            EventIcon(symbol: "brain").foregroundStyle(.tertiary)
                 .accessibilityHidden(true)
             Text(label).scaledFont(.caption, design: .monospaced).foregroundStyle(.secondary)
         }
@@ -987,7 +986,7 @@ private struct ActivitySignalCard: View {
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 9) {
-            Image(systemName: symbol).scaledFont(.caption, weight: .semibold)
+            EventIcon(symbol: symbol, weight: .semibold)
                 .foregroundStyle(tint)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
@@ -1042,27 +1041,21 @@ private struct ActivityHandoffCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Button(action: { withAnimation(.easeOut(duration: 0.15)) { expanded.toggle() } }) {
-                HStack(alignment: .firstTextBaseline, spacing: 9) {
-                    Image(systemName: "arrow.triangle.branch")
-                        .scaledFont(.caption, weight: .semibold)
-                        .foregroundStyle(.secondary)
-                        .accessibilityHidden(true)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Handed off").scaledFont(.callout, weight: .medium)
-                        Text(summary).scaledFont(.caption).foregroundStyle(.secondary)
+            CollapsibleSection(
+                isExpanded: $expanded,
+                label: {
+                    HStack(spacing: 9) {
+                        EventIcon(symbol: "arrow.triangle.branch", weight: .semibold)
+                            .foregroundStyle(.secondary)
+                            .accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Handed off").scaledFont(.callout, weight: .medium)
+                            Text(summary).scaledFont(.caption).foregroundStyle(.secondary)
+                        }
                     }
-                    Spacer(minLength: 12)
-                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
-                        .scaledFont(.caption2, weight: .semibold)
-                        .foregroundStyle(.tertiary)
-                }
-                .padding(.vertical, 10)
-                .padding(.horizontal, 14)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Surface.panel, in: RoundedRectangle(cornerRadius: Radius.medium))
-            }
-            .buttonStyle(.plain)
+                },
+                panel: true
+            )
 
             if expanded {
                 VStack(alignment: .leading, spacing: 10) {
@@ -1109,23 +1102,18 @@ private struct ActivityReceiptCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text(event.phase == "failed" ? "Run failed" : "Run settled")
-                    .scaledFont(.caption, weight: .semibold, design: .monospaced)
-                    .tracking(0.5)
-                    .foregroundStyle(event.phase == "failed" ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
-                    .textCase(.uppercase)
-                Spacer()
-                if event.rawText != nil {
-                    IconButton(
-                        symbol: showingRawDetails ? "chevron.down" : "chevron.right",
-                        label: showingRawDetails ? "Hide raw details" : "Show raw details",
-                        tint: AnyShapeStyle(.tertiary)
-                    ) { showingRawDetails.toggle() }
-                    .scaledFont(.caption2, weight: .semibold)
+            if event.rawText != nil {
+                CollapsibleSection(
+                    isExpanded: $showingRawDetails,
+                    label: { receiptTitle },
+                    trailing: { receiptTimestamp }
+                )
+            } else {
+                HStack {
+                    receiptTitle
+                    Spacer(minLength: 0)
+                    receiptTimestamp
                 }
-                Text(EventClock.time(event.createdAt))
-                    .scaledFont(.caption2, design: .monospaced).foregroundStyle(.tertiary)
             }
             HStack(alignment: .top, spacing: 0) {
                 ForEach(Array(stats.enumerated()), id: \.offset) { index, stat in
@@ -1154,6 +1142,20 @@ private struct ActivityReceiptCard: View {
             RoundedRectangle(cornerRadius: Radius.medium)
                 .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1)
         )
+    }
+
+    private var receiptTitle: some View {
+        Text(event.phase == "failed" ? "Run failed" : "Run settled")
+            .scaledFont(.caption, weight: .semibold, design: .monospaced)
+            .tracking(0.5)
+            .foregroundStyle(event.phase == "failed" ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
+            .textCase(.uppercase)
+    }
+
+    private var receiptTimestamp: some View {
+        Text(EventClock.time(event.createdAt))
+            .scaledFont(.caption2, design: .monospaced).foregroundStyle(.tertiary)
+            .help(event.createdAt)
     }
 
     private var stats: [(value: String, label: String)] {
@@ -1384,14 +1386,11 @@ private struct TaskFactRow: View {
     let label: String
     let value: String
     var copy: String?
-    @Environment(\.uiScale) private var uiScale
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: icon)
-                .font(.system(size: 11 * uiScale))
+            EventIcon(symbol: icon)
                 .foregroundStyle(.tertiary)
-                .frame(width: 16 * uiScale, alignment: .center)
                 .help(label)
                 .accessibilityHidden(true)
             Text(value)

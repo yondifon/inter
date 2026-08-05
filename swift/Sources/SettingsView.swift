@@ -19,7 +19,11 @@ struct SettingsView: View {
     var body: some View {
         NavigationSplitView {
             List(selection: $selection) {
-                DisclosureGroup(isExpanded: $workersExpanded) {
+                CollapsibleSection(
+                    isExpanded: $workersExpanded,
+                    label: { SidebarSectionLabel(text: "Workers") }
+                )
+                if workersExpanded {
                     if store.profiles.isEmpty {
                         Text("No workers yet. Add one to start delegating.")
                             .scaledFont(.callout).foregroundStyle(.tertiary)
@@ -28,8 +32,6 @@ struct SettingsView: View {
                             WorkerRow(profile: profile).tag(SettingsSelection.worker(profile.id))
                         }
                     }
-                } label: {
-                    SidebarSectionLabel(text: "Workers")
                 }
 
                 AboutRow().tag(SettingsSelection.about)

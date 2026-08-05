@@ -77,7 +77,7 @@ export function watchCommand(
 export function watchUsage(): string {
   return `usage: ${watchCommand("<taskId...>")} [--timeout 30m]\n` +
     "  Blocks until a task asks a question, fails, is cancelled, or completes.\n" +
-    "  Prints one line per settled task. Exit 0 with news, 1 on timeout, 2 on bad input.";
+    "  Prints JSON lines — type \"event\" as they stream, type \"settled\" per task. Exit 0 with news, 1 on timeout, 2 on bad input.";
 }
 
 interface WatchArgs {
@@ -129,25 +129,25 @@ function parseDuration(value: string): number | undefined {
 }
 
 /**
- * One line per task that settled: the id, the state, and the question or error
- * if there is one. A task that is still running gets no line from here; what it
- * is doing arrives as event lines instead.
+ * One JSON line per task that settled: the id, the state, and the question or
+ * error if there is one. A task that is still running gets no line from here;
+ * what it is doing arrives as event lines instead.
  */
 export function watchLine(task: Task): string {
+  const line: Record<string, unknown> = { type: "settled", task: task.id, state: task.state };
+  // needs_input answers with its question, every other settled state with its
+  // error — the same pairing the prose line used.
   const detail = task.state === "needs_input" ? task.question : task.error;
   const trimmed = detail?.replace(/\s+/g, " ").trim().slice(0, MAX_DETAIL);
+  if (trimmed) line[task.state === "needs_input" ? "question" : "error"] = trimmed;
   // Watching a fan-out printed N bare UUIDs, so telling them apart cost an
   // `inspect` per id — giving back the saving the command exists to create.
   const title = task.title?.replace(/\s+/g, " ").trim().slice(0, MAX_TITLE);
-  return [
-    task.id,
-    task.state,
-    // An archived id still resolves and still settles; saying so is what keeps
-    // it distinguishable from an id this store has never heard of.
-    ...(task.archivedAt ? ["(archived)"] : []),
-    ...(trimmed ? [trimmed] : []),
-    ...(title ? [`— ${title}`] : []),
-  ].join(" ");
+  if (title) line.title = title;
+  // An archived id still resolves and still settles; saying so is what keeps
+  // it distinguishable from an id this store has never heard of.
+  if (task.archivedAt) line.archived = true;
+  return JSON.stringify(line);
 }
 
 /**
@@ -170,17 +170,15 @@ export async function runWatch(
   // One deadline for the whole command rather than one per wait: a task that
   // keeps emitting must not be able to push the finish line back forever.
   const deadline = Date.now() + parsed.timeoutMs;
-  // Only a fan-out has to be told whose event this is; a single watch knows.
-  const labelled = parsed.taskIds.length > 1;
 
   // ---- Try the event socket first ----
 
-  const sockResult = await trySocketRun(parsed.taskIds, deadline, labelled, out, err);
+  const sockResult = await trySocketRun(parsed.taskIds, deadline, out, err);
   if (typeof sockResult === "number") return sockResult;
 
   // ---- DB fallback ----
 
-  return runDbLoop(parsed.taskIds, deadline, labelled, out, err, false, undefined, undefined, 0, sockResult.fallbackReason);
+  return runDbLoop(parsed.taskIds, deadline, out, err, false, undefined, undefined, 0, sockResult.fallbackReason);
 }
 
 // ---- Socket attempt ----
@@ -195,7 +193,6 @@ export async function runWatch(
 async function trySocketRun(
   taskIds: string[],
   deadline: number,
-  labelled: boolean,
   out: (line: string) => void,
   err: (line: string) => void,
 ): Promise<number | { fallbackReason: string }> {
@@ -269,7 +266,7 @@ async function trySocketRun(
       // Events at or before the attach-time cursor are history; they belong
       // to `inspect`, not to this watcher.
       const fresh = batch.events.filter((e) => e.id > cursor);
-      cursor = processStreamedEvents(fresh, cursor, labelled, out);
+      cursor = processStreamedEvents(fresh, cursor, out);
       cursor = Math.max(cursor, batch.cursor);
       if (batch.hasMore) continue;
       settledCount += settleCompleted(batch.tasks, pending, out);
@@ -284,7 +281,7 @@ async function trySocketRun(
       // tracks exactly what was printed. Settles carry over too, so a task
       // that settled over the socket still counts when the DB phase ends with
       // nothing new.
-      return runDbLoop(taskIds, deadline, labelled, out, err, true, cursor, pending, settledCount);
+      return runDbLoop(taskIds, deadline, out, err, true, cursor, pending, settledCount);
     }
     throw e;
   } finally {
@@ -301,7 +298,6 @@ async function trySocketRun(
 async function runDbLoop(
   taskIds: string[],
   deadline: number,
-  labelled: boolean,
   out: (line: string) => void,
   err: (line: string) => void,
   /** True when this is a mid-run failover from the socket. */
@@ -365,7 +361,7 @@ async function runDbLoop(
       return 2;
     }
 
-    cursor = processStreamedEvents(waited.events, cursor, labelled, out);
+    cursor = processStreamedEvents(waited.events, cursor, out);
     cursor = Math.max(cursor, waited.cursor);
     // More rows than one batch carries: go straight back for the rest instead
     // of waiting, and hold the settle line until the trace behind it is out.
@@ -380,13 +376,12 @@ async function runDbLoop(
 // ---- Shared per-batch processing (socket and DB paths are identical) ----
 
 /**
- * Prints one line per streamed event, advances the cursor past skipped rows
- * too, and returns the new cursor.
+ * Prints one JSON line per streamed event, advances the cursor past skipped
+ * rows too, and returns the new cursor.
  */
 function processStreamedEvents(
   events: Array<{ id: number; taskId: string; kind: string; minor?: boolean; summary: string }>,
   currentCursor: number,
-  labelled: boolean,
   out: (line: string) => void,
 ): number {
   let cursor = currentCursor;
@@ -397,7 +392,7 @@ function processStreamedEvents(
     cursor = Math.max(cursor, event.id);
     // A step boundary or a quiet heartbeat is plumbing even though it is
     // lifecycle, so `minor` has to clear as well as the kind.
-    if (STREAMED_KINDS.has(event.kind) && !event.minor) out(eventLine(event, labelled));
+    if (STREAMED_KINDS.has(event.kind) && !event.minor) out(eventLine(event));
   }
   return cursor;
 }
@@ -425,11 +420,12 @@ function settleCompleted(
 }
 
 /**
- * An event as one line: the summary the trace already renders, collapsed onto a
- * single line and cut to the width a settled line uses. The id goes in front
- * only for a fan-out, which is the only case that cannot tell otherwise.
+ * An event as one JSON line: the kind, the full task id — always present, so a
+ * fan-out's lines stay attributable without a second look — and the summary the
+ * trace already renders, collapsed onto a single line and cut to the width a
+ * settled line uses.
  */
-function eventLine(event: { taskId: string; summary: string }, withTaskId: boolean): string {
-  const summary = event.summary.replace(/\s+/g, " ").trim().slice(0, MAX_DETAIL);
-  return withTaskId ? `${event.taskId.slice(0, 8)} ${summary}` : summary;
+function eventLine(event: { taskId: string; kind: string; summary: string }): string {
+  const text = event.summary.replace(/\s+/g, " ").trim().slice(0, MAX_DETAIL);
+  return JSON.stringify({ type: "event", kind: event.kind, task: event.taskId, text });
 }
