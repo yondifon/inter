@@ -215,6 +215,17 @@ const serveOptions = {
     if (url.pathname === "/api/state" && request.method === "GET") {
       const config = await loadConfig();
       const summary = url.searchParams.get("view") === "summary";
+      const archived = archiveFilter(url.searchParams.get("archived"));
+      // `limit` is the sidebar's current page window (grows as the app pages
+      // in more), not a hard cap on what exists — fetching one extra row and
+      // slicing it off, the same trick `listTaskEventsTail` uses for
+      // `hasEarlier`, is how `tasksHasMore` learns whether paging further
+      // would return anything.
+      const summaryLimit = Math.min(2000, Math.max(1, Number(url.searchParams.get("limit") ?? 50) || 50));
+      const summaryRows = summary
+        ? listTaskSummaries({ limit: summaryLimit + 1, archived })
+        : [];
+      const tasksHasMore = summaryRows.length > summaryLimit;
       return Response.json({
         profiles: publicProfiles(config.profiles),
         // Output is already the parsed answer — finalText runs once, when the
@@ -224,8 +235,9 @@ const serveOptions = {
         // full rows (prompt + output per task) for the list rows, and the app
         // fetches one task in full only when it is opened.
         tasks: summary
-          ? listTaskSummaries({ limit: 200, archived: archiveFilter(url.searchParams.get("archived")) }).map(publicTaskSummary)
-          : listTasks(archiveFilter(url.searchParams.get("archived"))),
+          ? summaryRows.slice(0, summaryLimit).map(publicTaskSummary)
+          : listTasks(archived),
+        ...(summary ? { tasksHasMore } : {}),
         // Why a provider is being avoided, and what each cwd is allowed to
         // touch — both cheap reads, both previously invisible in the app.
         profileFailures: stateStore().listProfileFailures(),

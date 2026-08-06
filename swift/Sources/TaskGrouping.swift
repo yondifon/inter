@@ -44,6 +44,25 @@ enum TaskSort: String, CaseIterable, Identifiable {
     }
 }
 
+/// Which archive state the sidebar shows. Raw values match the broker's own
+/// `archived` query parameter (`active` / `only` / `include`) directly, so
+/// there is no separate translation table between the picker and the fetch.
+enum TaskArchiveFilter: String, CaseIterable, Identifiable {
+    case active
+    case archived = "only"
+    case all = "include"
+
+    var id: Self { self }
+
+    var label: String {
+        switch self {
+        case .all: "All"
+        case .active: "Active"
+        case .archived: "Archived"
+        }
+    }
+}
+
 /// One rendered run of task rows. `title` is nil for a run that needs no heading.
 struct TaskGroup: Identifiable {
     let id: String

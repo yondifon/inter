@@ -28,6 +28,5 @@ short sentences. Doc strings and tool descriptions follow the same voice.
 
 ## License
 
-Contributions are accepted under the project license ([PolyForm Noncommercial
-1.0.0](LICENSE.md)). By submitting a contribution you agree to license it under
-those terms.
+Contributions are accepted under the project license ([AGPL-3.0](LICENSE.md)).
+By submitting a contribution you agree to license it under those terms.

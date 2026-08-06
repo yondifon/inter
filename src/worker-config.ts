@@ -1,11 +1,17 @@
 import { join, resolve } from "node:path";
 
 const CONFIG_FILE = ".inter.toml";
-const WORKER_FIELDS = ["tldr", "tldr_sentences", "conduct", "report"];
+const WORKER_FIELDS = ["tldr", "tldr_sentences", "tldr_template", "conduct", "report"];
 const MAX_RULES = 20;
 const MAX_RULE_CHARS = 500;
 const MAX_SECTION_CHARS = 4_000;
 const SENTENCE_RANGE = /^([1-9]\d?)(?:-([1-9]\d?))?$/;
+const COUNT_PLACEHOLDER = "{count}";
+
+/** The wording of the TL;DR rule, with `{count}` standing in for the sentence count `tldr_sentences` resolves to. */
+const DEFAULT_TLDR_TEMPLATE =
+  "Open your final report with `## TL;DR` — {count} stating what was done or found and the outcome. " +
+  "Detail follows after; this applies to your final answer, not to intermediate messages.";
 
 /**
  * The parts of the worker preamble a project owns. Everything else in
@@ -15,6 +21,7 @@ const SENTENCE_RANGE = /^([1-9]\d?)(?:-([1-9]\d?))?$/;
 export interface WorkerRules {
   tldr: boolean;
   tldrSentences: string;
+  tldrTemplate: string;
   conduct: string[];
   report: string[];
 }
@@ -23,6 +30,7 @@ export interface WorkerRules {
 export const DEFAULT_WORKER_RULES: WorkerRules = {
   tldr: true,
   tldrSentences: "1-3",
+  tldrTemplate: DEFAULT_TLDR_TEMPLATE,
   conduct: [],
   report: [],
 };
@@ -68,6 +76,7 @@ function validateWorkerRules(raw: unknown, path: string): WorkerRules {
   return {
     tldr: expectBoolean(worker.tldr, path, "worker.tldr") ?? DEFAULT_WORKER_RULES.tldr,
     tldrSentences: sentenceRange(worker.tldr_sentences, path) ?? DEFAULT_WORKER_RULES.tldrSentences,
+    tldrTemplate: tldrTemplate(worker.tldr_template, path) ?? DEFAULT_WORKER_RULES.tldrTemplate,
     conduct: ruleList(worker.conduct, path, "worker.conduct"),
     report: ruleList(worker.report, path, "worker.report"),
   };
@@ -89,6 +98,17 @@ function sentenceRange(value: unknown, path: string): string | undefined {
   const high = match[2] === undefined ? undefined : Number(match[2]);
   if (high !== undefined && high < low) fail(path, field, "range must not end below where it starts");
   return high === undefined ? `${low}` : `${low}-${high}`;
+}
+
+function tldrTemplate(value: unknown, path: string): string | undefined {
+  const field = "worker.tldr_template";
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !value.trim()) fail(path, field, "must be a non-empty string");
+  const template = value.trim();
+  if (/[\r\n]/.test(template)) fail(path, field, "must be a single line");
+  if (template.length > MAX_RULE_CHARS) fail(path, field, `must be at most ${MAX_RULE_CHARS} characters`);
+  if (!template.includes(COUNT_PLACEHOLDER)) fail(path, field, `must include the ${COUNT_PLACEHOLDER} placeholder`);
+  return template;
 }
 
 function ruleList(value: unknown, path: string, field: string): string[] {

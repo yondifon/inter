@@ -15,6 +15,7 @@ version = 1
 [worker]
 tldr = true
 tldr_sentences = "2-4"
+tldr_template = "Open your final report with `## TL;DR` — {count} stating what was done or found and the outcome. Detail follows after; this applies to your final answer, not to intermediate messages."
 conduct = [
   "Run `bun test` before you report, and paste the tally.",
   "Never write files with shell redirects; use your editing tools.",
@@ -29,8 +30,17 @@ report = [
 | --- | --- | --- | --- |
 | `tldr` | boolean | `true` | Whether the worker is told to open its report with a `## TL;DR`. |
 | `tldr_sentences` | string | `"1-3"` | How long that TL;DR should be — a count (`"2"`) or a range (`"1-3"`). |
+| `tldr_template` | string | see below | The literal wording of the TL;DR rule. `{count}` is replaced with what `tldr_sentences` resolves to. |
 | `conduct` | array of strings | none | How the worker should work. Shown as its own numbered section, before the report rules. |
 | `report` | array of strings | none | How the worker should report back. Numbered after the TL;DR rule. |
+
+`tldr_template` defaults to:
+
+```
+Open your final report with `## TL;DR` — {count} stating what was done or found and the outcome. Detail follows after; this applies to your final answer, not to intermediate messages.
+```
+
+Edit it to change the rule's wording; `tldr_sentences` still controls the length that fills `{count}` (and still gets validated as a count or range), so the two work together rather than one replacing the other. `tldr_template` itself follows the same caps as a single rule — one line, 500 characters — and must keep the `{count}` placeholder, since dropping it would silently discard the length instruction.
 
 `[worker]` is the only new table. A `.inter.toml` that had no routing policy
 before does not need one now: `[worker]` on its own is a complete file, and

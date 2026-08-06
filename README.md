@@ -207,11 +207,12 @@ Development notes live in [docs/internal/](docs/internal/).
 
 ## License
 
-Inter is free for individuals and noncommercial use under the [PolyForm
-Noncommercial License 1.0.0](LICENSE.md). Any company or commercial use requires
-a paid license from the author.
+Inter is licensed under the [GNU Affero General Public License v3.0](LICENSE.md).
+You may use, modify, and share it freely. If you modify Inter and offer it to
+others over a network, you must publish your modified source under the same
+license.
 
-Contact for commercial licensing: `isern@palauaandsons.com`
+Contact: `yong@malico.me`
 
 See [LICENSE.md](LICENSE.md) for the full terms.
 

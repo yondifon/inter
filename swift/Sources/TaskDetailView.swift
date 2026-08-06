@@ -941,7 +941,10 @@ private struct NeedsInputBanner: View {
 enum BlockedTaskCopy {
     struct Explanation: Equatable {
         var headline: String
-        var detail: String?
+        /// The worker's own `completion.reason`, kept verbatim but never shown
+        /// as the primary explanation — some reasons match no known pattern,
+        /// and even the ones that do are still useful for debugging.
+        var rawReason: String?
         var deniedPaths: [String]
         var suggestedScope: TaskScope?
     }
@@ -950,11 +953,11 @@ enum BlockedTaskCopy {
         guard let completion else {
             return Explanation(
                 headline: "The run stopped without settling, and Inter has no record of why.",
-                detail: nil, deniedPaths: [], suggestedScope: nil
+                rawReason: nil, deniedPaths: [], suggestedScope: nil
             )
         }
         let reason = completion.reason?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let detail = (reason?.isEmpty == false) ? reason : nil
+        let rawReason = (reason?.isEmpty == false) ? reason : nil
         switch completion.code {
         case "permission_denied":
             let suggested = completion.suggestedScope
@@ -962,11 +965,11 @@ enum BlockedTaskCopy {
             let headline = denied.isEmpty
                 ? "The worker was stopped before it could reach a file or folder it needed."
                 : "The worker was stopped before it could reach \(list(denied))."
-            return Explanation(headline: headline, detail: detail, deniedPaths: denied, suggestedScope: suggested)
+            return Explanation(headline: headline, rawReason: rawReason, deniedPaths: denied, suggestedScope: suggested)
         case "needs_authority":
             return Explanation(
                 headline: "The worker stopped because it needed a decision it couldn’t make on its own.",
-                detail: detail, deniedPaths: [], suggestedScope: nil
+                rawReason: rawReason, deniedPaths: [], suggestedScope: nil
             )
         case "unverified":
             // The broker's own reason string here is fixed internal wording
@@ -975,12 +978,18 @@ enum BlockedTaskCopy {
             // string adds nothing and is left out.
             return Explanation(
                 headline: "The worker stopped talking before it said whether the work was done.",
-                detail: nil, deniedPaths: [], suggestedScope: nil
+                rawReason: nil, deniedPaths: [], suggestedScope: nil
             )
         default:
+            if let reason, reason.range(of: "broker restarted", options: .caseInsensitive) != nil {
+                return Explanation(
+                    headline: "The run was interrupted when the broker restarted.",
+                    rawReason: rawReason, deniedPaths: [], suggestedScope: nil
+                )
+            }
             return Explanation(
                 headline: "Something interrupted the worker before it could finish.",
-                detail: detail, deniedPaths: [], suggestedScope: nil
+                rawReason: rawReason, deniedPaths: [], suggestedScope: nil
             )
         }
     }
@@ -1009,17 +1018,30 @@ private struct BlockedBanner: View {
     let onContinue: () -> Void
     let onMarkCompleted: () -> Void
 
+    @State private var showingRawReason = false
+
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             AccentRule(color: .orange)
+                .fixedSize(horizontal: false, vertical: true)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 8) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(explanation.headline).scaledFont(.callout, weight: .semibold)
-                    if let detail = explanation.detail {
-                        Text(detail).scaledFont(.callout).foregroundStyle(.secondary).textSelection(.enabled)
-                    }
                     Text(fileSummary).scaledFont(.caption).foregroundStyle(.secondary)
+                    if let rawReason = explanation.rawReason {
+                        CollapsibleSection(isExpanded: $showingRawReason) {
+                            Text("Technical detail").scaledFont(.caption, weight: .medium).foregroundStyle(.secondary)
+                        } trailing: {
+                            CopyIconButton(text: rawReason, label: "Copy technical detail")
+                        }
+                        if showingRawReason {
+                            Text(rawReason)
+                                .scaledFont(.caption, design: .monospaced)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
+                    }
                 }
                 if busy {
                     ProgressView().controlSize(.small)

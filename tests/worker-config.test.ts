@@ -30,12 +30,14 @@ allow = [{ provider = "claude", model = "opus" }]
 [worker]
 tldr = true
 tldr_sentences = "2-4"
+tldr_template = "Say hi — {count}."
 conduct = ["Run bun test before reporting."]
 report = ["Cite code as path:line.", "  No tables.  "]
 `);
     expect(await loadWorkerRules(root)).toEqual({
       tldr: true,
       tldrSentences: "2-4",
+      tldrTemplate: "Say hi — {count}.",
       conduct: ["Run bun test before reporting."],
       report: ["Cite code as path:line.", "No tables."],
     });
@@ -49,6 +51,10 @@ report = ["Cite code as path:line.", "  No tables.  "]
     expect(await loadWorkerRules(projectWith(`[worker]\ntldr = false`))).toEqual({
       ...DEFAULT_WORKER_RULES,
       tldr: false,
+    });
+    expect(await loadWorkerRules(projectWith(`[worker]\ntldr_template = "Custom — {count}."`))).toEqual({
+      ...DEFAULT_WORKER_RULES,
+      tldrTemplate: "Custom — {count}.",
     });
   });
 
@@ -71,6 +77,11 @@ report = ["Cite code as path:line.", "  No tables.  "]
     [`[worker]\ntldr_sentences = 3`, "worker.tldr_sentences"],
     [`[worker]\ntldr_sentences = "many"`, "worker.tldr_sentences"],
     [`[worker]\ntldr_sentences = "5-2"`, "worker.tldr_sentences"],
+    [`[worker]\ntldr_template = 3`, "worker.tldr_template"],
+    [`[worker]\ntldr_template = "  "`, "worker.tldr_template"],
+    [`[worker]\ntldr_template = "no placeholder here"`, "worker.tldr_template"],
+    [`[worker]\ntldr_template = "${"x".repeat(495)}{count}"`, "worker.tldr_template"],
+    [`[worker]\ntldr_template = """one\ntwo {count}"""`, "worker.tldr_template"],
     [`[worker]\nreport = "Be brief."`, "worker.report"],
     [`[worker]\nreport = ["Be brief.", ""]`, "worker.report[1]"],
     [`[worker]\nreport = ["Be brief.", 7]`, "worker.report[1]"],

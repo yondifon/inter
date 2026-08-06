@@ -1044,9 +1044,9 @@ export class StateStore {
 
   listTaskSummaries(query: TaskListQuery = {}): TaskSummary[] {
     // The MCP `tasks` tool bounds its own `limit` input to 100 via zod; this
-    // higher ceiling exists for the /state poll route, which asks for the
-    // same 200-row working set `listTasks` returns.
-    const limit = Math.min(200, Math.max(1, query.limit ?? 20));
+    // higher ceiling exists for the /state poll route, which pages the
+    // sidebar's "Load more" window in past the old fixed 200-row fetch.
+    const limit = Math.min(500, Math.max(1, query.limit ?? 20));
     const clauses: string[] = [];
     const values: Array<string | number> = [];
     if (query.state) {

@@ -490,6 +490,16 @@ final class TaskGroupingTests: XCTestCase {
         XCTAssertEqual(groups[1].tasks.map(\.id), ["4", "2"])
     }
 
+    func testArchiveFilterRawValuesMatchTheBrokersVocabulary() {
+        XCTAssertEqual(TaskArchiveFilter.active.rawValue, "active")
+        XCTAssertEqual(TaskArchiveFilter.archived.rawValue, "only")
+        XCTAssertEqual(TaskArchiveFilter.all.rawValue, "include")
+    }
+
+    func testArchiveFilterLabelsCoverEveryCase() {
+        XCTAssertEqual(TaskArchiveFilter.allCases.map(\.label), ["Active", "Archived", "All"])
+    }
+
     func testDefaultSortKeepsTheStoresOrder() {
         let groups = TaskOrganizer.organize(
             tasks: [

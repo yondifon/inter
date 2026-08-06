@@ -13,6 +13,28 @@ private struct SidebarWidthKey: PreferenceKey {
     }
 }
 
+/// One-time bridge from the old boolean archive toggle to the three-way
+/// filter. `LegacyDefaults.swift` (the usual home for a defaults migration)
+/// and `main.swift` (where migrations run before any view is built) are both
+/// out of scope for this change, so this runs from `ContentView`'s own
+/// `.task` instead; the marker makes every later relaunch a no-op.
+private enum TaskArchiveFilterMigration {
+    private static let marker = "migratedTaskArchiveFilterDefaults"
+    private static let legacyKey = "showArchivedTasks"
+
+    static func runIfNeeded() {
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: marker) else { return }
+        defaults.set(true, forKey: marker)
+        guard defaults.object(forKey: "taskArchiveFilter") == nil else { return }
+        let wasArchivedOnly = defaults.bool(forKey: legacyKey)
+        defaults.set(
+            (wasArchivedOnly ? TaskArchiveFilter.archived : TaskArchiveFilter.active).rawValue,
+            forKey: "taskArchiveFilter"
+        )
+    }
+}
+
 struct ContentView: View {
     let store: ProfileStore
     let broker: BrokerManager
@@ -21,12 +43,11 @@ struct ContentView: View {
     @State private var selection: SidebarSelection?
     @State private var installResults: [MCPConfigInjector.InstallResult] = []
     @State private var showingInstall = false
-    @State private var showingMemories = false
     @AppStorage("taskProjectFilter") private var projectFilter = ""
     @AppStorage("taskGrouping") private var groupingRaw = TaskGrouping.parent.rawValue
     @AppStorage("taskSort") private var sortRaw = TaskSort.priority.rawValue
     @AppStorage("collapsedTaskGroups") private var collapsedRaw = ""
-    @AppStorage("showArchivedTasks") private var showArchivedTasks = false
+    @AppStorage("taskArchiveFilter") private var archiveFilterRaw = TaskArchiveFilter.active.rawValue
     @AppStorage("taskSidebarWidth") private var sidebarWidth = 260.0
     @State private var taskPendingCancel: String?
     @State private var taskPendingComplete: String?
@@ -75,9 +96,11 @@ struct ContentView: View {
                                             Task { await performResume(task.id) }
                                         }
                                     }
-                                    Button(showArchivedTasks ? "Restore" : "Archive",
-                                           systemImage: showArchivedTasks ? "arrow.uturn.backward" : "archivebox") {
-                                        setArchived(task.id, !showArchivedTasks)
+                                    // The "All" filter mixes active and archived rows, so the
+                                    // action reflects this row's own state, not the filter.
+                                    Button(task.archivedAt != nil ? "Restore" : "Archive",
+                                           systemImage: task.archivedAt != nil ? "arrow.uturn.backward" : "archivebox") {
+                                        setArchived(task.id, task.archivedAt == nil)
                                     }
                                 }
                                 // Right-clicking a row moves AppKit's real selection to it before
@@ -91,7 +114,7 @@ struct ContentView: View {
                 } header: {
                     HStack(spacing: 6) {
                         SidebarSectionLabel(
-                            text: activeProjectName ?? (showArchivedTasks ? "Archived tasks" : "Recent tasks"),
+                            text: activeProjectName ?? sidebarSectionTitle,
                             dense: false
                         )
                         Spacer(minLength: 0)
@@ -109,6 +132,8 @@ struct ContentView: View {
                     // free, the header does not.
                     .padding(.trailing, Self.sidebarRowTrailingInset)
                     .background(SystemSelectionHider())
+                } footer: {
+                    loadMoreFooter
                 }
             }
             .listStyle(.sidebar)
@@ -140,14 +165,6 @@ struct ContentView: View {
                     .help("Add Inter to every CLI's global MCP config")
                 }
                 ToolbarItem {
-                    Button("Project Memories", systemImage: "brain") {
-                        showingMemories = true
-                    }
-                    .labelStyle(.iconOnly)
-                    .help("See what each project remembers")
-                    .accessibilityLabel("See what each project remembers")
-                }
-                ToolbarItem {
                     Button("Settings…", systemImage: "gearshape") { settingsPresentation.isPresented = true }
                         .labelStyle(.iconOnly)
                         .help("Settings")
@@ -163,9 +180,19 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $showingInstall) { InstallResultsView(results: installResults) }
-        .sheet(isPresented: $showingMemories) { ProjectMemoriesSheet(store: store) }
         .sheet(isPresented: $settingsPresentation.isPresented) { SettingsView(store: store, broker: broker) }
-        .task { store.start() }
+        .task {
+            TaskArchiveFilterMigration.runIfNeeded()
+            // Read the just-migrated value straight from defaults rather than
+            // through `archiveFilterRaw`: `@AppStorage` only picks up this
+            // process's own write via its own change notification, and the
+            // store's first fetch shouldn't have to wait on that round trip.
+            let initialFilter = TaskArchiveFilter(rawValue: UserDefaults.standard.string(forKey: "taskArchiveFilter") ?? "") ?? .active
+            store.start(archiveFilter: initialFilter)
+        }
+        .onChange(of: archiveFilterRaw) { _, newValue in
+            Task { await store.setArchiveFilter(TaskArchiveFilter(rawValue: newValue) ?? .active) }
+        }
         // Both sidebar actions settle the task, so each confirms first.
         .confirmationDialog(
             "Mark this task as completed?",
@@ -215,9 +242,11 @@ struct ContentView: View {
         .frame(minWidth: 760, minHeight: 520)
     }
 
-    private var visibleTasks: [TaskListItem] {
-        store.tasks.filter { showArchivedTasks ? $0.archivedAt != nil : $0.archivedAt == nil }
-    }
+    /// Already filtered and paged server-side — the broker only ever sends
+    /// rows matching `archiveFilter`, up to whatever's currently loaded.
+    private var visibleTasks: [TaskListItem] { store.tasks }
+
+    private var archiveFilter: TaskArchiveFilter { TaskArchiveFilter(rawValue: archiveFilterRaw) ?? .active }
 
     private var projects: [TaskProject] { TaskOrganizer.projects(in: visibleTasks) }
 
@@ -225,13 +254,23 @@ struct ContentView: View {
         TaskOrganizer.activeProjectName(tasks: visibleTasks, project: projectFilter.isEmpty ? nil : projectFilter)
     }
 
+    private var sidebarSectionTitle: String {
+        switch archiveFilter {
+        case .all: "All tasks"
+        case .active: "Recent tasks"
+        case .archived: "Archived tasks"
+        }
+    }
+
     /// The filter can outlive its project's rows — an empty filtered list is
     /// still a filtered list, so the empty state says whose rows are missing.
     private var emptyTasksText: String {
-        guard projectFilter.isEmpty else {
-            return showArchivedTasks ? "No archived tasks in this project" : "No tasks in this project"
+        switch archiveFilter {
+        case .all, .active:
+            return projectFilter.isEmpty ? "No tasks yet" : "No tasks in this project"
+        case .archived:
+            return projectFilter.isEmpty ? "No archived tasks" : "No archived tasks in this project"
         }
-        return showArchivedTasks ? "No archived tasks" : "No tasks yet"
     }
 
     private var grouping: TaskGrouping { TaskGrouping(rawValue: groupingRaw) ?? .parent }
@@ -397,9 +436,10 @@ struct ContentView: View {
             }
             .pickerStyle(.inline)
             Divider()
-            Picker("Filter", selection: $showArchivedTasks) {
-                Text("Active").tag(false)
-                Text("Archived").tag(true)
+            Picker("Filter", selection: $archiveFilterRaw) {
+                ForEach(TaskArchiveFilter.allCases) { option in
+                    Text(option.label).tag(option.rawValue)
+                }
             }
             .pickerStyle(.inline)
             Menu {
@@ -432,7 +472,38 @@ struct ContentView: View {
     }
 
     private var viewMenuIsActive: Bool { grouping != .parent || sort != .priority || isFiltering }
-    private var isFiltering: Bool { !projectFilter.isEmpty || showArchivedTasks }
+    private var isFiltering: Bool { !projectFilter.isEmpty || archiveFilter != .active }
+
+    /// Sits below the last group as the List section's own footer, so it
+    /// scrolls with the rows instead of floating over them. Hidden once the
+    /// broker says there is nothing left to page in — a live button that
+    /// always returns nothing is worse than no button.
+    @ViewBuilder
+    private var loadMoreFooter: some View {
+        if store.tasksHasMore {
+            Button {
+                Task { await store.loadMoreTasks() }
+            } label: {
+                HStack(spacing: 6) {
+                    if store.isLoadingMoreTasks {
+                        ProgressView().controlSize(.small)
+                        Text("Loading…")
+                    } else if store.loadMoreFailed {
+                        Image(systemName: "arrow.clockwise")
+                        Text("Couldn’t load more — tap to retry")
+                    } else {
+                        Text("Load more")
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .scaledFont(.footnote)
+                .foregroundStyle(store.loadMoreFailed ? Color.red : Color.secondary)
+            }
+            .buttonStyle(.plain)
+            .disabled(store.isLoadingMoreTasks)
+            .padding(.vertical, 8)
+        }
+    }
 
     /// The project submenu's collapsed label names the active filter, so the
     /// current selection is visible without opening it.
@@ -461,7 +532,7 @@ struct ContentView: View {
                 if let summary = store.spend?.summary {
                     Text(summary)
                         .scaledFont(.caption2, design: .monospaced)
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.tail)
                         .help("\(summary) over the last 24 hours")
@@ -533,7 +604,7 @@ private struct TaskRow: View {
                     Text(metaSuffix)
                 }
                 .scaledFont(.caption2, design: .monospaced)
-                .foregroundStyle(.tertiary).lineLimit(1)
+                .foregroundStyle(.secondary).lineLimit(1)
             }
         }
         .padding(.vertical, 5)
@@ -604,82 +675,6 @@ private struct UpdateBanner: View {
             Rectangle().fill(Color(nsColor: .separatorColor)).frame(height: 1)
         }
         .transition(.move(edge: .bottom).combined(with: .opacity))
-    }
-}
-
-/// A project's memories, in a sheet: a picker column of projects on the left,
-/// the chosen one's memories on the right. Master-detail rather than a plain
-/// list-then-push, because a reader comparing what two projects remember
-/// shouldn't lose the list to see the second one.
-private struct ProjectMemoriesSheet: View {
-    let store: ProfileStore
-    @Environment(\.dismiss) private var dismiss
-    @State private var selection: String?
-
-    var body: some View {
-        VStack(spacing: 0) {
-            titleBar
-            NavigationSplitView {
-                List(store.memoryProjects, selection: $selection) { project in
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(project.name)
-                            .scaledFont(.callout).lineLimit(1)
-                        Text("\(project.count) memor\(project.count == 1 ? "y" : "ies")")
-                            .scaledFont(.caption2).foregroundStyle(.secondary).lineLimit(1)
-                    }
-                    .tag(project.cwd)
-                    .background(SystemSelectionHider())
-                    .listRowBackground(rowFill(selected: selection == project.cwd))
-                }
-                .listStyle(.sidebar)
-                .scrollContentBackground(.hidden)
-                .scrollIndicators(.never)
-                .background { Surface.sidebar }
-                .navigationSplitViewColumnWidth(min: 180, ideal: 220)
-            } detail: {
-            if let cwd = selection, let project = store.memoryProjects.first(where: { $0.cwd == cwd }) {
-                ProjectMemoryView(project: project, store: store)
-                    .id(project.cwd)
-            } else if store.memoryProjects.isEmpty {
-                ContentUnavailableView(
-                    "No project memories yet",
-                    systemImage: "brain",
-                    description: Text("Once a project stores something worth remembering, it will show up here.")
-                )
-            } else {
-                ContentUnavailableView("Choose a project", systemImage: "folder")
-            }
-        }
-        .toolbar {
-            ToolbarItem(placement: .cancellationAction) {
-                Button("Done") { dismiss() }
-                    .keyboardShortcut(.cancelAction)
-            }
-        }
-        .background { Surface.content.ignoresSafeArea() }
-        .frame(minWidth: 760, minHeight: 480)
-    }
-    }
-
-    /// The sheet's own top edge; a NavigationSplitView carries no title of its
-    /// own, and this is a sheet, not a view inside the window that reports where
-    /// it sits.
-    private var titleBar: some View {
-        HStack(spacing: 8) {
-            Text("Project Memories").scaledFont(.title3, weight: .semibold)
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-    }
-
-    /// Same neutral pill the task sidebar uses to mark the current row; the
-    /// selection state drives it and the highlight style is hidden on the list.
-    private func rowFill(selected: Bool) -> some View {
-        RoundedRectangle(cornerRadius: Radius.small)
-            .fill(selected ? Surface.selection : Color.clear)
-            .padding(.horizontal, 4)
-            .padding(.vertical, 1)
     }
 }
 

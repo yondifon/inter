@@ -79,3 +79,46 @@ allow = [
   { provider = "codex", model = "gpt-5.6-sol" },
   { provider = "codex", model = "gpt-5.6-luna" },
 ]
+
+# Rules a worker reads in its <inter_protocol> preamble, spelled out at the
+# same defaults `loadWorkerRules` already applies when this table is absent.
+# Writing them here is not a behavior change — it makes visible and editable
+# what previously only existed as a fallback in src/worker-config.ts.
+#
+# Not everything in the preamble is here. The INTER_RESULT / INTER_BLOCKED /
+# INTER_NEEDS_INPUT markers, the "final non-empty line" instruction, the
+# allowQuestions branch, and the scope line are fixed by Inter, not this
+# project: a worker that doesn't emit them correctly gets misread as
+# blocked/unverified, so their wording isn't a project's to tune. See
+# docs/worker-rules.md for the full preamble shape.
+[worker]
+# Whether the worker is told to open its final report with a `## TL;DR`.
+tldr = true
+
+# How long that TL;DR should be — a count ("2") or a range ("1-3"), 1-99 either
+# side. Fills the "{count}" placeholder in tldr_template below.
+tldr_sentences = "1-3"
+
+# The literal wording of the TL;DR rule, with "{count}" standing in for what
+# tldr_sentences resolves to (e.g. "1-3 plain-language sentences"). This is
+# the actual text a worker receives — edit it directly to change the rule.
+tldr_template = "Open your final report with `## TL;DR` — {count} stating what was done or found and the outcome. Detail follows after; this applies to your final answer, not to intermediate messages."
+
+# How the worker should carry out the task. Printed as its own "## How to
+# work" section, before the report rules. Empty here means no such section
+# ships. Shape of a real entry:
+#   conduct = ["Run `bun test` before you report, and paste the tally."]
+conduct = []
+
+# How the worker should report back. Numbered after the TL;DR rule under
+# "## User rules". Empty here means only the TL;DR rule (if `tldr` is true)
+# ships in that section. Shape of a real entry:
+#   report = ["Cite every claim about the code as path:line."]
+report = []
+
+# Caps enforced on every key above: conduct and report hold at most 20 rules,
+# 500 characters each, 4,000 characters total per key, and each rule must be a
+# single line; tldr_template is capped the same way at 500 characters, one
+# line, and must keep the "{count}" placeholder. A `[worker]` table that
+# breaks a cap fails `delegate` before any task is created — nothing is spent,
+# nothing needs cancelling.

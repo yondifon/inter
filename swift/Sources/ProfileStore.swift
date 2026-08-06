@@ -4,13 +4,30 @@ import Observation
 @Observable
 @MainActor
 final class ProfileStore {
+    /// Rows fetched per page, and per additional "Load more" click. Small
+    /// enough that the steady 2-second poll stays cheap even after several
+    /// pages are loaded; generous enough that a normal day of tasks fits on
+    /// one page and never needs the control at all.
+    static let taskPageSize = 50
+
     var profiles: [Profile] = []
     var tasks: [TaskListItem] = []
+    /// Whether the broker has rows beyond what's currently loaded, for the
+    /// current archive filter. Drives whether "Load more" shows at all.
+    var tasksHasMore = false
+    /// Set when a "Load more" fetch specifically fails, so the control can
+    /// offer a retry instead of doing nothing. Cleared by the next successful
+    /// fetch, load-more or background poll alike.
+    var loadMoreFailed = false
+    private(set) var isLoadingMoreTasks = false
     var memoryProjects: [MemoryProjectSnapshot] = []
     var spend: SpendTotals?
     private var polling: Task<Void, Never>?
+    private var loadedPages = 1
+    private var archiveFilter: TaskArchiveFilter = .active
 
-    func start() {
+    func start(archiveFilter: TaskArchiveFilter) {
+        self.archiveFilter = archiveFilter
         polling?.cancel()
         polling = Task {
             while !Task.isCancelled {
@@ -20,15 +37,46 @@ final class ProfileStore {
         }
     }
 
-    func refresh() async {
+    /// Switches which archive state the sidebar shows. A different filter is a
+    /// different result set to page through, so this resets to the first page
+    /// and refetches immediately instead of waiting for the next poll tick.
+    func setArchiveFilter(_ filter: TaskArchiveFilter) async {
+        guard filter != archiveFilter else { return }
+        archiveFilter = filter
+        loadedPages = 1
+        loadMoreFailed = false
+        await refresh()
+    }
+
+    /// Fetches one more page for the current filter. A no-op while a page is
+    /// already loading or the broker has already said there is nothing more.
+    func loadMoreTasks() async {
+        guard tasksHasMore, !isLoadingMoreTasks else { return }
+        isLoadingMoreTasks = true
+        loadedPages += 1
+        let succeeded = await refresh()
+        isLoadingMoreTasks = false
+        loadMoreFailed = !succeeded
+        // A failed fetch didn't grow what's on screen, so a retry should
+        // re-ask for the same page rather than skip past it.
+        if !succeeded { loadedPages -= 1 }
+    }
+
+    /// Fetches the current filter's loaded window — one page on first load,
+    /// more once "Load more" has grown `loadedPages`. Returns whether the
+    /// fetch itself succeeded, so `loadMoreTasks` can tell a real failure
+    /// apart from "nothing changed".
+    @discardableResult
+    func refresh() async -> Bool {
         do {
             var components = URLComponents(url: InterServer.api("state"), resolvingAgainstBaseURL: false)!
             components.queryItems = [
                 URLQueryItem(name: "view", value: "summary"),
-                URLQueryItem(name: "archived", value: "include"),
+                URLQueryItem(name: "archived", value: archiveFilter.rawValue),
+                URLQueryItem(name: "limit", value: String(loadedPages * Self.taskPageSize)),
             ]
             let (data, response) = try await URLSession.shared.data(from: components.url!)
-            guard (response as? HTTPURLResponse)?.statusCode == 200 else { return }
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else { return false }
             // Decode off the MainActor so a large payload never stalls the UI.
             let state = try await Task.detached { () -> BrokerSummaryState in
                 try JSONDecoder().decode(BrokerSummaryState.self, from: data)
@@ -37,10 +85,14 @@ final class ProfileStore {
             // reassignment every poll tick.
             if state.profiles != profiles { profiles = state.profiles }
             if state.tasks != tasks { tasks = state.tasks }
+            tasksHasMore = state.tasksHasMore ?? false
             let projects = state.memoryProjects ?? []
             if projects != memoryProjects { memoryProjects = projects }
             if state.spend != spend { spend = state.spend }
-        } catch {}
+            return true
+        } catch {
+            return false
+        }
     }
 
     /// Fetches the full task row for the detail pane. Nil when the task is

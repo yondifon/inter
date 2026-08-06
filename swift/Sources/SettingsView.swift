@@ -2,6 +2,7 @@ import SwiftUI
 
 enum SettingsSelection: Hashable {
     case worker(String)
+    case memoryProject(String)
     case about
 }
 
@@ -22,6 +23,7 @@ struct SettingsView: View {
     @State private var editing: Profile?
     @State private var adding = false
     @AppStorage("settingsWorkersExpanded") private var workersExpanded = true
+    @AppStorage("settingsMemoriesExpanded") private var memoriesExpanded = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -38,22 +40,42 @@ struct SettingsView: View {
                             .scaledFont(.callout).foregroundStyle(.tertiary)
                     } else {
                         ForEach(store.profiles) { profile in
-                            WorkerRow(profile: profile).tag(SettingsSelection.worker(profile.id))
+                            WorkerRow(profile: profile)
+                                .tag(SettingsSelection.worker(profile.id))
+                                .background(SystemSelectionHider())
+                                .listRowBackground(rowFill(selected: selection == .worker(profile.id)))
                         }
                     }
                 }
 
-                AboutRow().tag(SettingsSelection.about)
+                CollapsibleSection(
+                    isExpanded: $memoriesExpanded,
+                    label: { SidebarSectionLabel(text: "Memories") }
+                )
+                if memoriesExpanded {
+                    if store.memoryProjects.isEmpty {
+                        Text("No memories yet. They land here once an agent stores one.")
+                            .scaledFont(.callout).foregroundStyle(.tertiary)
+                    } else {
+                        ForEach(store.memoryProjects) { project in
+                            MemoryProjectRow(project: project)
+                                .tag(SettingsSelection.memoryProject(project.cwd))
+                                .background(SystemSelectionHider())
+                                .listRowBackground(rowFill(selected: selection == .memoryProject(project.cwd)))
+                        }
+                    }
+                }
+
+                AboutRow()
+                    .tag(SettingsSelection.about)
+                    .background(SystemSelectionHider())
+                    .listRowBackground(rowFill(selected: selection == .about))
             }
             .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
             .scrollIndicators(.never)
+            .background { Surface.content }
             .navigationSplitViewColumnWidth(min: 200, ideal: 220)
-            .toolbar {
-                ToolbarItem {
-                    Button("Add Worker", systemImage: "plus") { adding = true }
-                        .help("Add worker")
-                }
-            }
         } detail: {
             switch selection {
             case .worker(let id):
@@ -63,12 +85,20 @@ struct SettingsView: View {
                 } else {
                     ContentUnavailableView("Choose a worker", systemImage: "person.2")
                 }
+            case .memoryProject(let cwd):
+                if let project = store.memoryProjects.first(where: { $0.cwd == cwd }) {
+                    ProjectMemoryView(project: project, store: store)
+                        .id(project.cwd)
+                } else {
+                    ContentUnavailableView("Choose a project", systemImage: "folder")
+                }
             case .about:
                 AboutPage(broker: broker)
             case nil:
-                ContentUnavailableView("Choose an item", systemImage: "gearshape")
+                ContentUnavailableView("Choose a worker", systemImage: "person.2")
             }
         }
+        .background(Surface.content)
         .sheet(isPresented: $adding) { ProfileFormView(store: store) }
         .sheet(item: $editing) { ProfileFormView(store: store, profile: $0) }
         // A worker deleted from the detail pane leaves `selection` pointing at a
@@ -79,15 +109,15 @@ struct SettingsView: View {
                 self.selection = nil
             }
         }
-        .toolbar {
-            ToolbarItem(placement: .cancellationAction) {
-                Button("Done") { dismiss() }
-                    .keyboardShortcut(.cancelAction)
+        .onChange(of: store.memoryProjects) { _, projects in
+            if case let .memoryProject(cwd) = selection, !projects.contains(where: { $0.cwd == cwd }) {
+                self.selection = nil
             }
         }
+            footer
         }
         .background { Surface.content.ignoresSafeArea() }
-        .frame(minWidth: 640, minHeight: 420)
+        .frame(minWidth: 760, minHeight: 480)
     }
 
     /// The sheet's own top edge; a NavigationSplitView carries no title of its
@@ -100,6 +130,36 @@ struct SettingsView: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
     }
+
+    /// Bottom bar, not a window toolbar: a sheet carries no titlebar of its own
+    /// for `ToolbarItem`s to dock into, so "Add Worker" and "Done" fell to a
+    /// stock bottom bar by default. Making the bar explicit gives it the app's
+    /// own surface and button treatment instead of that system chrome.
+    private var footer: some View {
+        HStack {
+            Button("+ Add Worker") { adding = true }
+                .buttonStyle(.borderedProminent)
+            Spacer(minLength: 0)
+            Button("Done") { dismiss() }
+                .buttonStyle(.bordered)
+                .keyboardShortcut(.cancelAction)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Surface.content)
+        .overlay(alignment: .top) {
+            Rectangle().fill(Color(nsColor: .separatorColor)).frame(height: 1)
+        }
+    }
+
+    /// Same neutral pill every section uses to mark the current row — the
+    /// sidebar's own selection state drives it, not the system highlight.
+    private func rowFill(selected: Bool) -> some View {
+        RoundedRectangle(cornerRadius: Radius.small)
+            .fill(selected ? Surface.selection : Color.clear)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 1)
+    }
 }
 
 private struct AboutRow: View {
@@ -108,11 +168,11 @@ private struct AboutRow: View {
     var body: some View {
         HStack(spacing: 9) {
             Image(systemName: "info.circle")
-                .scaledFont(.body)
+                .font(.system(size: 13 * uiScale))
                 .foregroundStyle(.secondary)
                 .accessibilityHidden(true)
                 .frame(width: 18 * uiScale, alignment: .center)
-            Text("About").scaledFont(.body)
+            Text("About").scaledFont(.callout)
         }
         .padding(.vertical, 5)
     }
@@ -200,65 +260,56 @@ private struct ProfileDetail: View {
     @State private var deleteFailed = false
     @Environment(\.uiScale) private var uiScale
 
+    private var sortedEnvKeys: [String] { profile.env.keys.sorted() }
+
     var body: some View {
-        Form {
-            Section {
-                HStack(spacing: 14) {
-                    ProviderLogo(provider: profile.provider, size: 28 * uiScale)
-                        .accessibilityHidden(true)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(profile.label).scaledFont(.title3, weight: .semibold)
-                        Text("\(profile.provider.label) · \(profile.resolvedModel)")
-                            .scaledFont(.callout, design: .monospaced).foregroundStyle(.secondary)
-                    }
-                    Spacer(minLength: 16)
-                    EnabledToggle(profile: profile, store: store)
-                    Button("Edit…", action: edit)
-                    Menu {
-                        Button("Delete Worker…", role: .destructive) { confirmingDelete = true }
-                    } label: {
-                        Image(systemName: "ellipsis")
-                            .frame(width: 24 * uiScale, height: 24 * uiScale)
-                            .contentShape(Rectangle())
-                    }
-                    .menuStyle(.borderlessButton)
-                    .menuIndicator(.hidden)
-                    .fixedSize()
-                    .help("More actions")
-                    .accessibilityLabel("More actions")
-                }
-                .padding(.vertical, 6)
-            }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                header
+                    .padding(.vertical, 14 * uiScale)
+                Divider()
 
-            Section {
-                if profile.env.isEmpty {
-                    Text("No overrides").foregroundStyle(.secondary)
-                } else {
-                    ForEach(profile.env.keys.sorted(), id: \.self) { key in
-                        EnvironmentRow(key: key, value: profile.env[key] ?? "")
+                VStack(alignment: .leading, spacing: 0) {
+                    SidebarSectionLabel(text: "Environment")
+                        .padding(.top, 18 * uiScale)
+                        .padding(.bottom, 6 * uiScale)
+                    if profile.env.isEmpty {
+                        Text("No overrides")
+                            .scaledFont(.callout)
+                            .foregroundStyle(.secondary)
+                            .padding(.vertical, 6 * uiScale)
+                    } else {
+                        ForEach(sortedEnvKeys, id: \.self) { key in
+                            EnvironmentRow(key: key, value: profile.env[key] ?? "")
+                            if key != sortedEnvKeys.last {
+                                Divider()
+                            }
+                        }
                     }
                 }
-            } header: {
-                SectionLabel(text: "Environment")
-            }
 
-            Section {
-                LabeledContent("Endpoint") {
-                    HStack(spacing: 8) {
-                        Text(InterServer.mcpURL)
-                            .scaledFont(.body, design: .monospaced)
-                            .textSelection(.enabled)
-                        CopyIconButton(text: InterServer.mcpURL, label: "Copy endpoint")
+                VStack(alignment: .leading, spacing: 6 * uiScale) {
+                    SidebarSectionLabel(text: "MCP")
+                        .padding(.top, 18 * uiScale)
+                    LabeledContent("Endpoint") {
+                        HStack(spacing: 8 * uiScale) {
+                            Text(InterServer.mcpURL)
+                                .scaledFont(.body, design: .monospaced)
+                                .textSelection(.enabled)
+                            CopyIconButton(text: InterServer.mcpURL, label: "Copy endpoint")
+                        }
                     }
+                    .padding(.vertical, 6 * uiScale)
+                    Text("Shared by every worker — reconnect MCP clients after changing it.")
+                        .scaledFont(.caption)
+                        .foregroundStyle(.secondary)
                 }
-            } header: {
-                SectionLabel(text: "MCP — applies to all workers")
-            } footer: {
-                Text("When enabled, each active worker gets a named tool. Reconnect MCP clients after changing this option or workers.")
             }
-
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 20 * uiScale)
+            .padding(.bottom, 20 * uiScale)
         }
-        .formStyle(.grouped)
+        .background(Surface.content)
         .scrollIndicators(.never)
         .confirmationDialog("Delete “\(profile.label)”?", isPresented: $confirmingDelete) {
             Button("Delete", role: .destructive) {
@@ -274,16 +325,44 @@ private struct ProfileDetail: View {
             Button("OK", role: .cancel) {}
         }
     }
+
+    private var header: some View {
+        HStack(spacing: 14 * uiScale) {
+            ProviderLogo(provider: profile.provider, size: 28 * uiScale)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2 * uiScale) {
+                Text(profile.label).scaledFont(.title3, weight: .semibold)
+                Text("\(profile.provider.label) · \(profile.resolvedModel)")
+                    .scaledFont(.callout, design: .monospaced).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 16 * uiScale)
+            EnabledToggle(profile: profile, store: store)
+            Button("Edit…", action: edit)
+            Menu {
+                Button("Delete Worker…", role: .destructive) { confirmingDelete = true }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .frame(width: 24 * uiScale, height: 24 * uiScale)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("More actions")
+            .accessibilityLabel("More actions")
+        }
+    }
 }
 
 private struct EnvironmentRow: View {
     let key: String
     let value: String
     @State private var revealed = false
+    @Environment(\.uiScale) private var uiScale
 
     var body: some View {
         LabeledContent {
-            HStack(spacing: 8) {
+            HStack(spacing: 8 * uiScale) {
                 Text(isSecretEnvKey(key) && !revealed ? String(repeating: "•", count: 10) : value)
                     .scaledFont(.body, design: .monospaced)
                     .textSelection(.enabled)
@@ -300,6 +379,7 @@ private struct EnvironmentRow: View {
         } label: {
             Text(key).scaledFont(.callout, design: .monospaced)
         }
+        .padding(.vertical, 8 * uiScale)
     }
 }
 
@@ -313,8 +393,8 @@ private struct WorkerRow: View {
                 .accessibilityHidden(true)
                 .frame(width: 18 * uiScale, alignment: .center)
             VStack(alignment: .leading, spacing: 2) {
-                Text(profile.label).scaledFont(.body).lineLimit(1)
-                Text(profile.resolvedModel).scaledFont(.caption, design: .monospaced)
+                Text(profile.label).scaledFont(.callout).lineLimit(1)
+                Text(profile.resolvedModel).scaledFont(.caption2, design: .monospaced)
                     .foregroundStyle(.tertiary).lineLimit(1)
             }
             Spacer(minLength: 0)
@@ -324,6 +404,27 @@ private struct WorkerRow: View {
         }
         .padding(.vertical, 5)
         .opacity(profile.enabled ? 1 : 0.5)
+    }
+}
+
+private struct MemoryProjectRow: View {
+    let project: MemoryProjectSnapshot
+    @Environment(\.uiScale) private var uiScale
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(systemName: "folder")
+                .font(.system(size: 13 * uiScale))
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+                .frame(width: 18 * uiScale, alignment: .center)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(project.name).scaledFont(.callout).lineLimit(1)
+                Text("\(project.count) memor\(project.count == 1 ? "y" : "ies")")
+                    .scaledFont(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+            }
+        }
+        .padding(.vertical, 5)
     }
 }
 

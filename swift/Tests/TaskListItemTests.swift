@@ -143,6 +143,24 @@ final class TaskListItemTests: XCTestCase {
         XCTAssertEqual(item.shortModel, "sonnet")
     }
 
+    // MARK: - BrokerSummaryState — paging
+
+    func testBrokerSummaryStateDecodesTasksHasMoreWhenPresent() throws {
+        let json = """
+        { "profiles": [], "tasks": [], "tasksHasMore": true }
+        """.data(using: .utf8)!
+        let state = try JSONDecoder().decode(BrokerSummaryState.self, from: json)
+        XCTAssertEqual(state.tasksHasMore, true)
+    }
+
+    func testBrokerSummaryStateTasksHasMoreIsNilWhenAbsent() throws {
+        let json = """
+        { "profiles": [], "tasks": [] }
+        """.data(using: .utf8)!
+        let state = try JSONDecoder().decode(BrokerSummaryState.self, from: json)
+        XCTAssertNil(state.tasksHasMore, "a broker predating paging must decode, not fail, with no next-page signal")
+    }
+
     // MARK: - EventMerge — append in order
 
     private func event(_ id: Int) -> TaskEventSnapshot {

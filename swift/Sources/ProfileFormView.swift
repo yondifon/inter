@@ -14,6 +14,7 @@ struct ProfileFormView: View {
     @State private var envRows: [EnvRow]
     @State private var saveError: String?
     @FocusState private var nameFocused: Bool
+    @Environment(\.uiScale) private var uiScale
 
     init(store: ProfileStore, profile: Profile? = nil) {
         self.store = store
@@ -26,7 +27,7 @@ struct ProfileFormView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text(original == nil ? "Add worker" : "Edit worker").font(.title3.weight(.semibold))
+                Text(original == nil ? "Add worker" : "Edit worker").scaledFont(.title3, weight: .semibold)
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("Save") { save() }
@@ -56,12 +57,12 @@ struct ProfileFormView: View {
                 Section {
                     ForEach($envRows) { $row in
                         HStack {
-                            TextField("ENV_NAME", text: $row.key).font(.system(.body, design: .monospaced))
+                            TextField("ENV_NAME", text: $row.key).scaledFont(.body, design: .monospaced)
                             if isSecretEnvKey(row.key) {
                                 SecureField("Value or path", text: $row.value)
-                                    .font(.system(.body, design: .monospaced))
+                                    .scaledFont(.body, design: .monospaced)
                             } else {
-                                TextField("Value or path", text: $row.value).font(.system(.body, design: .monospaced))
+                                TextField("Value or path", text: $row.value).scaledFont(.body, design: .monospaced)
                             }
                             IconButton(symbol: "minus.circle", label: "Remove \(row.key.isEmpty ? "variable" : row.key)") {
                                 envRows.removeAll { $0.id == row.id }
@@ -79,9 +80,12 @@ struct ProfileFormView: View {
                 if let saveError { Text(saveError).foregroundStyle(.red) }
             }
             .formStyle(.grouped)
-        .scrollIndicators(.never)
+            .scrollContentBackground(.hidden)
+            .background(Surface.content)
+            .scrollIndicators(.never)
         }
-        .frame(width: 560, height: 540)
+        .background { Surface.content.ignoresSafeArea() }
+        .frame(width: 560 * uiScale, height: 540 * uiScale)
         .onAppear { nameFocused = true }
     }
 

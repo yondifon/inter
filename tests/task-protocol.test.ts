@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { join } from "node:path";
 import { classifyFailure, interpretWorkerOutcome, needsInputQuestion, workerPrompt } from "../src/task-protocol";
-import { DEFAULT_WORKER_RULES, type WorkerRules } from "../src/worker-config";
+import { DEFAULT_WORKER_RULES, loadWorkerRules, type WorkerRules } from "../src/worker-config";
 
 const done = (output: string) => interpretWorkerOutcome(0, output, "");
 const scope = { read: ["src/**"], write: ["src/api.ts"] };
@@ -31,6 +32,29 @@ describe("default worker rules", () => {
 
   test("are what an unconfigured project resolves to", () => {
     expect(workerPrompt("Do.", true, scope, DEFAULT_WORKER_RULES)).toBe(DEFAULT_PREAMBLE);
+  });
+
+  // .inter.toml writes the [worker] table out at these same defaults so a
+  // reader can see and edit the text a worker actually receives. Loading that
+  // real file must resolve to the same rules the code fallback ships, and
+  // render the identical byte-for-byte preamble.
+  test("the repo's own .inter.toml resolves to the shipped defaults", async () => {
+    const repoRoot = join(import.meta.dir, "..");
+    const rules = await loadWorkerRules(repoRoot);
+    expect(rules).toEqual(DEFAULT_WORKER_RULES);
+    expect(workerPrompt("Do.", true, scope, rules)).toBe(DEFAULT_PREAMBLE);
+  });
+});
+
+describe("tldr_template", () => {
+  test("a custom template replaces the wording but keeps the {count} substitution", () => {
+    const prompt = workerPrompt(
+      "Do.",
+      true,
+      scope,
+      withRules({ tldrTemplate: "Wrap up with `## TL;DR` in {count}." }),
+    );
+    expect(prompt).toContain("1. Wrap up with `## TL;DR` in 1-3 plain-language sentences.");
   });
 });
 

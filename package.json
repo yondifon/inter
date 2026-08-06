@@ -2,6 +2,8 @@
   "name": "inter",
   "version": "0.1.0",
   "private": true,
+  "license": "AGPL-3.0-only",
+  "author": "Desmond Yong <yong@malico.me>",
   "type": "module",
   "bin": {
     "inter": "./src/cli.ts"

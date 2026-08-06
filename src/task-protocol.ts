@@ -47,7 +47,7 @@ export function workerPrompt(
   scope?: TaskScope,
   rules: WorkerRules = DEFAULT_WORKER_RULES,
 ): string {
-  const report = [...(rules.tldr ? [tldrRule(rules.tldrSentences)] : []), ...rules.report];
+  const report = [...(rules.tldr ? [tldrRule(rules.tldrSentences, rules.tldrTemplate)] : []), ...rules.report];
   return [
     prompt,
     "",
@@ -79,9 +79,9 @@ function section(heading: string, intro: string, rules: string[]): string[] {
   return ["", heading, intro, ...rules.map((rule, index) => `${index + 1}. ${rule}`)];
 }
 
-function tldrRule(sentences: string): string {
+function tldrRule(sentences: string, template: string): string {
   const count = `${sentences} plain-language sentence${sentences === "1" ? "" : "s"}`;
-  return `Open your final report with \`## TL;DR\` — ${count} stating what was done or found and the outcome. Detail follows after; this applies to your final answer, not to intermediate messages.`;
+  return template.replace("{count}", count);
 }
 
 // Sandbox denials surface inside worker CLIs as bare "operation not permitted"

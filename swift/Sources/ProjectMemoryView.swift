@@ -81,7 +81,7 @@ struct ProjectMemoryView: View {
     /// and the row that is selected opens in full underneath it.
     private var table: some View {
         Table(visible, selection: $selection, sortOrder: $order) {
-            TableColumn("Key", value: \.key) { memory in
+            TableColumn("Name", value: \.key) { memory in
                 Text(memory.key).scaledFont(.callout, design: .monospaced).lineLimit(1)
             }
             .width(min: 140 * uiScale, ideal: 220 * uiScale)

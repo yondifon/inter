@@ -279,6 +279,9 @@ struct TaskListItem: Codable, Identifiable, Hashable, Sendable {
 struct BrokerSummaryState: Codable, Sendable {
     var profiles: [Profile]
     var tasks: [TaskListItem]
+    /// Whether `tasks` was truncated by the requested `limit` — absent on a
+    /// broker predating paging, which reads as "no known next page".
+    var tasksHasMore: Bool?
     var memoryProjects: [MemoryProjectSnapshot]?
     var spend: SpendTotals?
 }

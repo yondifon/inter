@@ -859,13 +859,42 @@ describe("SQLite state store", () => {
     store.close();
   });
 
-  test("defaults to 20 summaries and caps the working set at 200", () => {
+  test("defaults to 20 summaries and caps the working set at 500", () => {
     const { db } = paths();
     const store = new StateStore({ path: db, seedProfiles: [profile] });
-    for (let i = 0; i < 210; i++) store.createTask(task("completed"));
+    for (let i = 0; i < 510; i++) store.createTask(task("completed"));
     expect(store.listTaskSummaries({}).length).toBe(20);
-    expect(store.listTaskSummaries({ limit: 500 }).length).toBe(200);
+    expect(store.listTaskSummaries({ limit: 1000 }).length).toBe(500);
     store.close();
+  });
+
+  // The sidebar's "Load more" learns whether another page exists by asking
+  // for `pageSize + 1` rows and checking whether it got more than `pageSize`
+  // back — the same trick `listTaskEventsTail` uses for `hasEarlier`. These
+  // pin that probe at its three boundaries.
+  describe("the limit+1 probe /api/state uses to compute tasksHasMore", () => {
+    test("an empty page returns nothing to page into", () => {
+      const { db } = paths();
+      const store = new StateStore({ path: db, seedProfiles: [profile] });
+      expect(store.listTaskSummaries({ limit: 51 }).length).toBe(0);
+      store.close();
+    });
+
+    test("exactly one page returns no more than requested", () => {
+      const { db } = paths();
+      const store = new StateStore({ path: db, seedProfiles: [profile] });
+      for (let i = 0; i < 50; i++) store.createTask(task("completed"));
+      expect(store.listTaskSummaries({ limit: 51 }).length).toBe(50);
+      store.close();
+    });
+
+    test("one more than a page returns the extra row the probe expects", () => {
+      const { db } = paths();
+      const store = new StateStore({ path: db, seedProfiles: [profile] });
+      for (let i = 0; i < 51; i++) store.createTask(task("completed"));
+      expect(store.listTaskSummaries({ limit: 51 }).length).toBe(51);
+      store.close();
+    });
   });
 
   test("treats heartbeats as progress reporting, not as meaningful events", () => {

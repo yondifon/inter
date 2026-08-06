@@ -37,12 +37,12 @@ final class BlockedTaskCopyTests: XCTestCase {
 
     // MARK: - needs_authority
 
-    func testNeedsAuthoritySurfacesTheWorkersOwnReason() {
+    func testNeedsAuthoritySurfacesTheWorkersOwnReasonAsRawReason() {
         let explanation = BlockedTaskCopy.explain(
             completion: completion(code: "needs_authority", reason: "needs the production DB password"),
             currentScope: nil
         )
-        XCTAssertEqual(explanation.detail, "needs the production DB password")
+        XCTAssertEqual(explanation.rawReason, "needs the production DB password")
         XCTAssertNil(explanation.suggestedScope)
         XCTAssertFalse(explanation.headline.contains("needs_authority"))
     }
@@ -54,32 +54,46 @@ final class BlockedTaskCopyTests: XCTestCase {
             completion: completion(code: "unverified", reason: "worker exited without an Inter completion marker"),
             currentScope: nil
         )
-        XCTAssertNil(explanation.detail)
+        XCTAssertNil(explanation.rawReason)
         XCTAssertFalse(explanation.headline.contains("marker"))
         XCTAssertFalse(explanation.headline.lowercased().contains("unverified"))
     }
 
     // MARK: - worker_error and other codes
 
-    func testWorkerErrorShowsThePlainHeadlineAndKeepsTheReasonAsDetail() {
+    func testWorkerErrorBrokerRestartGetsAPlainInterruptedHeadline() {
         let explanation = BlockedTaskCopy.explain(
             completion: completion(
                 code: "worker_error",
-                reason: "Broker restarted; worker pid 123 could not be identified"
+                reason: "Broker restarted; worker pid 64508 outlived it"
             ),
             currentScope: nil
         )
         XCTAssertFalse(explanation.headline.lowercased().contains("worker_error"))
-        XCTAssertEqual(explanation.detail, "Broker restarted; worker pid 123 could not be identified")
+        XCTAssertFalse(explanation.headline.lowercased().contains("pid"))
+        XCTAssertFalse(explanation.headline.lowercased().contains("outlived"))
+        XCTAssertTrue(explanation.headline.lowercased().contains("interrupted"))
+        XCTAssertTrue(explanation.headline.lowercased().contains("broker"))
+        XCTAssertEqual(explanation.rawReason, "Broker restarted; worker pid 64508 outlived it")
     }
 
-    func testUnknownCodeFallsBackToTheGenericInterruptionLine() {
+    func testWorkerErrorWithoutABrokerRestartFallsBackToTheGenericHeadlineAndKeepsRawReason() {
         let explanation = BlockedTaskCopy.explain(
-            completion: completion(code: "some_future_code", reason: "detail from a newer broker"),
+            completion: completion(code: "worker_error", reason: "sandbox refused a write it needed"),
+            currentScope: nil
+        )
+        XCTAssertFalse(explanation.headline.lowercased().contains("worker_error"))
+        XCTAssertFalse(explanation.headline.lowercased().contains("broker"))
+        XCTAssertEqual(explanation.rawReason, "sandbox refused a write it needed")
+    }
+
+    func testUnknownCodeFallsBackToTheGenericInterruptionLineAndKeepsRawReason() {
+        let explanation = BlockedTaskCopy.explain(
+            completion: completion(code: "some_future_code", reason: "detail from a newer broker version"),
             currentScope: nil
         )
         XCTAssertFalse(explanation.headline.contains("some_future_code"))
-        XCTAssertEqual(explanation.detail, "detail from a newer broker")
+        XCTAssertEqual(explanation.rawReason, "detail from a newer broker version")
     }
 
     // MARK: - Missing completion

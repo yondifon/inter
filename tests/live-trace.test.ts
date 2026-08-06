@@ -115,7 +115,7 @@ describe("GET /api/state?view=summary", () => {
     const body = await response.json();
     // Same envelope as today — only the task rows slim down.
     expect(Object.keys(body).sort()).toEqual([
-      "grants", "memoryProjects", "profileFailures", "profiles", "spend", "tasks",
+      "grants", "memoryProjects", "profileFailures", "profiles", "spend", "tasks", "tasksHasMore",
     ]);
     const row = body.tasks.find((item: { id: string }) => item.id === seeded.id);
     expect(row.promptPreview).toBe("first line second line");
@@ -141,6 +141,22 @@ describe("GET /api/state?view=summary", () => {
     expect(ids).not.toContain(archived.id);
     const onlyBody = await (await fetch(`${base}/api/state?view=summary&archived=only`)).json();
     expect(onlyBody.tasks.map((item: { id: string }) => item.id)).toEqual([archived.id]);
+  });
+
+  test("tasksHasMore reports whether a next page exists, against the requested limit", async () => {
+    // Earlier tests in this file already seeded rows, so the boundary is
+    // pinned relative to a fresh baseline rather than an absolute count.
+    const baselineBody = await (await fetch(`${base}/api/state?view=summary&archived=include&limit=100000`)).json();
+    const baseline = baselineBody.tasks.length;
+    for (let i = 0; i < 3; i++) seedTask({});
+    const exactPage = Number(baseline) + 3;
+    const exactBody = await (await fetch(`${base}/api/state?view=summary&archived=include&limit=${exactPage}`)).json();
+    expect(exactBody.tasks.length).toBe(exactPage);
+    expect(exactBody.tasksHasMore).toBe(false);
+    seedTask({});
+    const overflowBody = await (await fetch(`${base}/api/state?view=summary&archived=include&limit=${exactPage}`)).json();
+    expect(overflowBody.tasks.length).toBe(exactPage);
+    expect(overflowBody.tasksHasMore).toBe(true);
   });
 });
 
