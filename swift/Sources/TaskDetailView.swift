@@ -229,88 +229,82 @@ struct TaskDetail: View {
     /// One identity line, one muted summary. Run facts are one click away rather
     /// than spending the top of every task on ids the reader rarely needs.
     private var header: some View {
-        HStack(spacing: 8) {
-            // Speaks, because the marker is now the only place the state is
-            // stated: the chip that used to say the word beside it is gone.
-            StateMarker(state: state, speaks: true)
-                .help(state.label)
-            Text(resolvedLabel)
-                .scaledFont(.body, weight: .semibold)
-                .lineLimit(1)
-                .help(resolvedLabel)
-            // No state chip: the marker beside the title already carries the
-            // state — pulsing while live, tinted and shaped once settled — and
-            // spelling it out again cost a chip that resized between states and
-            // shoved every chip right of it.
-            // Worker and model share one chip: the list the reader clicked from
-            // already named the pair, so here it confirms instead of teaching.
-            TaskMetaChip(text: identityLine, label: "Worker and model", full: identityLine) {
-                if let provider = worker?.provider {
-                    ProviderLogo(provider: provider, size: 9 * uiScale)
-                } else {
-                    Image(systemName: "person.crop.circle")
-                        .font(.system(size: 8 * uiScale, weight: .medium))
-                }
-            }
-            // The reasoning level the run was dispatched with is part of its
-            // identity like the model, and absent when the caller set none.
-            if let effort = task?.effort, !effort.isEmpty {
-                TaskMetaChip(text: effort, label: "Effort") {
-                    Image(systemName: "brain").font(.system(size: 8 * uiScale, weight: .medium))
-                }
-            }
-            // Where a run touched files is part of its identity, not a detail: two
-            // tasks with the same worker, model and prompt differ only by folder.
-            TaskMetaChip(text: resolvedDisplayPath, label: "Folder", full: resolvedCwd, maxChars: 28) {
-                Image(systemName: "folder").font(.system(size: 8 * uiScale, weight: .medium))
-            }
-            Spacer(minLength: 8)
-            if let resumeCommand {
-                CopyIconButton(
-                    text: resumeCommand,
-                    label: "Copy resume command — \(resumeCommand)",
-                    symbol: "doc.on.clipboard"
-                )
-                .font(.system(size: 12 * uiScale))
-            }
-            if canResume {
-                if resumeInFlight {
-                    ProgressView().controlSize(.small)
-                        .frame(width: 24 * uiScale, height: 24 * uiScale)
-                        .help("Resuming task…")
-                } else {
-                    IconButton(symbol: "arrow.clockwise", label: "Resume task") { resumeAction() }
-                        .font(.system(size: 12 * uiScale))
-                }
-            }
-            if canCancel {
-                if cancelInFlight {
-                    ProgressView().controlSize(.small)
-                        .frame(width: 24 * uiScale, height: 24 * uiScale)
-                        .help("Cancelling task…")
-                } else {
-                    IconButton(symbol: "xmark.octagon", label: "Cancel task", tint: AnyShapeStyle(.red)) {
-                        confirmingCancel = true
-                    }
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                // Speaks, because the marker is now the only place the state is
+                // stated: the chip that used to say the word beside it is gone.
+                StateMarker(state: state, speaks: true)
+                    .help(state.label)
+                Text(resolvedLabel)
+                    .scaledFont(.body, weight: .semibold)
+                    .lineLimit(1)
+                    .help(resolvedLabel)
+                // No state chip: the marker beside the title already carries the
+                // state — pulsing while live, tinted and shaped once settled — and
+                // spelling it out again cost a chip that resized between states and
+                // shoved every chip right of it.
+                Spacer(minLength: 8)
+                if let resumeCommand {
+                    CopyIconButton(
+                        text: resumeCommand,
+                        label: "Copy resume command — \(resumeCommand)",
+                        symbol: "doc.on.clipboard"
+                    )
                     .font(.system(size: 12 * uiScale))
                 }
+                if canResume {
+                    if resumeInFlight {
+                        ProgressView().controlSize(.small)
+                            .frame(width: 24 * uiScale, height: 24 * uiScale)
+                            .help("Resuming task…")
+                    } else {
+                        IconButton(symbol: "arrow.clockwise", label: "Resume task") { resumeAction() }
+                            .font(.system(size: 12 * uiScale))
+                    }
+                }
+                if canCancel {
+                    if cancelInFlight {
+                        ProgressView().controlSize(.small)
+                            .frame(width: 24 * uiScale, height: 24 * uiScale)
+                            .help("Cancelling task…")
+                    } else {
+                        IconButton(symbol: "xmark.octagon", label: "Cancel task", tint: AnyShapeStyle(.red)) {
+                            confirmingCancel = true
+                        }
+                        .font(.system(size: 12 * uiScale))
+                    }
+                }
+                IconButton(symbol: "ellipsis", label: "Run details", rotation: .degrees(90)) {
+                    showingRunFacts.toggle()
+                }
+                .font(.system(size: 12 * uiScale))
+                .popover(isPresented: $showingRunFacts, arrowEdge: .bottom) { runFactsPopover }
             }
-            IconButton(symbol: "folder", label: "Open folder") {
-                NSWorkspace.shared.open(URL(fileURLWithPath: resolvedCwd))
+            HStack(spacing: 8) {
+                // Worker and model share one chip: the list the reader clicked from
+                // already named the pair, so here it confirms instead of teaching.
+                TaskMetaChip(text: identityLine, label: "Worker and model", full: identityLine) {
+                    if let provider = worker?.provider {
+                        ProviderLogo(provider: provider, size: 8 * uiScale)
+                    } else {
+                        Image(systemName: "person.crop.circle")
+                            .font(.system(size: 7 * uiScale, weight: .medium))
+                    }
+                }
+                // The reasoning level the run was dispatched with is part of its
+                // identity like the model, and absent when the caller set none.
+                if let effort = task?.effort, !effort.isEmpty {
+                    TaskMetaChip(text: effort, label: "Effort") {
+                        Image(systemName: "brain").font(.system(size: 7 * uiScale, weight: .medium))
+                    }
+                }
+                // Where a run touched files is part of its identity, not a detail: two
+                // tasks with the same worker, model and prompt differ only by folder.
+                TaskMetaChip(text: resolvedDisplayPath, label: "Folder", full: resolvedCwd, maxChars: 28) {
+                    Image(systemName: "folder").font(.system(size: 7 * uiScale, weight: .medium))
+                }
             }
-            .font(.system(size: 12 * uiScale))
-            IconButton(
-                symbol: resolvedArchivedAt == nil ? "archivebox" : "arrow.uturn.backward",
-                label: resolvedArchivedAt == nil ? "Archive task" : "Restore task"
-            ) {
-                setArchived(taskId, resolvedArchivedAt == nil)
-            }
-            .font(.system(size: 12 * uiScale))
-            IconButton(symbol: "ellipsis", label: "Run details", rotation: .degrees(90)) {
-                showingRunFacts.toggle()
-            }
-            .font(.system(size: 12 * uiScale))
-            .popover(isPresented: $showingRunFacts, arrowEdge: .bottom) { runFactsPopover }
+            .padding(.leading, 8 * uiScale + 8)
         }
     }
 
@@ -319,11 +313,21 @@ struct TaskDetail: View {
     /// folder repeats because the header shows it shortened and unselectable.
     private var runFactsPopover: some View {
         VStack(alignment: .leading, spacing: 8) {
-            TaskFactRow(icon: "number", label: "Task", value: taskId, copy: taskId)
+            TaskFactRow(icon: "number", label: "Task", value: shortTaskId, copy: taskId)
             if let sessionId {
                 TaskFactRow(icon: "terminal", label: "Session", value: sessionId, copy: sessionId)
             }
             TaskFactRow(icon: "folder", label: "Folder", value: resolvedCwd, copy: resolvedCwd)
+            Divider()
+            TaskFactActionRow(icon: "folder", label: "Open folder") {
+                NSWorkspace.shared.open(URL(fileURLWithPath: resolvedCwd))
+            }
+            TaskFactActionRow(
+                icon: resolvedArchivedAt == nil ? "archivebox" : "arrow.uturn.backward",
+                label: resolvedArchivedAt == nil ? "Archive task" : "Restore task"
+            ) {
+                setArchived(taskId, resolvedArchivedAt == nil)
+            }
         }
         .padding(14)
         .frame(width: 380 * uiScale, alignment: .leading)
@@ -517,6 +521,13 @@ struct TaskDetail: View {
     private var resolvedQuestion: String? { task?.question ?? listItem.question }
     private var resolvedArchivedAt: String? { task?.archivedAt ?? listItem.archivedAt }
     private var resolvedDisplayPath: String { task?.displayPath ?? listItem.displayPath }
+
+    /// The UUID's first hyphen-delimited segment — enough to tell tasks apart
+    /// at a glance; the full id stays in the copy button.
+    private var shortTaskId: String {
+        guard let end = taskId.firstIndex(of: "-") else { return taskId }
+        return String(taskId[..<end])
+    }
 
     private var state: TaskState { TaskState(resolvedTaskState) }
 
@@ -963,7 +974,7 @@ private struct ActivityWorkRow: View {
                     .help(DetailClock.dateTime(event.createdAt))
             }
             if let presentation = blockPresentation {
-                TaskEventPresentationView(presentation: presentation)
+                TaskEventPresentationView(presentation: presentation, plan: todoPlan)
             }
             if showingRawDetails {
                 EventExpansionView(event: event).padding(.top, 3).transition(.opacity)
@@ -1011,6 +1022,13 @@ private struct ActivityWorkRow: View {
     private var fallbackDetail: TaskEventPresentationSnapshot? {
         guard event.presentation == nil, let detail = event.detail else { return nil }
         return TaskEventPresentationSnapshot(type: "message", text: detail)
+    }
+
+    /// The parsed plan for a todo row, so the collapsed summary reads its
+    /// counts from the same list the expanded checklist renders.
+    private var todoPlan: TodoPlan? {
+        guard event.presentation?.type == "todo" else { return nil }
+        return event.rawText.flatMap(TodoPlan.init(rawEvent:))
     }
 
     /// A path or a command, then what it came to. Both read as one line — the
@@ -1265,6 +1283,10 @@ private struct ActivityReceiptCard: View {
 
 struct TaskEventPresentationView: View {
     let presentation: TaskEventPresentationSnapshot
+    /// The parsed plan, when the raw payload holds one — the collapsed line
+    /// counts from the same list as the expanded checklist, so the two never
+    /// disagree about how much of the work is done.
+    var plan: TodoPlan? = nil
 
     @Environment(\.uiScale) private var uiScale
 
@@ -1324,21 +1346,24 @@ struct TaskEventPresentationView: View {
                     .textSelection(.enabled)
             }
         case "todo":
+            let done = plan?.completedCount ?? presentation.completed ?? 0
+            let total = plan?.total ?? presentation.total ?? 0
+            let active = plan?.activeText ?? presentation.text
             HStack(spacing: 8) {
-                if let total = presentation.total, total > 0 {
+                if total > 0 {
                     ProgressView(
-                        value: Double(presentation.completed ?? 0),
+                        value: Double(done),
                         total: Double(total)
                     )
                     .frame(width: 72 * uiScale)
-                    Text("\(presentation.completed ?? 0) of \(total) complete")
+                    Text("\(done) of \(total) complete")
                         .scaledFont(.caption, monospacedDigit: true).foregroundStyle(.secondary)
                 } else {
                     // No denominator — a full bar with a zero total would lie.
-                    Text(todoSummary)
+                    Text(done > 0 ? "\(done) done" : "No todo items yet")
                         .scaledFont(.caption, monospacedDigit: true).foregroundStyle(.secondary)
                 }
-                if let active = presentation.text {
+                if let active {
                     Text(active).scaledFont(.caption).foregroundStyle(.secondary)
                         .lineLimit(1).truncationMode(.tail)
                 }
@@ -1346,11 +1371,6 @@ struct TaskEventPresentationView: View {
         default:
             EmptyView()
         }
-    }
-
-    private var todoSummary: String {
-        let done = presentation.completed ?? 0
-        return done > 0 ? "\(done) done" : "No todo items yet"
     }
 
     private var commandStatus: String {
@@ -1411,7 +1431,7 @@ private struct TaskMetaChip<Icon: View>: View {
     }
 
     var body: some View {
-        HStack(spacing: 3 * uiScale) {
+        HStack(spacing: 2 * uiScale) {
             icon
             Text(displayText)
                 .scaledFont(.caption2, design: .monospaced)
@@ -1420,9 +1440,9 @@ private struct TaskMetaChip<Icon: View>: View {
         .foregroundStyle(.secondary)
         // The text is already on the ladder's bottom rung, so the chip's size is
         // set by what surrounds it: padding, the gap, and the icon.
-        .padding(.horizontal, 5 * uiScale)
-        .padding(.vertical, 2 * uiScale)
-        .background(Surface.sunken, in: RoundedRectangle(cornerRadius: Radius.small))
+        .padding(.horizontal, 4 * uiScale)
+        .padding(.vertical, 1.5 * uiScale)
+        .background(Surface.sunken, in: RoundedRectangle(cornerRadius: 5.5))
         .help(full.map { "\(label) — \($0)" } ?? label)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(label): \(full ?? text)")
@@ -1518,5 +1538,32 @@ private struct TaskFactRow: View {
                 CopyIconButton(text: copy, label: "Copy \(label.lowercased())")
             }
         }
+    }
+}
+
+/// A launch or mutate control, distinct from the copy rows above it — those
+/// read a value, this one acts. Rendered as a plain full-width button so it
+/// never reads like the copy-to-clipboard rows.
+private struct TaskFactActionRow: View {
+    let icon: String
+    let label: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                EventIcon(symbol: icon)
+                    .foregroundStyle(.primary)
+                    .accessibilityHidden(true)
+                Text(label)
+                    .scaledFont(.caption)
+                    .foregroundStyle(.primary)
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(label)
+        .accessibilityLabel(label)
     }
 }

@@ -19,6 +19,8 @@ enum EventExpansion: Equatable {
     /// command explains: the contents of a file read, or the result of a tool
     /// call.
     case content(ToolContent)
+    /// A worker's plan, read as a checklist instead of the JSON it travelled in.
+    case todo(TodoPlan)
     case payload
 
     init(event: TaskEventSnapshot) {
@@ -31,6 +33,8 @@ enum EventExpansion: Equatable {
         } else if case let output = raw.flatMap(CommandOutput.init(rawEvent:)),
                   command != nil || output != nil {
             self = .command(command, output)
+        } else if EventExpansion.isPlan(event), let raw, let plan = TodoPlan(rawEvent: raw) {
+            self = .todo(plan)
         } else if event.kind == "error" || event.kind == "lifecycle",
                   let text = event.detail, EventExpansion.isLong(text) {
             self = .detail(text)
@@ -49,6 +53,12 @@ enum EventExpansion: Equatable {
         event.kind == "message" || (event.kind == "reasoning" && event.title != "Thinking")
     }
 
+    /// A plan row: the broker's own classification of a todo tool call, and the
+    /// gate `init` uses before handing the payload to `TodoPlan`.
+    static func isPlan(_ event: TaskEventSnapshot) -> Bool {
+        event.presentation?.type == "todo"
+    }
+
     /// A clipped line earns its expansion only once it runs past what one line
     /// can hold — the same bar a quotation is held to.
     private static func isLong(_ text: String) -> Bool {
@@ -64,6 +74,7 @@ enum EventExpansion: Equatable {
     private static func noun(for event: TaskEventSnapshot) -> String {
         let raw = event.rawText ?? ""
         if isProse(event) { return "full text" }
+        if isPlan(event) { return "plan" }
         if event.kind == "error" { return "full error" }
         if event.kind == "lifecycle" { return "full details" }
         if event.kind == "file" {
@@ -112,6 +123,8 @@ enum EventExpansion: Equatable {
         case .prose(let text), .detail(let text):
             return EventExpansion.isLong(text)
         case .content:
+            return true
+        case .todo:
             return true
         case .payload:
             guard !(event.rawText ?? "").isEmpty else { return false }
@@ -275,6 +288,8 @@ struct EventExpansionView: View {
                     content: found,
                     language: event.kind == "file" ? CodeLanguage(path: event.presentation?.path) : .none
                 )
+            case .todo(let plan):
+                TodoPlanView(plan: plan)
             case .payload:
                 EmptyView()
             }
@@ -322,5 +337,150 @@ private struct ToolContentView: View {
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Surface.sunken, in: RoundedRectangle(cornerRadius: Radius.small))
+    }
+}
+
+/// One checklist line: the item text and its state, with the source order the
+/// worker's plan is read in.
+struct TodoItem: Equatable {
+    enum Status: String, Equatable {
+        case pending
+        case inProgress = "in_progress"
+        case completed
+    }
+
+    let text: String
+    let status: Status
+}
+
+/// A worker's plan as typed items, recovered from the raw payload the way
+/// `FileChange` and `CommandOutput` recover theirs — the broker's presentation
+/// carries only the tallies, the list itself lives in the payload.
+struct TodoPlan: Equatable {
+    let items: [TodoItem]
+
+    var completedCount: Int { items.filter { $0.status == .completed }.count }
+    var total: Int { items.count }
+    /// The item the worker is on now, when the plan names one.
+    var activeText: String? { items.first { $0.status == .inProgress }?.text }
+}
+
+extension TodoPlan {
+    /// Text keys the same item travels under across providers.
+    private static let textKeys = ["content", "text", "description", "activeForm"]
+
+    init?(rawEvent source: String) {
+        guard let data = source.data(using: .utf8),
+              let value = try? JSONDecoder().decode(JSONValue.self, from: data),
+              let items = TodoPlan.collect(value) else { return nil }
+        self.items = items
+    }
+
+    /// The plan is an array of objects that each carry an item text — the shape
+    /// every provider's todo tool settles on — with `status` or `completed`
+    /// marking the state when present. A list that does not fully read as one
+    /// is treated as absent, so a malformed payload keeps its raw fallback.
+    private static func collect(_ value: JSONValue) -> [TodoItem]? {
+        switch value {
+        case .object(let fields):
+            for key in fields.keys.sorted() {
+                if let found = collect(fields[key]!) { return found }
+            }
+            return nil
+        case .array(let items):
+            let parsed = items.compactMap(TodoPlan.item)
+            if !parsed.isEmpty, parsed.count == items.count { return parsed }
+            for item in items {
+                if let found = collect(item) { return found }
+            }
+            return nil
+        default:
+            return nil
+        }
+    }
+
+    private static func item(_ value: JSONValue) -> TodoItem? {
+        guard case .object(let fields) = value else { return nil }
+        guard let text = textKeys.compactMap({ key -> String? in
+            guard case .string(let value)? = fields[key] else { return nil }
+            return TodoPlan.clean(value)
+        }).first else { return nil }
+        let status: TodoItem.Status
+        if case .string(let raw)? = fields["status"] {
+            status = TodoItem.Status(rawValue: raw) ?? .pending
+        } else if case .boolean(let done)? = fields["completed"] {
+            status = done ? .completed : .pending
+        } else {
+            status = .pending
+        }
+        return TodoItem(text: text, status: status)
+    }
+
+    /// The write-time marker the broker leaves on a value it already shortened
+    /// before this app ever saw it — see `boundEventPayload`. The marker is
+    /// broker bookkeeping, not item text.
+    private static let truncationPattern = try! NSRegularExpression(
+        pattern: #"\s*…\[truncated: kept (\d+) of (\d+) bytes\]$"#
+    )
+
+    private static func clean(_ text: String) -> String? {
+        let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return nil }
+        let range = NSRange(value.startIndex..., in: value)
+        guard let match = truncationPattern.firstMatch(in: value, range: range),
+              let cut = Range(match.range, in: value) else { return value }
+        return String(value[..<cut.lowerBound])
+    }
+}
+
+/// A plan read as a checklist: done items checked and muted, the item in
+/// progress at full strength, the rest plain. Order stays the worker's.
+private struct TodoPlanView: View {
+    let plan: TodoPlan
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(plan.items.enumerated()), id: \.offset) { _, item in
+                TodoItemRow(item: item)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Surface.sunken, in: RoundedRectangle(cornerRadius: Radius.small))
+    }
+}
+
+private struct TodoItemRow: View {
+    let item: TodoItem
+
+    @Environment(\.uiScale) private var uiScale
+
+    private var symbol: String {
+        switch item.status {
+        case .completed: "checkmark.circle"
+        case .inProgress: "circle.inset.filled"
+        case .pending: "circle"
+        }
+    }
+
+    private var indicatorTint: AnyShapeStyle {
+        switch item.status {
+        case .completed: AnyShapeStyle(.tertiary)
+        case .inProgress: AnyShapeStyle(.blue)
+        case .pending: AnyShapeStyle(.tertiary)
+        }
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            EventIcon(symbol: symbol, weight: .medium)
+                .foregroundStyle(indicatorTint)
+                .padding(.top, 1.5 * uiScale)
+            Text(item.text)
+                .scaledFont(.caption, weight: item.status == .inProgress ? .semibold : .regular)
+                .foregroundStyle(item.status == .inProgress ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+        }
     }
 }

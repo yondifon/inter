@@ -1214,6 +1214,19 @@ export async function cancelTask(id: string, reason = "cancelled by caller", tim
 const ASSERTABLE_STATES: Task["state"][] = ["blocked", "failed"];
 
 /**
+ * States a caller can force-settle from the app: the run is stuck and will not
+ * end on its own, so a human gives up waiting on it. The task moves to
+ * `completed` and any live worker is stopped first, exactly like cancel, so
+ * nothing keeps writing to a settled row. `failed` and `cancelled` stay out —
+ * failed has resume and archive as its own paths, and a cancellation is already
+ * the caller's record of giving up. `answered` is unreachable as a stored state
+ * but the enum keeps it, so the guard lists it for symmetry.
+ */
+const FORCE_COMPLETABLE_STATES: Task["state"][] = [
+  "queued", "running", "needs_input", "answered", "blocked",
+];
+
+/**
  * Mark a blocked or failed task completed on the caller's word that the work
  * landed, keeping the unverified completion on the record. The distinction is
  * the point: `completion` still carries the worker's missing attestation, and
@@ -1242,6 +1255,38 @@ export async function assertTaskCompletion(id: string, assertedBy: string, reaso
     throw new Error(`task cannot be asserted completed from state ${task.state}: ${id} — completion is asserted only over a dead run the worker did not attest (blocked or failed)`);
   }
   const completed = stateStore().assertTaskCompletion(id, { assertedBy: by, reason: why });
+  taskWaiter.notify(id);
+  return completed;
+}
+
+/**
+ * Force-settles a stuck non-final task the caller has given up waiting on. The
+ * state moves to `completed` and the record carries who asserted it and why;
+ * a worker still running is stopped the way cancel stops one, so it cannot
+ * keep writing to a settled row. Already-completed is a no-op; every other
+ * non-final state is a refusal, keeping `failed` and `cancelled` on their own
+ * paths.
+ */
+export async function markTaskCompleted(id: string, assertedBy: string, reason: string): Promise<Task> {
+  const by = assertedBy.trim();
+  if (!by) throw new Error(`marking a task completed needs who asserted it: ${id}`);
+  if (by.length > 200) throw new Error("assertedBy exceeds 200 characters");
+  const why = reason.trim();
+  if (!why) throw new Error(`marking a task completed needs a reason: ${id}`);
+  if (why.length > 500) throw new Error("reason exceeds 500 characters");
+  const task = requireTask(id);
+  if (task.state === "completed") return task;
+  if (!FORCE_COMPLETABLE_STATES.includes(task.state)) {
+    throw new Error(`task cannot be marked completed from state ${task.state}: ${id}`);
+  }
+  const completed = stateStore().forceCompleteTask(id, { assertedBy: by, reason: why });
+  const active = activeWorkers.get(id);
+  if (active) {
+    active.cancelled = true;
+    active.task.state = completed.state;
+    killProcessGroup(active.child, "SIGTERM");
+    active.forceKill = setTimeout(() => killProcessGroup(active.child, "SIGKILL"), 2_000);
+  }
   taskWaiter.notify(id);
   return completed;
 }

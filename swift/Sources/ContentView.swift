@@ -4,6 +4,15 @@ private enum SidebarSelection: Hashable {
     case task(String)
 }
 
+/// The sidebar column's live width, carried up from a background probe so the
+/// value the user last dragged to can be written to defaults.
+private struct SidebarWidthKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
 struct ContentView: View {
     let store: ProfileStore
     let broker: BrokerManager
@@ -14,10 +23,12 @@ struct ContentView: View {
     @State private var showingInstall = false
     @State private var showingMemories = false
     @AppStorage("taskProjectFilter") private var projectFilter = ""
-    @AppStorage("taskGrouping") private var groupingRaw = TaskGrouping.parent.rawValue
+    @AppStorage("taskGrouping") private var groupingRaw = TaskGrouping.priority.rawValue
     @AppStorage("collapsedTaskGroups") private var collapsedRaw = ""
     @AppStorage("showArchivedTasks") private var showArchivedTasks = false
+    @AppStorage("taskSidebarWidth") private var sidebarWidth = 260.0
     @State private var taskPendingCancel: String?
+    @State private var taskPendingComplete: String?
     @State private var showingTaskActionError = false
     @Environment(\.uiScale) private var uiScale
 
@@ -48,6 +59,11 @@ struct ContentView: View {
                                 .tag(SidebarSelection.task(task.id))
                                 .listRowBackground(sidebarRowFill(selected: selection == .task(task.id)))
                                 .contextMenu {
+                                    if canComplete(task) {
+                                        Button("Mark as completed", systemImage: "checkmark.circle") {
+                                            taskPendingComplete = task.id
+                                        }
+                                    }
                                     if canCancel(task) {
                                         Button("Cancel Task", systemImage: "xmark.circle", role: .destructive) {
                                             taskPendingCancel = task.id
@@ -70,7 +86,7 @@ struct ContentView: View {
                     HStack(spacing: 6) {
                         SidebarSectionLabel(
                             text: activeProjectName ?? (showArchivedTasks ? "Archived tasks" : "Recent tasks"),
-                            dense: true
+                            dense: false
                         )
                         Spacer(minLength: 0)
                         if !store.tasks.isEmpty {
@@ -83,7 +99,7 @@ struct ContentView: View {
                     // The chips carry their own height, so this header needs less
                     // padding above them than the label-only one below it.
                     .padding(.top, 6)
-                    .padding(.bottom, 2)
+                    .padding(.bottom, 10)
                     // The header sits outside the List's row-inset chrome, so it needs
                     // its own trailing offset to land on the same edge as a row's
                     // trailing content (the group count below); a row gets this for
@@ -102,7 +118,15 @@ struct ContentView: View {
             .scrollContentBackground(.hidden)
             .background { Surface.sidebar.ignoresSafeArea() }
             .background(SplitViewDividerHider())
-            .navigationSplitViewColumnWidth(min: 240, ideal: 260)
+            .background {
+                GeometryReader { proxy in
+                    Color.clear.preference(key: SidebarWidthKey.self, value: proxy.size.width)
+                }
+            }
+            .onPreferenceChange(SidebarWidthKey.self) { width in
+                persistSidebarWidth(width)
+            }
+            .navigationSplitViewColumnWidth(min: Self.minSidebarWidth, ideal: restoredSidebarWidth, max: Self.maxSidebarWidth)
             .toolbar {
                 ToolbarItem {
                     Button("Install MCP", systemImage: "link.badge.plus") {
@@ -138,7 +162,23 @@ struct ContentView: View {
         .sheet(isPresented: $showingInstall) { InstallResultsView(results: installResults) }
         .sheet(isPresented: $showingMemories) { ProjectMemoriesSheet(store: store) }
         .task { store.start() }
-        // Cancel from the context menu always confirms first (EC-004).
+        // Both sidebar actions stop the worker's process tree, so each confirms first.
+        .confirmationDialog(
+            "Mark this task as completed?",
+            isPresented: Binding(
+                get: { taskPendingComplete != nil },
+                set: { if !$0 { taskPendingComplete = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: taskPendingComplete
+        ) { id in
+            Button("Mark as completed") {
+                Task { await performComplete(id) }
+            }
+            Button("Don’t Mark Completed", role: .cancel) {}
+        } message: { _ in
+            Text("This stops the worker’s process tree and marks the task completed.")
+        }
         .confirmationDialog(
             "Cancel this task?",
             isPresented: Binding(
@@ -190,7 +230,7 @@ struct ContentView: View {
         return showArchivedTasks ? "No archived tasks" : "No tasks yet"
     }
 
-    private var grouping: TaskGrouping { TaskGrouping(rawValue: groupingRaw) ?? .parent }
+    private var grouping: TaskGrouping { TaskGrouping(rawValue: groupingRaw) ?? .priority }
 
     /// The raw value is JSON keyed by grouping mode, with the legacy newline
     /// format folded into the mode it was saved in. Only the current mode's ids
@@ -238,8 +278,21 @@ struct ContentView: View {
         [.failed, .cancelled, .blocked].contains(TaskState(task.state))
     }
 
+    /// A stuck non-final task can be force-settled. Completed, failed, and
+    /// cancelled are never offered — each already has its own path.
+    private func canComplete(_ task: TaskListItem) -> Bool {
+        [.queued, .running, .needsInput, .answered, .blocked].contains(TaskState(task.state))
+    }
+
     private func performCancel(_ id: String) async {
         guard await store.cancelTask(id) else {
+            showingTaskActionError = true
+            return
+        }
+    }
+
+    private func performComplete(_ id: String) async {
+        guard await store.markTaskCompleted(id) else {
             showingTaskActionError = true
             return
         }
@@ -256,6 +309,27 @@ struct ContentView: View {
     /// Matches the trailing edge a List row gets automatically (leading is already
     /// consistent between header and row; only the trailing side drifts).
     private static let sidebarRowTrailingInset: CGFloat = 16
+
+    /// Sidebar column bounds, so a corrupt stored width can't shrink the pane to
+    /// nothing or shove the detail column off the window.
+    private static let minSidebarWidth: CGFloat = 240
+    private static let maxSidebarWidth: CGFloat = 560
+
+    /// The restored width, clamped to `minSidebarWidth`…`maxSidebarWidth`.
+    private var restoredSidebarWidth: CGFloat {
+        let width = CGFloat(sidebarWidth)
+        return min(max(width, Self.minSidebarWidth), Self.maxSidebarWidth)
+    }
+
+    /// Records the column as the user left it. Below `minSidebarWidth` the window,
+    /// not the user, set the width — a squeezed pane is not worth remembering.
+    /// Stored whole points, so the saved value stays clean.
+    private func persistSidebarWidth(_ width: CGFloat) {
+        guard width >= Self.minSidebarWidth else { return }
+        let clamped = min(max(width, Self.minSidebarWidth), Self.maxSidebarWidth).rounded()
+        guard abs(clamped - CGFloat(sidebarWidth)) > 0.5 else { return }
+        sidebarWidth = Double(clamped)
+    }
 
     /// Explicit point size, not `scaledFont`: that ladder is tuned for reading-length
     /// text, and a symbol sized off text metrics doesn't carry the same weight.

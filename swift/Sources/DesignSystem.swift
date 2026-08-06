@@ -403,7 +403,7 @@ enum TaskState: String {
         case .failed: Color(nsColor: .systemRed).opacity(0.9)
         case .blocked: Color(nsColor: .systemOrange)
         case .cancelled: .secondary
-        case .needsInput: Color(nsColor: .systemOrange)
+        case .needsInput: .blue
         case .running, .answered: .secondary
         case .queued, .unknown: Color(nsColor: .tertiaryLabelColor)
         }
@@ -439,8 +439,18 @@ enum TaskState: String {
     }
 
     /// Only these states earn their state name in a dense list; a check already
-    /// says "completed", and the pulse already says "running".
-    var wantsLabelInList: Bool { self != .completed && self != .running }
+    /// says "completed", and the pulse already says "running". Blocked, failed,
+    /// and cancelled also have their meaning in the dot, so they don't show text.
+    var wantsLabelInList: Bool {
+        switch self {
+        case .completed, .running:
+            return false
+        case .blocked, .failed, .cancelled:
+            return false
+        case .needsInput, .answered, .queued, .unknown:
+            return true
+        }
+    }
 
     var isTerminal: Bool {
         [.needsInput, .answered, .blocked, .completed, .failed, .cancelled].contains(self)

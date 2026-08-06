@@ -12,6 +12,7 @@ import {
   handoffTask,
   listTasks,
   listTaskSummaries,
+  markTaskCompleted,
   reply,
   resumeTask,
   scopeInheritanceWarning,
@@ -462,6 +463,29 @@ const serveOptions = {
             allowQuestions: body.allowQuestions,
           }), DEFAULT_RESUME_FIELDS),
           { status: 202 },
+        );
+      } catch (error) {
+        return Response.json({ error: String(error) }, { status: 400 });
+      }
+    }
+    const completeTaskId = url.pathname.match(/^\/api\/tasks\/([^/]+)\/complete$/)?.[1];
+    if (completeTaskId && request.method === "POST") {
+      const text = await request.text();
+      let body: { assertedBy?: string; reason?: string } = {};
+      if (text) {
+        try {
+          body = JSON.parse(text);
+        } catch {
+          return invalidJsonBody();
+        }
+      }
+      try {
+        return Response.json(
+          taskView(await markTaskCompleted(
+            decodeURIComponent(completeTaskId),
+            body.assertedBy ?? "Inter app",
+            body.reason ?? "marked completed from the sidebar",
+          ), DEFAULT_COMPLETE_FIELDS),
         );
       } catch (error) {
         return Response.json({ error: String(error) }, { status: 400 });

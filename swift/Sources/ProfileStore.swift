@@ -127,6 +127,29 @@ final class ProfileStore {
         }
     }
 
+    /// Marks a stuck non-final task completed from the sidebar. The broker
+    /// stops a still-running worker first, then records the assertion.
+    func markTaskCompleted(_ id: String) async -> Bool {
+        let encoded = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
+        var request = URLRequest(url: InterServer.api("tasks/\(encoded)/complete"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "assertedBy": "Inter app",
+            "reason": "marked completed from the sidebar",
+        ])
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+                return false
+            }
+            await refresh()
+            return true
+        } catch {
+            return false
+        }
+    }
+
     /// Restarts a failed, cancelled, or blocked task in its original session.
     /// An instruction is handed to the worker at the head of the continued
     /// session; nil continues exactly where the run stopped.

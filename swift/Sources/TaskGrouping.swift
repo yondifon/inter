@@ -14,6 +14,7 @@ enum TaskGrouping: String, CaseIterable, Identifiable {
     case project
     case status
     case none
+    case priority
 
     var id: Self { self }
 
@@ -23,6 +24,7 @@ enum TaskGrouping: String, CaseIterable, Identifiable {
         case .project: "Project"
         case .status: "Status"
         case .none: "None"
+        case .priority: "Priority"
         }
     }
 }
@@ -147,7 +149,9 @@ enum TaskOrganizer {
         case .parent:
             return parentGroups(scoped)
         case .status:
-            return statusGroups(scoped)
+            return statusGroups(scoped, orderedBy: statusOrder)
+        case .priority:
+            return statusGroups(scoped, orderedBy: priorityOrder)
         }
     }
 
@@ -220,14 +224,24 @@ enum TaskOrganizer {
         .unknown,
     ]
 
-    /// Buckets by state in the fixed order above, so a state nobody has right now
+    /// Attention first: a task waiting on the user, one blocked, then a run that
+    /// ended without deciding, then live and queued work, and the settled ledger
+    /// closes the list. Unknown goes last like every other order.
+    private static let priorityOrder: [TaskState] = [
+        .needsInput, .blocked, .failed,
+        .running, .answered, .queued,
+        .completed, .cancelled,
+        .unknown,
+    ]
+
+    /// Buckets by state in the given order, so a state nobody is in right now
     /// costs no heading and the rows keep the store's newest-first order.
-    private static func statusGroups(_ tasks: [TaskListItem]) -> [TaskGroup] {
+    private static func statusGroups(_ tasks: [TaskListItem], orderedBy order: [TaskState]) -> [TaskGroup] {
         var buckets: [TaskState: [TaskListItem]] = [:]
         for task in tasks {
             buckets[TaskState(task.state), default: []].append(task)
         }
-        return statusOrder.compactMap { state in
+        return order.compactMap { state in
             guard let rows = buckets[state], !rows.isEmpty else { return nil }
             return TaskGroup(id: state.rawValue, title: state.label, tasks: rows)
         }

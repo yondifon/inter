@@ -747,6 +747,55 @@ export class StateStore {
     return task;
   }
 
+  /**
+   * Force-settles a stuck task the caller has given up waiting on: the state
+   * moves to `completed` and the record carries who asserted it and why. Only
+   * valid from the non-final states a live or parked run can sit in; a dead
+   * run uses `assertTaskCompletion` and a settled one is already done. The
+   * SQL guard doubles as the refusal, so a row that moved under this call is
+   * never overwritten.
+   */
+  forceCompleteTask(
+    id: string,
+    updates: { assertedBy: string; reason: string },
+  ): Task {
+    const now = new Date().toISOString();
+    let completed = false;
+    this.transaction(() => {
+      const current = this.database.query<{
+        state: TaskState;
+        completion_json: string | null;
+      }, [string]>(`
+        SELECT state, completion_json FROM tasks WHERE id = ?
+      `).get(id);
+      const existing = current?.completion_json
+        ? JSON.parse(current.completion_json) as TaskCompletion
+        : undefined;
+      const override: TaskCompletionOverride = {
+        assertedBy: updates.assertedBy,
+        reason: updates.reason,
+        assertedAt: now,
+      };
+      const changed = this.database.query(`
+        UPDATE tasks
+        SET state = 'completed', completion_json = ?, updated_at = ?
+        WHERE id = ? AND state IN ('queued', 'running', 'needs_input', 'answered', 'blocked')
+      `).run(JSON.stringify({ ...(existing ?? {}), assertedCompletion: override }), now, id);
+      if (changed.changes !== 1) {
+        throw new Error(`task cannot be marked completed from state ${current?.state ?? "unknown"}: ${id}`);
+      }
+      this.addTaskEvent(id, "completion_asserted", "completed", {
+        assertedBy: updates.assertedBy,
+        reason: updates.reason,
+        previousState: current?.state,
+      });
+      completed = true;
+    });
+    const task = completed ? this.getTask(id) : undefined;
+    if (!task) throw new Error(`unknown task: ${id}`);
+    return task;
+  }
+
   answerTask(
     id: string,
     updates: { answer?: string; scope?: TaskScope; grantId?: string } = {},
