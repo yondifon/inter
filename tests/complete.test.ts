@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { assertTaskCompletion } from "../src/tasks";
+import { assertTaskCompletion, markTaskCompleted } from "../src/tasks";
 import { closeStateStore, stateStore } from "../src/store";
 import type { Profile, Task } from "../src/types";
 
@@ -193,6 +193,91 @@ describe("assertTaskCompletion", () => {
         replacedCode: "unverified",
         previousState: "blocked",
       },
+    });
+  });
+});
+
+describe("markTaskCompleted", () => {
+  test("completes a failed task and keeps the failure next to the assertion", async () => {
+    const root = freshDb();
+    const failed = task("failed", {
+      exitCode: 1,
+      blocked: true,
+      code: "worker_error",
+      reason: "exit 1",
+    });
+    stateStore().createTask(failed);
+
+    const done = await markTaskCompleted(failed.id, "alice", "checked by hand");
+
+    expect(done.state).toBe("completed");
+    // The failure that ended the run survives verbatim next to the assertion,
+    // so the record still says why it failed as well as who settled it.
+    expect(done.completion).toMatchObject({
+      exitCode: 1,
+      code: "worker_error",
+      reason: "exit 1",
+      assertedCompletion: { assertedBy: "alice", reason: "checked by hand" },
+    });
+    expect(done.completion!.assertedCompletion!.assertedAt).toBeString();
+  });
+
+  test("completes a cancelled task with the cancellation on the record", async () => {
+    const root = freshDb();
+    const cancelled = task("cancelled", {
+      blocked: true,
+      code: "cancelled",
+      reason: "cancelled by caller",
+    });
+    stateStore().createTask(cancelled);
+
+    const done = await markTaskCompleted(cancelled.id, "alice", "clearing it out");
+
+    expect(done.state).toBe("completed");
+    expect(done.completion).toMatchObject({
+      code: "cancelled",
+      reason: "cancelled by caller",
+      assertedCompletion: { assertedBy: "alice", reason: "clearing it out" },
+    });
+  });
+
+  test("force-completes a live-state task too", async () => {
+    const root = freshDb();
+    const running = task("running");
+    stateStore().createTask(running);
+
+    const done = await markTaskCompleted(running.id, "alice", "give up");
+
+    expect(done.state).toBe("completed");
+    expect(done.completion!.assertedCompletion).toMatchObject({ assertedBy: "alice" });
+  });
+
+  test("no-ops on an already completed task without adding an assertion", async () => {
+    const root = freshDb();
+    const verified = task("completed", { blocked: false, code: "completed" });
+    stateStore().createTask(verified);
+
+    const done = await markTaskCompleted(verified.id, "alice", "still done");
+
+    expect(done.state).toBe("completed");
+    expect(done.completion).toEqual({ blocked: false, code: "completed" });
+    const current = stateStore().getTask(verified.id)!;
+    expect(current.state).toBe("completed");
+    expect(current.completion?.assertedCompletion).toBeUndefined();
+  });
+
+  test("emits a completion_asserted event naming the settled state", async () => {
+    const root = freshDb();
+    const failed = task("failed", { exitCode: 1, blocked: true, code: "worker_error" });
+    stateStore().createTask(failed);
+
+    await markTaskCompleted(failed.id, "alice", "checked by hand");
+
+    const event = stateStore().listTaskEvents(failed.id).at(-1);
+    expect(event).toMatchObject({
+      type: "completion_asserted",
+      state: "completed",
+      payload: { assertedBy: "alice", reason: "checked by hand", previousState: "failed" },
     });
   });
 });

@@ -1217,13 +1217,14 @@ const ASSERTABLE_STATES: Task["state"][] = ["blocked", "failed"];
  * States a caller can force-settle from the app: the run is stuck and will not
  * end on its own, so a human gives up waiting on it. The task moves to
  * `completed` and any live worker is stopped first, exactly like cancel, so
- * nothing keeps writing to a settled row. `failed` and `cancelled` stay out —
- * failed has resume and archive as its own paths, and a cancellation is already
- * the caller's record of giving up. `answered` is unreachable as a stored state
- * but the enum keeps it, so the guard lists it for symmetry.
+ * nothing keeps writing to a settled row. A `failed` or `cancelled` run has no
+ * worker left to stop — it settled without resolving, so marking it completed
+ * clears it out of the attention-ranked list. Only `completed` is absent, where
+ * the action is a no-op. `answered` is unreachable as a stored state but the
+ * enum keeps it, so the guard lists it for symmetry.
  */
 const FORCE_COMPLETABLE_STATES: Task["state"][] = [
-  "queued", "running", "needs_input", "answered", "blocked",
+  "queued", "running", "needs_input", "answered", "blocked", "failed", "cancelled",
 ];
 
 /**
@@ -1260,12 +1261,12 @@ export async function assertTaskCompletion(id: string, assertedBy: string, reaso
 }
 
 /**
- * Force-settles a stuck non-final task the caller has given up waiting on. The
- * state moves to `completed` and the record carries who asserted it and why;
- * a worker still running is stopped the way cancel stops one, so it cannot
- * keep writing to a settled row. Already-completed is a no-op; every other
- * non-final state is a refusal, keeping `failed` and `cancelled` on their own
- * paths.
+ * Force-settles a task the caller has given up waiting on. The state moves to
+ * `completed` and the record carries who asserted it and why; a worker still
+ * running is stopped the way cancel stops one, so it cannot keep writing to a
+ * settled row. A `failed` or `cancelled` run has no worker left to stop, so
+ * only the record moves. Already-completed is a no-op; every other state is a
+ * refusal.
  */
 export async function markTaskCompleted(id: string, assertedBy: string, reason: string): Promise<Task> {
   const by = assertedBy.trim();

@@ -358,9 +358,10 @@ final class ActivityStoryTests: XCTestCase {
             event(3, kind: "lifecycle", title: "Session started", detail: "claude-sonnet-5 · 30 tools"),
             event(4, kind: "raw", title: "Tool result"),
             event(5, kind: "lifecycle", title: "Task completed"),
+            event(6, kind: "lifecycle", title: "Rate limit", detail: "five hour · resets in 2h"),
         ])
-        XCTAssertEqual(story.technical.map(\.id), [1, 2, 4, 5])
-        XCTAssertEqual(work(story.blocks.first).map(\.id), [3])
+        XCTAssertEqual(story.technical.map(\.id), [1, 2, 3, 4, 5])
+        XCTAssertEqual(work(story.blocks.first).map(\.id), [6])
     }
 
     /// Spawn, session capture and archiving are bookkeeping: the header names the

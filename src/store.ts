@@ -748,12 +748,13 @@ export class StateStore {
   }
 
   /**
-   * Force-settles a stuck task the caller has given up waiting on: the state
-   * moves to `completed` and the record carries who asserted it and why. Only
-   * valid from the non-final states a live or parked run can sit in; a dead
-   * run uses `assertTaskCompletion` and a settled one is already done. The
-   * SQL guard doubles as the refusal, so a row that moved under this call is
-   * never overwritten.
+   * Force-settles a task the caller has given up waiting on: the state moves to
+   * `completed` and the record carries who asserted it and why. Valid from any
+   * state but `completed` — a live or parked run stops its worker first, and a
+   * `failed` or `cancelled` run moves with no worker left to stop. The
+   * existing completion (why it failed, say) is kept next to the assertion.
+   * The SQL guard doubles as the refusal, so a row that moved under this call
+   * is never overwritten.
    */
   forceCompleteTask(
     id: string,
@@ -779,7 +780,7 @@ export class StateStore {
       const changed = this.database.query(`
         UPDATE tasks
         SET state = 'completed', completion_json = ?, updated_at = ?
-        WHERE id = ? AND state IN ('queued', 'running', 'needs_input', 'answered', 'blocked')
+        WHERE id = ? AND state IN ('queued', 'running', 'needs_input', 'answered', 'blocked', 'failed', 'cancelled')
       `).run(JSON.stringify({ ...(existing ?? {}), assertedCompletion: override }), now, id);
       if (changed.changes !== 1) {
         throw new Error(`task cannot be marked completed from state ${current?.state ?? "unknown"}: ${id}`);

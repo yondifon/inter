@@ -31,6 +31,7 @@ enum TaskGrouping: String, CaseIterable, Identifiable {
 enum TaskSort: String, CaseIterable, Identifiable {
     case recent
     case priority
+    case updated
 
     var id: Self { self }
 
@@ -38,6 +39,7 @@ enum TaskSort: String, CaseIterable, Identifiable {
         switch self {
         case .recent: "Newest first"
         case .priority: "Priority"
+        case .updated: "Recently updated"
         }
     }
 }
@@ -260,7 +262,8 @@ enum TaskOrganizer {
     }
 
     /// Orders the rows of one group. `.recent` keeps the store's newest-first
-    /// order; `.priority` ranks by attention state, ties keeping the store order.
+    /// order; `.priority` ranks by attention state, ties keeping the store order;
+    /// `.updated` sorts by last-updated, newest first, ties keeping the store order.
     private static func sorted(_ tasks: [TaskListItem], by sort: TaskSort) -> [TaskListItem] {
         switch sort {
         case .recent:
@@ -274,11 +277,26 @@ enum TaskOrganizer {
                     return lhs.offset < rhs.offset
                 }
                 .map(\.element)
+        case .updated:
+            return tasks.enumerated()
+                .sorted { lhs, rhs in
+                    let l = updatedDate(lhs.element)
+                    let r = updatedDate(rhs.element)
+                    if l != r { return l > r }
+                    return lhs.offset < rhs.offset
+                }
+                .map(\.element)
         }
     }
 
     private static func priorityRank(_ task: TaskListItem) -> Int {
         priorityOrder.firstIndex(of: TaskState(task.state)) ?? priorityOrder.count
+    }
+
+    /// The task's last-updated instant, or a fixed past point when the stored
+    /// timestamp does not parse, so an unparseable row sinks to the bottom.
+    private static func updatedDate(_ task: TaskListItem) -> Date {
+        EventClock.date(task.updatedAt) ?? .distantPast
     }
 
     /// Rebuilds each group with its rows sorted, carrying the full heading over.

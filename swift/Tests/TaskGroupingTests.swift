@@ -3,7 +3,7 @@ import XCTest
 @testable import Inter
 
 final class TaskGroupingTests: XCTestCase {
-    private func item(_ id: String, cwd: String, parent: String? = nil, promptPreview: String = "prompt", title: String? = nil, state: String = "completed") -> TaskListItem {
+    private func item(_ id: String, cwd: String, parent: String? = nil, promptPreview: String = "prompt", title: String? = nil, state: String = "completed", updatedAt: String = "2026-07-29T10:00:00Z") -> TaskListItem {
         TaskListItem(
             id: id,
             profileId: "worker",
@@ -14,7 +14,7 @@ final class TaskGroupingTests: XCTestCase {
             tldr: nil,
             title: title,
             createdAt: "2026-07-29T10:00:00Z",
-            updatedAt: "2026-07-29T10:00:00Z",
+            updatedAt: updatedAt,
             error: nil,
             question: nil,
             parentTaskId: parent
@@ -423,6 +423,54 @@ final class TaskGroupingTests: XCTestCase {
             sort: .priority
         )
         XCTAssertEqual(groups[0].tasks.map(\.id), ["2", "1", "3"], "equal ranks fall back to the store's order")
+    }
+
+    func testUpdatedSortOrdersNewestUpdateFirst() {
+        let groups = TaskOrganizer.organize(
+            tasks: [
+                item("old", cwd: inter, updatedAt: "2026-07-29T08:00:00Z"),
+                item("new", cwd: inter, updatedAt: "2026-07-30T09:15:00.000Z"),
+                item("mid", cwd: inter, updatedAt: "2026-07-29T22:00:00Z"),
+            ],
+            project: nil,
+            grouping: .none,
+            sort: .updated
+        )
+        XCTAssertEqual(
+            groups[0].tasks.map(\.id), ["new", "mid", "old"],
+            "most recently updated first, whether or not the timestamp carries milliseconds"
+        )
+    }
+
+    func testUpdatedSortTiesKeepTheStoresOrder() {
+        let groups = TaskOrganizer.organize(
+            tasks: [
+                item("1", cwd: inter, updatedAt: "2026-07-29T10:00:00Z"),
+                item("2", cwd: inter, updatedAt: "2026-07-29T10:00:00.000Z"),
+                item("3", cwd: inter, updatedAt: "2026-07-29T10:00:00Z"),
+            ],
+            project: nil,
+            grouping: .none,
+            sort: .updated
+        )
+        XCTAssertEqual(groups[0].tasks.map(\.id), ["1", "2", "3"], "equal update times fall back to the store's order")
+    }
+
+    func testUpdatedSortComposesWithGrouping() {
+        let groups = TaskOrganizer.organize(
+            tasks: [
+                item("1", cwd: inter, updatedAt: "2026-07-29T08:00:00Z"),
+                item("2", cwd: site, updatedAt: "2026-07-30T09:00:00Z"),
+                item("3", cwd: inter, updatedAt: "2026-07-30T10:00:00Z"),
+                item("4", cwd: site, updatedAt: "2026-07-29T11:00:00Z"),
+            ],
+            project: nil,
+            grouping: .project,
+            sort: .updated
+        )
+        XCTAssertEqual(groups.map(\.title), ["inter", "site"])
+        XCTAssertEqual(groups[0].tasks.map(\.id), ["3", "1"], "newest update first inside the project group")
+        XCTAssertEqual(groups[1].tasks.map(\.id), ["2", "4"])
     }
 
     func testGroupingComposesWithPrioritySort() {

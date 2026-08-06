@@ -160,7 +160,7 @@ struct ContentView: View {
         .sheet(isPresented: $showingInstall) { InstallResultsView(results: installResults) }
         .sheet(isPresented: $showingMemories) { ProjectMemoriesSheet(store: store) }
         .task { store.start() }
-        // Both sidebar actions stop the worker's process tree, so each confirms first.
+        // Both sidebar actions settle the task, so each confirms first.
         .confirmationDialog(
             "Mark this task as completed?",
             isPresented: Binding(
@@ -174,8 +174,8 @@ struct ContentView: View {
                 Task { await performComplete(id) }
             }
             Button("Don’t Mark Completed", role: .cancel) {}
-        } message: { _ in
-            Text("This stops the worker’s process tree and marks the task completed.")
+        } message: { id in
+            Text(completionDialogMessage(for: id))
         }
         .confirmationDialog(
             "Cancel this task?",
@@ -278,10 +278,11 @@ struct ContentView: View {
         [.failed, .cancelled, .blocked].contains(TaskState(task.state))
     }
 
-    /// A stuck non-final task can be force-settled. Completed, failed, and
-    /// cancelled are never offered — each already has its own path.
+    /// A task that will not end on its own can be force-settled — the broker
+    /// stops any live worker first. A completed task is already settled, so the
+    /// action is a no-op there and stays hidden.
     private func canComplete(_ task: TaskListItem) -> Bool {
-        [.queued, .running, .needsInput, .answered, .blocked].contains(TaskState(task.state))
+        [.queued, .running, .needsInput, .answered, .blocked, .failed, .cancelled].contains(TaskState(task.state))
     }
 
     private func performCancel(_ id: String) async {
@@ -296,6 +297,18 @@ struct ContentView: View {
             showingTaskActionError = true
             return
         }
+    }
+
+    /// The dialog spells out what the action does, and that depends on whether a
+    /// worker can still be running: live or parked states have a process tree to
+    /// stop, a failed or cancelled run has already ended.
+    private func completionDialogMessage(for id: String) -> String {
+        let liveStates = [TaskState.queued, .running, .needsInput, .answered, .blocked]
+        let hasLiveWorker = store.tasks.first { $0.id == id }
+            .map { liveStates.contains(TaskState($0.state)) } ?? false
+        return hasLiveWorker
+            ? "This stops the worker’s process tree and marks the task completed."
+            : "Marks the task completed. The run has already ended, so no worker is stopped."
     }
 
     /// Fast path only — the detail header carries the instruction sheet.
@@ -383,13 +396,19 @@ struct ContentView: View {
                 Text("Archived").tag(true)
             }
             .pickerStyle(.inline)
-            Picker("Project", selection: $projectFilter) {
-                Text("All projects").tag("")
-                ForEach(projects) { project in
-                    Text("\(project.name) — \(project.count)").tag(project.id)
+            Menu {
+                Picker("Project", selection: $projectFilter) {
+                    Text("All projects").tag("")
+                    ForEach(projects) { project in
+                        Text("\(project.name) — \(project.count)").tag(project.id)
+                    }
                 }
+                .pickerStyle(.inline)
+            } label: {
+                Text(projectMenuLabel)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
-            .pickerStyle(.inline)
         } label: {
             Image(systemName: viewMenuIsActive ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
                 .font(sidebarIconFont())
@@ -408,6 +427,13 @@ struct ContentView: View {
 
     private var viewMenuIsActive: Bool { grouping != .parent || sort != .priority || isFiltering }
     private var isFiltering: Bool { !projectFilter.isEmpty || showArchivedTasks }
+
+    /// The project submenu's collapsed label names the active filter, so the
+    /// current selection is visible without opening it.
+    private var projectMenuLabel: String {
+        guard !projectFilter.isEmpty else { return "Project: All" }
+        return "Project: \(TaskOrganizer.projectName(projectFilter))"
+    }
 
     /// Broker health is app-wide, so it sits at the foot of the sidebar instead of
     /// the toolbar, where it landed on the detail side of the divider and read as
