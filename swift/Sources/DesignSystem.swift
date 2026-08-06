@@ -92,7 +92,10 @@ private extension NSView {
     /// alone is enough: walking up covers a probe already parented under the
     /// split view, and sweeping down from the window's root covers first layout,
     /// where the probe is not yet in that hierarchy and an upward walk finds
-    /// nothing at all.
+    /// nothing at all. The swap is deferred to the next turn of the run loop:
+    /// swapping the class inline during SwiftUI's own layout pass discards the
+    /// split view subclass SwiftUI installed, and that hangs layout before the
+    /// window ever finishes building.
     func hideEnclosingSplitViewDividers() {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }

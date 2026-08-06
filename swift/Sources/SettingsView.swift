@@ -75,6 +75,7 @@ struct SettingsView: View {
             .scrollContentBackground(.hidden)
             .scrollIndicators(.never)
             .background { Surface.content }
+            .background(SplitViewDividerHider())
             .navigationSplitViewColumnWidth(min: 200, ideal: 220)
         } detail: {
             switch selection {

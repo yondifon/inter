@@ -53,9 +53,30 @@ struct ContentView: View {
     @State private var taskPendingComplete: String?
     @State private var showingTaskActionError = false
     @Environment(\.uiScale) private var uiScale
+    /// `NavigationSplitViewVisibility` has no `RawRepresentable` conformance `@AppStorage`
+    /// can bind to, so the persisted form is the plain bool below and this mirrors it.
+    @State private var columnVisibility: NavigationSplitViewVisibility
+    private static let sidebarCollapsedKey = "taskSidebarCollapsed"
+    /// The GeometryReader behind the sidebar list reports the split view's first,
+    /// still-settling layout pass before it reports the restored width. Persisting
+    /// that early pass would overwrite a real stored width with a transient one on
+    /// every launch, so writes stay off until the initial layout has had a moment
+    /// to settle.
+    @State private var sidebarWidthPersistenceArmed = false
+
+    /// Reads the collapsed flag directly from defaults so the sidebar opens in its
+    /// last state on the very first frame, instead of flashing open and collapsing.
+    init(store: ProfileStore, broker: BrokerManager, updateChecker: UpdateChecker, settingsPresentation: SettingsPresentation) {
+        self.store = store
+        self.broker = broker
+        self.updateChecker = updateChecker
+        self.settingsPresentation = settingsPresentation
+        let collapsed = UserDefaults.standard.bool(forKey: Self.sidebarCollapsedKey)
+        _columnVisibility = State(initialValue: collapsed ? .detailOnly : .all)
+    }
 
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
             List(selection: $selection) {
                 Section {
                     if visibleTasks.isEmpty {
@@ -189,9 +210,14 @@ struct ContentView: View {
             // store's first fetch shouldn't have to wait on that round trip.
             let initialFilter = TaskArchiveFilter(rawValue: UserDefaults.standard.string(forKey: "taskArchiveFilter") ?? "") ?? .active
             store.start(archiveFilter: initialFilter)
+            try? await Task.sleep(for: .milliseconds(400))
+            sidebarWidthPersistenceArmed = true
         }
         .onChange(of: archiveFilterRaw) { _, newValue in
             Task { await store.setArchiveFilter(TaskArchiveFilter(rawValue: newValue) ?? .active) }
+        }
+        .onChange(of: columnVisibility) { _, newValue in
+            UserDefaults.standard.set(newValue == .detailOnly, forKey: Self.sidebarCollapsedKey)
         }
         // Both sidebar actions settle the task, so each confirms first.
         .confirmationDialog(
@@ -383,7 +409,7 @@ struct ContentView: View {
     /// not the user, set the width — a squeezed pane is not worth remembering.
     /// Stored whole points, so the saved value stays clean.
     private func persistSidebarWidth(_ width: CGFloat) {
-        guard width >= Self.minSidebarWidth else { return }
+        guard sidebarWidthPersistenceArmed, width >= Self.minSidebarWidth else { return }
         let clamped = min(max(width, Self.minSidebarWidth), Self.maxSidebarWidth).rounded()
         guard abs(clamped - CGFloat(sidebarWidth)) > 0.5 else { return }
         sidebarWidth = Double(clamped)

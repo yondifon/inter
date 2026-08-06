@@ -17,8 +17,7 @@ enum LegacyDefaults {
         "NSWindow Frame InterMainWindow",
     ]
 
-    static func migrate() {
-        let defaults = UserDefaults.standard
+    static func migrate(defaults: UserDefaults = .standard) {
         guard !defaults.bool(forKey: marker) else { return }
         defaults.set(true, forKey: marker)
         guard let legacy = UserDefaults(suiteName: legacyDomain) else { return }
@@ -36,8 +35,7 @@ enum TaskSortDefaults {
     private static let marker = "migratedTaskSortDefaults"
     private static let legacyPriority = "priority"
 
-    static func migrate() {
-        let defaults = UserDefaults.standard
+    static func migrate(defaults: UserDefaults = .standard) {
         guard !defaults.bool(forKey: marker) else { return }
         defaults.set(true, forKey: marker)
         guard defaults.string(forKey: "taskGrouping") == legacyPriority else { return }
