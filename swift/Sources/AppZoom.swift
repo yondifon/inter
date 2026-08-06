@@ -44,10 +44,10 @@ struct RootView: View {
     let broker: BrokerManager
     let zoom: AppZoom
     let updateChecker: UpdateChecker
-    let openSettings: () -> Void
+    let settingsPresentation: SettingsPresentation
 
     var body: some View {
-        ContentView(store: store, broker: broker, updateChecker: updateChecker, openSettings: openSettings)
+        ContentView(store: store, broker: broker, updateChecker: updateChecker, settingsPresentation: settingsPresentation)
             .environment(\.uiScale, zoom.scale)
     }
 }

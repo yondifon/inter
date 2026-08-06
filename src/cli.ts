@@ -44,7 +44,7 @@ import type {
   Task,
 } from "./types";
 import { taskEventView } from "./events";
-import { COMPLETE_DESCRIPTION, DELEGATE_DESCRIPTION, HANDOFF_DESCRIPTION, MCP_INSTRUCTIONS } from "./mcp-copy";
+import { COMPLETE_DESCRIPTION, DELEGATE_DESCRIPTION, HANDOFF_DESCRIPTION, MCP_INSTRUCTIONS, RESUME_DESCRIPTION } from "./mcp-copy";
 import { defaultModelFor } from "./provider-defaults";
 import { normalizeProfile } from "./profile-input";
 import { deleteMemory, getMemory, listMemories, setMemory } from "./memories";
@@ -233,6 +233,7 @@ const serveOptions = {
         // One grouped count per cwd, cheap enough to ride the poll; the values
         // behind it are read only when a project is opened.
         memoryProjects: stateStore().listMemoryProjects(),
+        spend: stateStore().spendTotals(),
       });
     }
     // One project's memories, on demand: a value runs to 16k characters, far
@@ -641,10 +642,11 @@ async function createMcpServer(): Promise<McpServer> {
     }),
   }, async ({ taskId, answer, scope, fields }) => result(startedTask(await reply(taskId, answer, { scope }), fields ?? DEFAULT_REPLY_FIELDS)));
   server.registerTool("resume", {
-    description: "Retry a failed, cancelled, or blocked task on the same profile and the same provider session. Pass only its Inter task ID; Inter maps it to the private root provider session and returns the same task ID. Optional scope and allowQuestions replace those task settings before continuation; get explicit approval before expanding scope. Use reply instead when the task needs input, and handoff when the account itself failed and cannot answer — a rate-limited task carries completion.resetsAt, the time this session becomes resumable again. By default a small acknowledgement; pass `fields` to get more.",
+    description: RESUME_DESCRIPTION,
     inputSchema: z.object({
       taskId: z.string(),
-      instruction: z.string().min(1).max(64_000).optional(),
+      instruction: z.string().min(1).max(64_000).optional()
+        .describe("What the continued session should do. Optional retrying a dead run; required to follow up on a completed one."),
       timeoutMs: z.number().int().min(1).max(86_400_000).optional(),
       scope: scopeSchema.optional(),
       allowQuestions: z.boolean().optional(),

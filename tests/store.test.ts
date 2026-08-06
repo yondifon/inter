@@ -406,6 +406,51 @@ describe("SQLite state store", () => {
     store.close();
   });
 
+  test("accumulates token usage alongside cost and turns", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const work = task("running");
+    store.createTask(work);
+
+    store.recordTaskCost(work.id, 0.01, 1, 1938, 113);
+    store.recordTaskCost(work.id, undefined, undefined, 142, 1160);
+    const totals = store.spendTotals();
+    expect(totals.tokens).toBe(1938 + 113 + 142 + 1160);
+    store.close();
+  });
+
+  describe("spendTotals", () => {
+    test("sums cost and tokens across tasks inside the window, and ignores what predates it", () => {
+      const { db } = paths();
+      const store = new StateStore({ path: db, seedProfiles: [profile] });
+      const recent = task("completed");
+      const stale = task("completed");
+      store.createTask(recent);
+      store.createTask(stale);
+      store.recordTaskCost(recent.id, 1.5, 3, 1000, 500);
+      store.recordTaskCost(stale.id, 9, 9, 9_000, 9_000);
+
+      // Backdate the stale task's updated_at past the window without touching
+      // the one meant to still count.
+      const raw = new Database(db);
+      raw.query("UPDATE tasks SET updated_at = ? WHERE id = ?")
+        .run(new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(), stale.id);
+      raw.close();
+
+      const totals = store.spendTotals(24 * 60 * 60 * 1000);
+      expect(totals.costUsd).toBe(1.5);
+      expect(totals.tokens).toBe(1500);
+      store.close();
+    });
+
+    test("reports zero cost and zero tokens rather than nulls when nothing is in the window", () => {
+      const { db } = paths();
+      const store = new StateStore({ path: db, seedProfiles: [profile] });
+      expect(store.spendTotals()).toMatchObject({ costUsd: 0, tokens: 0 });
+      store.close();
+    });
+  });
+
   test("stores the prompt the worker actually received", () => {
     const { db } = paths();
     const store = new StateStore({ path: db, seedProfiles: [profile] });
@@ -1108,14 +1153,16 @@ describe("SQLite state store", () => {
       { version: 9, name: "task titles" },
       { version: 10, name: "task worker identity" },
       { version: 11, name: "task selection records" },
+      { version: 12, name: "profile failure network code" },
+      { version: 13, name: "task token usage" },
     ]);
     const taskColumns = new Set(migrated.query<{ name: string }, []>(
       "PRAGMA table_info(tasks)",
     ).all().map(({ name }) => name));
     for (const column of [
       "scope_json", "allow_questions", "session_id", "archived_at", "grant_id",
-      "shipped_prompt", "attempts_json", "cost_usd", "turns", "effort", "tldr", "title",
-      "selection_json",
+      "shipped_prompt", "attempts_json", "cost_usd", "turns", "tokens_in", "tokens_out",
+      "effort", "tldr", "title", "selection_json",
     ]) {
       expect(taskColumns).toContain(column);
     }

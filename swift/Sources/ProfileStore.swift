@@ -7,6 +7,7 @@ final class ProfileStore {
     var profiles: [Profile] = []
     var tasks: [TaskListItem] = []
     var memoryProjects: [MemoryProjectSnapshot] = []
+    var spend: SpendTotals?
     private var polling: Task<Void, Never>?
 
     func start() {
@@ -38,6 +39,7 @@ final class ProfileStore {
             if state.tasks != tasks { tasks = state.tasks }
             let projects = state.memoryProjects ?? []
             if projects != memoryProjects { memoryProjects = projects }
+            if state.spend != spend { spend = state.spend }
         } catch {}
     }
 
@@ -150,15 +152,23 @@ final class ProfileStore {
         }
     }
 
-    /// Restarts a failed, cancelled, or blocked task in its original session.
-    /// An instruction is handed to the worker at the head of the continued
-    /// session; nil continues exactly where the run stopped.
-    func resumeTask(_ id: String, instruction: String? = nil) async -> Bool {
+    /// Continues a task in its original session — retrying a failed, cancelled
+    /// or blocked run, or following up on a completed one. An instruction is
+    /// handed to the worker at the head of the continued session; nil continues
+    /// exactly where the run stopped, which the broker allows only for a run
+    /// that did not complete. A scope replaces the run's existing one — used to
+    /// approve a `suggestedScope` after a sandbox denial.
+    func resumeTask(_ id: String, instruction: String? = nil, scope: TaskScope? = nil) async -> Bool {
         let encoded = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
         var request = URLRequest(url: InterServer.api("tasks/\(encoded)/resume"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "content-type")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: instruction.map { ["instruction": $0] } ?? [:])
+        var body: [String: Any] = [:]
+        if let instruction { body["instruction"] = instruction }
+        if let scope {
+            body["scope"] = ["read": scope.read, "write": scope.write]
+        }
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         do {
             let (_, response) = try await URLSession.shared.data(for: request)
             guard (response as? HTTPURLResponse)?.statusCode == 202 else {

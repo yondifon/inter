@@ -31,6 +31,8 @@ const MIGRATIONS = [
   [9, "task titles"],
   [10, "task worker identity"],
   [11, "task selection records"],
+  [12, "profile failure network code"],
+  [13, "task token usage"],
 ] as const;
 
 /**
@@ -87,6 +89,8 @@ export function migrateDatabase(db: Database): { needsSessionBackfill: boolean }
       attempts_json TEXT CHECK(attempts_json IS NULL OR json_valid(attempts_json)),
       cost_usd REAL,
       turns INTEGER,
+      tokens_in INTEGER,
+      tokens_out INTEGER,
       archived_at TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
@@ -105,7 +109,7 @@ export function migrateDatabase(db: Database): { needsSessionBackfill: boolean }
     CREATE INDEX IF NOT EXISTS task_events_task_id ON task_events(task_id, id);
     CREATE TABLE IF NOT EXISTS profile_failures (
       profile_id TEXT PRIMARY KEY REFERENCES profiles(id),
-      code TEXT NOT NULL CHECK(code IN ('auth','billing','rate_limit')),
+      code TEXT NOT NULL CHECK(code IN ('auth','billing','rate_limit','network')),
       message TEXT NOT NULL,
       failed_at TEXT NOT NULL,
       consecutive_failures INTEGER NOT NULL,
@@ -152,6 +156,8 @@ export function migrateDatabase(db: Database): { needsSessionBackfill: boolean }
     ["attempts_json", "TEXT"],
     ["cost_usd", "REAL"],
     ["turns", "INTEGER"],
+    ["tokens_in", "INTEGER"],
+    ["tokens_out", "INTEGER"],
     ["effort", "TEXT"],
     ["tldr", "TEXT"],
     ["title", "TEXT"],
@@ -198,6 +204,7 @@ export function migrateDatabase(db: Database): { needsSessionBackfill: boolean }
       .run(version, name);
   }
   widenProviderCheck(db);
+  widenProfileFailureCodeCheck(db);
   const backfilled = db.query<{ version: number }, []>(
     "SELECT version FROM schema_migrations WHERE version = 5",
   ).get();
@@ -235,6 +242,33 @@ function widenProviderCheck(db: Database): void {
     FROM profiles;
     DROP TABLE profiles;
     ALTER TABLE profiles_v2 RENAME TO profiles;
+  `);
+}
+
+// Same table-rebuild dance as widenProviderCheck: a CHECK cannot be altered in
+// place, so a database created before 'network' rejects that code the moment
+// one is recorded.
+function widenProfileFailureCodeCheck(db: Database): void {
+  const existing = db.query<{ sql: string }, []>(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'profile_failures'",
+  ).get();
+  if (!existing || existing.sql.includes("'network'")) return;
+  rebuildTable(db, `
+    CREATE TABLE profile_failures_v2 (
+      profile_id TEXT PRIMARY KEY REFERENCES profiles(id),
+      code TEXT NOT NULL CHECK(code IN ('auth','billing','rate_limit','network')),
+      message TEXT NOT NULL,
+      failed_at TEXT NOT NULL,
+      consecutive_failures INTEGER NOT NULL,
+      retry_at TEXT
+    );
+    INSERT INTO profile_failures_v2(
+      profile_id, code, message, failed_at, consecutive_failures, retry_at
+    )
+    SELECT profile_id, code, message, failed_at, consecutive_failures, retry_at
+    FROM profile_failures;
+    DROP TABLE profile_failures;
+    ALTER TABLE profile_failures_v2 RENAME TO profile_failures;
   `);
 }
 

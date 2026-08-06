@@ -34,6 +34,8 @@ export type CompletionCode =
   | "auth"
   | "billing"
   | "rate_limit"
+  /** The provider host could not be reached: dial/DNS/TLS/timeout, not a rejected credential. */
+  | "network"
   | "worker_error";
 
 /**

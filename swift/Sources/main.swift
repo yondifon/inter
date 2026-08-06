@@ -5,11 +5,11 @@ import SwiftUI
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var statusItem: NSStatusItem!
     private var window: NSWindow!
-    private var settingsWindow: NSWindow!
     private let broker = BrokerManager()
     private let store = ProfileStore()
     private let zoom = AppZoom()
     private let updateChecker = UpdateChecker()
+    private let settingsPresentation = SettingsPresentation()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if Bundle.main.object(forInfoDictionaryKey: "CFBundleIconFile") == nil {
@@ -135,30 +135,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         window.hidesOnDeactivate = false
         window.isReleasedWhenClosed = false
         window.contentViewController = NSHostingController(
-            rootView: RootView(store: store, broker: broker, zoom: zoom, updateChecker: updateChecker, openSettings: { [weak self] in self?.openSettings() })
+            rootView: RootView(store: store, broker: broker, zoom: zoom, updateChecker: updateChecker, settingsPresentation: settingsPresentation)
         )
         window.setFrameAutosaveName("InterMainWindow")
         if !window.setFrameUsingName("InterMainWindow") { window.center() }
     }
 
     /// No SwiftUI `App`/`Scene` backs this app, so there is no `Settings` scene for
-    /// ⌘, to open for free. This mirrors `setupWindow()`: one more AppKit window,
-    /// hosting the same SwiftUI tree the standard mechanism would have hosted,
-    /// kept alive and reused so repeat ⌘, just refocuses it.
+    /// ⌘, to open for free. Settings is a sheet over the main window instead —
+    /// this just brings that window forward and flips the shared presentation flag.
     @objc private func openSettings() {
-        if settingsWindow == nil {
-            let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 440),
-                                 styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
-                                 backing: .buffered, defer: false)
-            panel.title = "Settings"
-            panel.titlebarAppearsTransparent = true
-            panel.isReleasedWhenClosed = false
-            panel.contentViewController = NSHostingController(rootView: SettingsView(store: store, broker: broker))
-            panel.center()
-            settingsWindow = panel
-        }
-        NSApp.activate()
-        settingsWindow.makeKeyAndOrderFront(nil)
+        showWindow()
+        settingsPresentation.isPresented = true
     }
 
     @objc private func toggleWindow() {

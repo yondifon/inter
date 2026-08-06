@@ -93,6 +93,35 @@ describe("profile status normalization", () => {
     });
   });
 
+  test("uses shorter network retry semantics and surfaces the underlying error", () => {
+    const failure: ProfileFailure = {
+      profileId: profile.id,
+      code: "network",
+      message: 'dial tcp [2c0f:fb50::1]:443: i/o timeout',
+      failedAt: "2026-07-30T11:55:00.000Z",
+      consecutiveFailures: 1,
+      retryAt: "2026-07-30T12:05:00.000Z",
+    };
+    const [blocked] = normalizeProfileStatuses([profile], [model], [failure], [], now);
+    expect(blocked).toMatchObject({
+      state: "unavailable",
+      retryAt: failure.retryAt,
+    });
+    expect(blocked?.reason).toContain(failure.message);
+
+    const [retryable] = normalizeProfileStatuses(
+      [profile],
+      [model],
+      [failure],
+      [],
+      new Date("2026-07-30T12:06:00.000Z"),
+    );
+    expect(retryable).toMatchObject({
+      state: "unknown",
+      retryAt: failure.retryAt,
+    });
+  });
+
   test("successful generation marks catalog models available", () => {
     const successes: ProfileSuccess[] = [{
       profileId: profile.id,

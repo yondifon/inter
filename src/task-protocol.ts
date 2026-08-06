@@ -1,4 +1,5 @@
 import type { CompletionCode, TaskCompletion, TaskScope } from "./types";
+import { DEFAULT_WORKER_RULES, type WorkerRules } from "./worker-config";
 
 // Models format their sign-off. Bold, backticks, a bullet, a block quote or a
 // heading in front of the marker used to read as "no marker at all", which
@@ -40,17 +41,29 @@ export interface WorkerOutcome {
   completion: TaskCompletion;
 }
 
-export function workerPrompt(prompt: string, allowQuestions: boolean, scope?: TaskScope): string {
+export function workerPrompt(
+  prompt: string,
+  allowQuestions: boolean,
+  scope?: TaskScope,
+  rules: WorkerRules = DEFAULT_WORKER_RULES,
+): string {
+  const report = [...(rules.tldr ? [tldrRule(rules.tldrSentences)] : []), ...rules.report];
   return [
     prompt,
     "",
     "<inter_protocol>",
     "This reporting protocol is part of the task contract.",
     ...(scope ? [scopeLine(scope)] : []),
-    "",
-    "## User rules",
-    "The rules below are set by your user and apply to every delegation. Honor them for your final report.",
-    "1. Open your final report with `## TL;DR` — 1-3 plain-language sentences stating what was done or found and the outcome. Detail follows after; this applies to your final answer, not to intermediate messages.",
+    ...section(
+      "## How to work",
+      "The rules below are set by your user and apply to how you carry out this task.",
+      rules.conduct,
+    ),
+    ...section(
+      "## User rules",
+      "The rules below are set by your user and apply to every delegation. Honor them for your final report.",
+      report,
+    ),
     allowQuestions
       ? "If a product choice, secret, destructive action, or new authority is required, stop and end with: INTER_NEEDS_INPUT: <one clear question>"
       : "Do not ask questions. If required information or authority is missing, report a blocked result.",
@@ -59,6 +72,16 @@ export function workerPrompt(prompt: string, allowQuestions: boolean, scope?: Ta
     "Emit exactly one of those status lines as the final non-empty line of your final message. Do not claim completion before the work is done.",
     "</inter_protocol>",
   ].join("\n");
+}
+
+function section(heading: string, intro: string, rules: string[]): string[] {
+  if (rules.length === 0) return [];
+  return ["", heading, intro, ...rules.map((rule, index) => `${index + 1}. ${rule}`)];
+}
+
+function tldrRule(sentences: string): string {
+  const count = `${sentences} plain-language sentence${sentences === "1" ? "" : "s"}`;
+  return `Open your final report with \`## TL;DR\` — ${count} stating what was done or found and the outcome. Detail follows after; this applies to your final answer, not to intermediate messages.`;
 }
 
 // Sandbox denials surface inside worker CLIs as bare "operation not permitted"
@@ -317,8 +340,18 @@ function providerErrorMessage(json: string): string | undefined {
   }
 }
 
+// A network failure often carries the word "authentication" in its wrapper
+// text — the 2026-08-02 antigravity incident died on a profile-picture fetch
+// that reported "failed to refresh authentication: ... dial tcp ...: i/o
+// timeout" and the bare \bauthentication\b match below filed it as a rejected
+// credential. These signals mean the host was unreachable, not that the
+// credential was wrong, so they are checked first and win over that word.
+const NETWORK_ERROR =
+  /\b(?:dial tcp|dial udp|no such host|name resolution failed|could not resolve host|dns lookup failed|connection refused|connection reset|connection timed out|network is unreachable|no route to host|i\/o timeout|tls handshake|handshake failure|certificate (?:has expired|is not valid)|temporary failure in name resolution)\b|E(?:CONNREFUSED|CONNRESET|TIMEDOUT|AI_AGAIN|HOSTUNREACH|NETUNREACH)\b/i;
+
 export function classifyFailure(value: string): CompletionCode {
   if (/\b(?:insufficient balance|credits?error|billing|payment required)\b/i.test(value)) return "billing";
+  if (NETWORK_ERROR.test(value)) return "network";
   if (/\b(?:unauthorized|invalid api key|authentication|not logged in)\b|statusCode["': ]+401/i.test(value)) {
     return "auth";
   }

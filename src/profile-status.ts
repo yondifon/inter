@@ -119,6 +119,26 @@ function availability(
       checkedAt: failure.failedAt,
     };
   }
+  if (failure?.code === "network") {
+    const retryAt = failure.retryAt ??
+      new Date(Date.parse(failure.failedAt) + 5 * 60_000).toISOString();
+    if (Date.parse(retryAt) > Date.parse(normalizedAt)) {
+      return {
+        state: "unavailable",
+        source: "task",
+        reason: `Observed network failure: ${failure.message}`,
+        checkedAt: failure.failedAt,
+        retryAt,
+      };
+    }
+    return {
+      state: "unknown",
+      source: "task",
+      reason: `Network retry time passed; availability has not been rechecked (was: ${failure.message})`,
+      checkedAt: failure.failedAt,
+      retryAt,
+    };
+  }
   if (failure?.code === "rate_limit") {
     const retryAt = failure.retryAt ??
       new Date(Date.parse(failure.failedAt) + 10 * 60_000).toISOString();

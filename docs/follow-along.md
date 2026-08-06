@@ -86,14 +86,39 @@ agent can read for near-zero cost — degraded, but never silent:
 inter watch 8f2c1a94-... > /tmp/task.watch 2>&1 &
 ```
 
+### Two transports, one output
+
 `watch` connects to the broker's unix event socket at `~/.inter/inter.sock` for
 instant push delivery with zero database access and zero polling. When the
 socket is absent — broker not running, or started before socket support — it
 falls back to reading the same SQLite store the broker writes, so a caller
 holding a task id still gets an answer even when nothing is listening on the
-port. It opens that store as an observer: the broker's startup duties — profile
-seeding and interrupted-task recovery — stay with the broker, because a second
-process running recovery would fail every task it came to watch.
+port.
+
+Both transports cursor on the same `task_events` rowid, so **a socket that dies
+mid-run fails over to the database at the exact event it stopped at** —
+nothing replayed, nothing missed. The failover prints one line to stderr and
+changes nothing on stdout:
+
+```
+event socket lost: ...; falling back to database
+```
+
+Printed lines, exit codes, and flags are identical across socket mode, fallback
+mode, and mid-run failover. A quiet task still produces a keepalive every 30
+seconds, so silence on the socket means a quiet task, not a wedged broker.
+
+`INTER_SOCK` overrides the path. It has to exist: macOS caps a socket path at
+103 bytes, and a longer one disables the socket at both ends rather than
+failing at bind time — the broker warns and skips it, the client falls back.
+
+The database path is only ever opened as an **observer**: read-only, never
+created, never migrated. The broker's startup duties — profile seeding and
+interrupted-task recovery — stay with the broker, because a second process
+running recovery would fail every task it came to watch. A missing database, a
+file that is not an Inter database, or a schema newer than the binary is exit
+`2` naming the path, rather than a silently empty watch. When the socket was
+skipped too, the message says why for both.
 
 ## 2. The MCP `wait` — when you genuinely want to block
 

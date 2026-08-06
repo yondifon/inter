@@ -81,6 +81,11 @@ const NOISE_EVENTS = "('agent.system','heartbeat')";
 // it is; bounded so a long reply/resume chain cannot grow the row without end.
 const MAX_ATTEMPTS = 10;
 
+// The window `spendTotals` sums over. A running total that never resets would
+// only ever grow and stop meaning anything within a week; a day is long enough
+// to read as "what tonight cost" without needing a picker.
+const SPEND_WINDOW_MS = 24 * 60 * 60 * 1000;
+
 const GRANT_COLUMNS = "id, cwd, profile_id, scope_json, created_at, last_used_at, use_count";
 
 /**
@@ -155,6 +160,14 @@ export interface CleanupResult extends CleanupRecord {
   fileBytesAfter: number;
 }
 
+/** What tasks have cost and used, summed over the trailing window. */
+export interface SpendTotals {
+  costUsd: number;
+  tokens: number;
+  /** Start of the window this was summed over. */
+  since: string;
+}
+
 const LAST_CLEANUP_KEY = "cleanup_last_run";
 
 // What a task reads when its worker provably did not survive the broker. The
@@ -211,7 +224,7 @@ export interface TaskListQuery {
 
 export interface ProfileFailure {
   profileId: string;
-  code: "auth" | "billing" | "rate_limit";
+  code: "auth" | "billing" | "rate_limit" | "network";
   message: string;
   failedAt: string;
   consecutiveFailures: number;
@@ -559,15 +572,17 @@ export class StateStore {
     return row?.selection_json ? JSON.parse(row.selection_json) as TaskSelection : undefined;
   }
 
-  /** Rolls a run's reported cost onto the task so spend survives the event stream. */
-  recordTaskCost(id: string, costUsd?: number, turns?: number): void {
-    if (costUsd === undefined && turns === undefined) return;
+  /** Rolls a run's reported cost and token usage onto the task so spend survives the event stream. */
+  recordTaskCost(id: string, costUsd?: number, turns?: number, tokensIn?: number, tokensOut?: number): void {
+    if (costUsd === undefined && turns === undefined && tokensIn === undefined && tokensOut === undefined) return;
     this.database.query(`
       UPDATE tasks
       SET cost_usd = COALESCE(cost_usd, 0) + COALESCE(?, 0),
-          turns = COALESCE(turns, 0) + COALESCE(?, 0)
+          turns = COALESCE(turns, 0) + COALESCE(?, 0),
+          tokens_in = COALESCE(tokens_in, 0) + COALESCE(?, 0),
+          tokens_out = COALESCE(tokens_out, 0) + COALESCE(?, 0)
       WHERE id = ?
-    `).run(costUsd ?? null, turns ?? null, id);
+    `).run(costUsd ?? null, turns ?? null, tokensIn ?? null, tokensOut ?? null, id);
   }
 
   captureTaskSessionId(id: string, provider: Profile["provider"], sessionId: string): boolean {
@@ -891,7 +906,10 @@ export class StateStore {
       const current = this.database.query<{ state: TaskState }, [string]>(`
         SELECT state FROM tasks WHERE id = ?
       `).get(id);
-      if (!current || !["failed", "cancelled", "blocked"].includes(current.state)) {
+      // `completed` is here and not on handoff: resume reopens the session that
+      // holds the finished run's context, which is the whole point of following
+      // one up. The finished result is not lost — closeAttempt files it first.
+      if (!current || !["failed", "cancelled", "blocked", "completed"].includes(current.state)) {
         throw new Error(`task cannot be resumed: ${id}`);
       }
       const attempts = this.closeAttempt(id, now);
@@ -903,7 +921,7 @@ export class StateStore {
             grant_id = COALESCE(?, grant_id),
             allow_questions = COALESCE(?, allow_questions), updated_at = ?
         WHERE id = ?
-          AND state IN ('failed', 'cancelled', 'blocked')
+          AND state IN ('failed', 'cancelled', 'blocked', 'completed')
       `).run(
         JSON.stringify(attempts),
         updates.timeoutMs ?? null,
@@ -1058,6 +1076,22 @@ export class StateStore {
       LIMIT ?
     `).all(...values, limit);
     return rows.map(taskSummaryFromRow);
+  }
+
+  /**
+   * Cost and tokens summed over the trailing window, one number the app reads
+   * instead of summing every task's row itself. `updated_at` is what a task's
+   * cost lands on — `recordTaskCost` runs right after the state transition
+   * that closes a run — so it doubles as "spent in the window" without a
+   * separate timestamp to maintain.
+   */
+  spendTotals(windowMs = SPEND_WINDOW_MS): SpendTotals {
+    const since = new Date(Date.now() - windowMs).toISOString();
+    const row = this.database.query<{ cost_usd: number | null; tokens: number | null }, [string]>(`
+      SELECT SUM(cost_usd) AS cost_usd, SUM(COALESCE(tokens_in, 0) + COALESCE(tokens_out, 0)) AS tokens
+      FROM tasks WHERE updated_at >= ?
+    `).get(since)!;
+    return { costUsd: row.cost_usd ?? 0, tokens: row.tokens ?? 0, since };
   }
 
   setTaskArchived(id: string, archived: boolean): Task {
@@ -1305,8 +1339,13 @@ export class StateStore {
     retryAt?: string,
   ): void {
     const failedAt = new Date().toISOString();
+    // A rejected credential will not fix itself, but an unreachable host often
+    // does; network gets a re-check five minutes out, sooner than the ten
+    // minutes rate_limit uses and unlike auth/billing, which never expire.
     const resolvedRetryAt = code === "rate_limit"
       ? retryAt ?? new Date(Date.parse(failedAt) + 10 * 60_000).toISOString()
+      : code === "network"
+      ? retryAt ?? new Date(Date.parse(failedAt) + 5 * 60_000).toISOString()
       : null;
     this.database.query(`
       INSERT INTO profile_failures(

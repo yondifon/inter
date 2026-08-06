@@ -83,6 +83,23 @@ private func shellAssignment(_ value: String) -> String {
         : "\"\(value)\""
 }
 
+/// What paths a run may read and write. Mirrors the broker's `TaskScope`.
+struct TaskScope: Codable, Hashable, Sendable {
+    var read: [String]
+    var write: [String]
+}
+
+/// How a run ended when it did not land clean. Absent on tasks predating the
+/// field.
+struct TaskCompletion: Codable, Hashable, Sendable {
+    var blocked: Bool
+    var code: String
+    var reason: String?
+    /// Present only when `code == "permission_denied"`: the scope that would
+    /// have let the run finish. Apply verbatim on resume.
+    var suggestedScope: TaskScope?
+}
+
 struct TaskSnapshot: Codable, Identifiable, Hashable, Sendable {
     var id: String
     var profileId: String
@@ -109,6 +126,11 @@ struct TaskSnapshot: Codable, Identifiable, Hashable, Sendable {
     var costUsd: Double?
     var turns: Int?
     var archivedAt: String?
+    /// What this run may read and write. Absent on tasks predating the field.
+    var scope: TaskScope?
+    /// How the run ended, when it did not land clean. Absent while a task is
+    /// still live, and on tasks predating the field.
+    var completion: TaskCompletion?
 
     /// `opencode/big-pickle` reads as `big-pickle` in a list where the worker name
     /// beside it already says which provider ran it.
@@ -223,6 +245,9 @@ struct TaskListItem: Codable, Identifiable, Hashable, Sendable {
     var grantId: String?
     var costUsd: Double?
     var archivedAt: String?
+    /// How the run ended, when it did not land clean. Absent while a task is
+    /// still live, and on tasks predating the field.
+    var completion: TaskCompletion?
 
     var shortModel: String {
         model.split(separator: "/").last.map(String.init) ?? model
@@ -255,6 +280,23 @@ struct BrokerSummaryState: Codable, Sendable {
     var profiles: [Profile]
     var tasks: [TaskListItem]
     var memoryProjects: [MemoryProjectSnapshot]?
+    var spend: SpendTotals?
+}
+
+/// Cost and tokens summed over the broker's trailing window — absent on a
+/// broker predating this field, hence optional everywhere it is read.
+struct SpendTotals: Codable, Equatable, Sendable {
+    var costUsd: Double
+    var tokens: Int
+    var since: String
+
+    /// `$1.24 · 847k` for the sidebar footer. Nil when the window saw no
+    /// activity at all — an ambient "$0.00 · 0" next to the broker dot would
+    /// read as broken, not calm.
+    var summary: String? {
+        guard costUsd > 0 || tokens > 0 else { return nil }
+        return "\(ActivityFormat.cost(costUsd)) · \(ActivityFormat.count(tokens))"
+    }
 }
 
 /// One project's memory footprint. The values themselves stay on the broker

@@ -17,7 +17,7 @@ struct ContentView: View {
     let store: ProfileStore
     let broker: BrokerManager
     let updateChecker: UpdateChecker
-    let openSettings: () -> Void
+    @ObservedObject var settingsPresentation: SettingsPresentation
     @State private var selection: SidebarSelection?
     @State private var installResults: [MCPConfigInjector.InstallResult] = []
     @State private var showingInstall = false
@@ -80,6 +80,11 @@ struct ContentView: View {
                                         setArchived(task.id, !showArchivedTasks)
                                     }
                                 }
+                                // Right-clicking a row moves AppKit's real selection to it before
+                                // the menu opens, which is why `sidebarRowFill` above already
+                                // themes it; this only strips the system's own focus ring drawn on
+                                // top of that, the stock blue rounded rectangle.
+                                .focusEffectDisabled()
                             }
                         }
                     }
@@ -143,7 +148,7 @@ struct ContentView: View {
                     .accessibilityLabel("See what each project remembers")
                 }
                 ToolbarItem {
-                    Button("Settings…", systemImage: "gearshape", action: openSettings)
+                    Button("Settings…", systemImage: "gearshape") { settingsPresentation.isPresented = true }
                         .labelStyle(.iconOnly)
                         .help("Settings")
                 }
@@ -159,6 +164,7 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showingInstall) { InstallResultsView(results: installResults) }
         .sheet(isPresented: $showingMemories) { ProjectMemoriesSheet(store: store) }
+        .sheet(isPresented: $settingsPresentation.isPresented) { SettingsView(store: store, broker: broker) }
         .task { store.start() }
         // Both sidebar actions settle the task, so each confirms first.
         .confirmationDialog(
@@ -449,6 +455,18 @@ struct ContentView: View {
                     .help(statusText)
                     .accessibilityLabel(statusText)
                 Spacer(minLength: 0)
+                // Cost first since it reads at a glance, tokens after it: at a
+                // narrow sidebar width, tail truncation drops the token count
+                // before it ever touches the dollar figure.
+                if let summary = store.spend?.summary {
+                    Text(summary)
+                        .scaledFont(.caption2, design: .monospaced)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .help("\(summary) over the last 24 hours")
+                        .accessibilityLabel("\(summary) over the last 24 hours")
+                }
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 3)

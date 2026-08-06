@@ -46,11 +46,13 @@ struct TaskDetail: View {
     @State private var showingRunFacts = false
     @State private var confirmingCancel = false
     @State private var showingResumeSheet = false
+    @State private var showingFollowUpSheet = false
     @State private var showingActionError = false
     /// In-flight resume/cancel calls — the pressed control swaps to a spinner
     /// so the run's settle reads as busy instead of dead.
     @State private var resumeInFlight = false
     @State private var cancelInFlight = false
+    @State private var markCompleteInFlight = false
     /// Whether activity opens on its newest event. Fixed when the task opens: a
     /// run that lands while it is being read would otherwise yank the trace back
     /// to the top under the reader.
@@ -89,6 +91,18 @@ struct TaskDetail: View {
                 if resolvedTaskState == "needs_input", let question = resolvedQuestion {
                     NeedsInputBanner(question: question)
                         .transition(.opacity)
+                } else if resolvedTaskState == "blocked" {
+                    BlockedBanner(
+                        explanation: blockedExplanation,
+                        touchedFiles: touchedFilePaths,
+                        busy: resumeInFlight || markCompleteInFlight,
+                        onWidenScope: {
+                            Task { await performResume(instruction: nil, scope: blockedExplanation.suggestedScope) }
+                        },
+                        onContinue: { Task { await performResume(instruction: nil) } },
+                        onMarkCompleted: { Task { await performMarkCompleted() } }
+                    )
+                    .transition(.opacity)
                 }
                 HStack(spacing: 0) {
                     TaskSectionTabs(selection: $section, hasError: resolvedError != nil)
@@ -179,7 +193,14 @@ struct TaskDetail: View {
         // Option-click on Resume opens the instruction sheet; a plain click fires
         // the task right away (EC-003).
         .sheet(isPresented: $showingResumeSheet) {
-            ResumeSheet { instruction in
+            ContinueSheet(followUp: false) { instruction in
+                Task { await performResume(instruction: instruction) }
+            }
+        }
+        // A follow-up has no fast path: without an instruction there is nothing
+        // to ask for, so the button always opens the sheet.
+        .sheet(isPresented: $showingFollowUpSheet) {
+            ContinueSheet(followUp: true) { instruction in
                 Task { await performResume(instruction: instruction) }
             }
         }
@@ -254,11 +275,16 @@ struct TaskDetail: View {
                     )
                     .font(.system(size: 12 * uiScale))
                 }
-                if canResume {
+                if canResume || canFollowUp {
                     if resumeInFlight {
                         ProgressView().controlSize(.small)
                             .frame(width: 24 * uiScale, height: 24 * uiScale)
-                            .help("Resuming task…")
+                            .help(canFollowUp ? "Sending…" : "Resuming task…")
+                    } else if canFollowUp {
+                        IconButton(symbol: "arrow.turn.down.right", label: "Follow up") {
+                            showingFollowUpSheet = true
+                        }
+                        .font(.system(size: 12 * uiScale))
                     } else {
                         IconButton(symbol: "arrow.clockwise", label: "Resume task") { resumeAction() }
                             .font(.system(size: 12 * uiScale))
@@ -371,6 +397,11 @@ struct TaskDetail: View {
         [.failed, .cancelled, .blocked].contains(state)
     }
 
+    /// A finished run has nothing to retry, but its session still holds what the
+    /// worker read and decided — so the same call continues it, given an
+    /// instruction. The broker refuses one without.
+    private var canFollowUp: Bool { state == .completed }
+
     private func resumeAction() {
         if NSEvent.modifierFlags.contains(.option) {
             showingResumeSheet = true
@@ -388,10 +419,19 @@ struct TaskDetail: View {
         }
     }
 
-    private func performResume(instruction: String?) async {
+    private func performResume(instruction: String?, scope: TaskScope? = nil) async {
         resumeInFlight = true
         defer { resumeInFlight = false }
-        guard await store.resumeTask(taskId, instruction: instruction) else {
+        guard await store.resumeTask(taskId, instruction: instruction, scope: scope) else {
+            showingActionError = true
+            return
+        }
+    }
+
+    private func performMarkCompleted() async {
+        markCompleteInFlight = true
+        defer { markCompleteInFlight = false }
+        guard await store.markTaskCompleted(taskId) else {
             showingActionError = true
             return
         }
@@ -533,6 +573,24 @@ struct TaskDetail: View {
     private var resolvedQuestion: String? { task?.question ?? listItem.question }
     private var resolvedArchivedAt: String? { task?.archivedAt ?? listItem.archivedAt }
     private var resolvedDisplayPath: String { task?.displayPath ?? listItem.displayPath }
+
+    /// Plain-language read of a blocked task's completion — falls back to the
+    /// sidebar's completion when the full row has not loaded yet.
+    private var blockedExplanation: BlockedTaskCopy.Explanation {
+        BlockedTaskCopy.explain(completion: task?.completion ?? listItem.completion, currentScope: task?.scope)
+    }
+
+    /// Distinct files the worker touched before stopping — the signal a reader
+    /// needs to judge whether the work already landed, rather than a guess.
+    private var touchedFilePaths: [String] {
+        var seen = Set<String>()
+        var ordered: [String] = []
+        for event in events {
+            guard event.presentation?.type == "file", let path = event.presentation?.path else { continue }
+            if seen.insert(path).inserted { ordered.append(path) }
+        }
+        return ordered
+    }
 
     /// The UUID's first hyphen-delimited segment — enough to tell tasks apart
     /// at a glance; the full id stays in the copy button.
@@ -786,37 +844,47 @@ private struct ScrollJumpControl: View {
     }
 }
 
-/// Instruction picker for the resume fast path's Option-click: the continued
-/// session opens with the field's text, or as-is when it is left blank.
-private struct ResumeSheet: View {
+/// Instruction picker for both continuations: the resume fast path's
+/// Option-click, where the field may be left blank and the session picks up
+/// as-is, and a follow-up on finished work, where the instruction is the whole
+/// job and there is nothing to send without one.
+private struct ContinueSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var instruction = ""
     @FocusState private var instructionFocused: Bool
     /// Return can fire both the field's submit and the default-action shortcut;
     /// the flag keeps a double trigger from resuming twice.
     @State private var submitted = false
-    let onResume: (String?) -> Void
+    let followUp: Bool
+    let onSubmit: (String?) -> Void
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("Resume task").font(.title3.weight(.semibold))
+                Text(followUp ? "Follow up" : "Resume task").font(.title3.weight(.semibold))
                 Spacer()
                 Button("Cancel") { dismiss() }
                     .keyboardShortcut(.cancelAction)
-                Button("Resume") { submit() }
+                Button(followUp ? "Send" : "Resume") { submit() }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
+                    .disabled(followUp && trimmedInstruction == nil)
             }
             .padding(20)
             Divider()
-            TextField("Instruction for the worker (optional)", text: $instruction, axis: .vertical)
+            TextField(
+                followUp ? "What should the worker do next?" : "Instruction for the worker (optional)",
+                text: $instruction,
+                axis: .vertical
+            )
                 .lineLimit(3...8)
                 .textFieldStyle(.plain)
                 .focused($instructionFocused)
                 .onSubmit(submit)
                 .padding(20)
-            Text("The worker sees this at the head of the continued session. Leave it blank to continue as-is.")
+            Text(followUp
+                ? "The worker still has everything it read and worked out on this task, so say only what changes."
+                : "The worker sees this at the head of the continued session. Leave it blank to continue as-is.")
                 .scaledFont(.caption)
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 20)
@@ -829,10 +897,11 @@ private struct ResumeSheet: View {
 
     private func submit() {
         guard !submitted else { return }
-        submitted = true
         let value = trimmedInstruction
+        if followUp, value == nil { return }
+        submitted = true
         dismiss()
-        onResume(value)
+        onSubmit(value)
     }
 
     private var trimmedInstruction: String? {
@@ -860,6 +929,129 @@ private struct NeedsInputBanner: View {
         .padding(12)
         .onAppear {
             AccessibilityNotification.Announcement("Task needs input").post()
+        }
+    }
+}
+
+/// Plain-language read of why a task is blocked, derived from its completion.
+/// A worker's own `INTER_BLOCKED` report carries one of three codes
+/// (`permission_denied`, `needs_authority`, `worker_error`); the broker adds a
+/// fourth, `unverified`, when a run ends with no report at all. Those four are
+/// the only cases mapped — anything else falls back to the generic line.
+enum BlockedTaskCopy {
+    struct Explanation: Equatable {
+        var headline: String
+        var detail: String?
+        var deniedPaths: [String]
+        var suggestedScope: TaskScope?
+    }
+
+    static func explain(completion: TaskCompletion?, currentScope: TaskScope?) -> Explanation {
+        guard let completion else {
+            return Explanation(
+                headline: "The run stopped without settling, and Inter has no record of why.",
+                detail: nil, deniedPaths: [], suggestedScope: nil
+            )
+        }
+        let reason = completion.reason?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let detail = (reason?.isEmpty == false) ? reason : nil
+        switch completion.code {
+        case "permission_denied":
+            let suggested = completion.suggestedScope
+            let denied = deniedPaths(current: currentScope, suggested: suggested)
+            let headline = denied.isEmpty
+                ? "The worker was stopped before it could reach a file or folder it needed."
+                : "The worker was stopped before it could reach \(list(denied))."
+            return Explanation(headline: headline, detail: detail, deniedPaths: denied, suggestedScope: suggested)
+        case "needs_authority":
+            return Explanation(
+                headline: "The worker stopped because it needed a decision it couldn’t make on its own.",
+                detail: detail, deniedPaths: [], suggestedScope: nil
+            )
+        case "unverified":
+            // The broker's own reason string here is fixed internal wording
+            // ("worker exited without an Inter completion marker") — the
+            // headline already says the same thing in plain terms, so the raw
+            // string adds nothing and is left out.
+            return Explanation(
+                headline: "The worker stopped talking before it said whether the work was done.",
+                detail: nil, deniedPaths: [], suggestedScope: nil
+            )
+        default:
+            return Explanation(
+                headline: "Something interrupted the worker before it could finish.",
+                detail: detail, deniedPaths: [], suggestedScope: nil
+            )
+        }
+    }
+
+    private static func deniedPaths(current: TaskScope?, suggested: TaskScope?) -> [String] {
+        guard let suggested else { return [] }
+        let currentWrite = Set(current?.write ?? [])
+        let newWrite = suggested.write.filter { !currentWrite.contains($0) }
+        if !newWrite.isEmpty { return newWrite }
+        let currentRead = Set(current?.read ?? [])
+        return suggested.read.filter { !currentRead.contains($0) }
+    }
+
+    private static func list(_ paths: [String]) -> String {
+        paths.count == 1 ? paths[0] : paths.joined(separator: ", ")
+    }
+}
+
+private struct BlockedBanner: View {
+    let explanation: BlockedTaskCopy.Explanation
+    let touchedFiles: [String]
+    /// Resume or mark-completed in flight — the row swaps to a spinner so the
+    /// task's settle reads as busy instead of dead.
+    let busy: Bool
+    let onWidenScope: () -> Void
+    let onContinue: () -> Void
+    let onMarkCompleted: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            AccentRule(color: .orange)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(explanation.headline).scaledFont(.callout, weight: .semibold)
+                    if let detail = explanation.detail {
+                        Text(detail).scaledFont(.callout).foregroundStyle(.secondary).textSelection(.enabled)
+                    }
+                    Text(fileSummary).scaledFont(.caption).foregroundStyle(.secondary)
+                }
+                if busy {
+                    ProgressView().controlSize(.small)
+                } else {
+                    HStack(spacing: 8) {
+                        if explanation.suggestedScope != nil {
+                            Button("Continue with wider access", action: onWidenScope)
+                                .buttonStyle(.borderedProminent).controlSize(.small)
+                            Button("Continue as-is", action: onContinue)
+                                .buttonStyle(.bordered).controlSize(.small)
+                        } else {
+                            Button("Continue as-is", action: onContinue)
+                                .buttonStyle(.borderedProminent).controlSize(.small)
+                        }
+                        Button("Mark as completed", action: onMarkCompleted)
+                            .buttonStyle(.bordered).controlSize(.small)
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .onAppear {
+            AccessibilityNotification.Announcement("Task blocked").post()
+        }
+    }
+
+    private var fileSummary: String {
+        switch touchedFiles.count {
+        case 0: "It hadn’t changed any files when it stopped."
+        case 1: "It changed 1 file before stopping: \(touchedFiles[0])."
+        case 2...3: "It changed \(touchedFiles.count) files before stopping: \(touchedFiles.joined(separator: ", "))."
+        default: "It changed \(touchedFiles.count) files before stopping, including \(touchedFiles.prefix(3).joined(separator: ", "))."
         }
     }
 }

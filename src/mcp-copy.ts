@@ -7,7 +7,7 @@ export const MCP_INSTRUCTIONS = [
   "Route execution here by default — implementation, research, review, writing, analysis — rather than only when this session is stuck, and keep goal-setting, architecture, integration, and final review here. It is also how to get a second opinion from another model, how to keep going when this provider is near its usage limit, and where to place work this provider's policy will not take.",
   "Delegation sends the prompt, the cwd's saved memories, and whatever the worker reads to an external account. Get the user's approval for the destination and the data once — it then stands for that cwd and profile, so do not re-ask per dispatch — and ask again only when either moves outside what they agreed to.",
   "Scope is what the worker may touch. State it on delegate and Inter records it as a grant on that cwd for that profile; omit it and Inter reuses the newest grant for the cwd. Reusing a scope approved for a different profile still runs, but returns a warning — approval names a destination, not only a folder. Only a cwd with no grant at all falls back to the whole tree, and that task is flagged too.",
-  "Callers hold only the Inter task ID; provider session IDs stay private. Reply answers a needs_input question and resume retries a failed, blocked, or cancelled task, both on the same provider session; handoff moves such a task to a different profile when that account itself is the problem, and all three keep the same task ID.",
+  "Callers hold only the Inter task ID; provider session IDs stay private. Reply answers a needs_input question and resume retries a failed, blocked, or cancelled task, both on the same provider session; handoff moves such a task to a different profile when that account itself is the problem, and all three keep the same task ID. Resume also follows up on a completed task, given an instruction saying what to do next: the session still holds what that worker read and decided, which a fresh task pays to rediscover.",
   `Dispatch returns immediately, so background \`${watchCommand()}\` in your own shell tool and get on with other work — it sleeps for free and reports the moment the task needs you; inspect once something has settled to read it in full.`,
   "Answer a worker's reversible in-scope questions yourself; bring product intent, secrets, destructive actions, and requests for new authority to the user.",
 ].join(" ");
@@ -18,6 +18,19 @@ export const COMPLETE_DESCRIPTION = [
   "The reason is required and must be non-empty; there are no silent overrides.",
   "Rejected for a task still running — asserting completion of work in flight is a worse mistake than leaving the record wrong — for one already completed, and for one the caller cancelled; resume or archive those instead.",
   "Returns the core acknowledgement (id, state); pass `fields` for more.",
+].join(" ");
+
+export const RESUME_DESCRIPTION = [
+  "Continue a task on the same profile and the same provider session, keeping the same Inter task ID.",
+  "Two uses. Retry a failed, cancelled, or blocked run — instruction optional, and the run picks up where it stopped.",
+  "Or follow up on a completed one: pass instruction saying what to do next and the worker gets it in the session it already finished in, still holding the files it read and the reasoning behind what it built. That is the cheap way to iterate — a fresh delegation re-reads everything and loses why the work is the way it is.",
+  "A completed task without instruction is rejected: there is nothing to retry, so the instruction is the whole job.",
+  "The finished run is not overwritten. It becomes an attempt carrying its own output, completion and session, so inspect with fields: [\"attempts\"] still shows what the earlier run produced.",
+  "Pass only the Inter task ID; Inter maps it to the private root provider session.",
+  "Optional scope and allowQuestions replace those task settings before continuation; get explicit approval before expanding scope.",
+  "Use reply instead when the task needs input, and handoff when the account itself failed and cannot answer — a rate-limited task carries completion.resetsAt, the time this session becomes resumable again.",
+  "A provider that can no longer open the session fails the task saying the context is gone; delegate a fresh task at that point.",
+  "By default a small acknowledgement; pass `fields` to get more.",
 ].join(" ");
 
 // resume and handoff both continue a dead task, and picking the wrong one either

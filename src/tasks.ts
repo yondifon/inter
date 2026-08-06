@@ -14,6 +14,7 @@ import {
 } from "./task-protocol";
 import { handoffBrief } from "./handoff-brief";
 import { normalizeTaskScope, sandboxedCommand, scopeCoversPath, scopeRefusedWrite } from "./task-scope";
+import { loadWorkerRules } from "./worker-config";
 import { workerPath } from "./worker-path";
 import { captureWorkerIdentity } from "./worker-identity";
 import { deniedScopePaths, promptReadPaths } from "./prompt-paths";
@@ -168,6 +169,87 @@ function piTurnCountFrom(payload: Record<string, unknown>): number | undefined {
 function numberOr(...values: unknown[]): number | undefined {
   for (const value of values) if (typeof value === "number" && Number.isFinite(value)) return value;
   return undefined;
+}
+
+export interface RunTokens {
+  tokensIn?: number;
+  tokensOut?: number;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+/**
+ * A run's whole token usage, read the same way `runCostFrom` reads its whole
+ * cost: from the one closing receipt a provider states once, at the end.
+ * Gated on `type`/`event` being `"result"` rather than trusting field names
+ * alone — codex's `turn.completed` reports a per-turn delta under the exact
+ * same `input_tokens`/`output_tokens` names, and treating that as a final
+ * total would replace the run's tally with just its last turn.
+ */
+export function runTokensFrom(payload: Record<string, unknown>): RunTokens {
+  if (payload.type !== "result" && payload.event !== "result") return {};
+  const nested = asRecord(payload.result);
+  const usage = asRecord(nested.usage ?? payload.usage);
+  const rawIn = numberOr(usage.input_tokens);
+  const tokensIn = rawIn === undefined ? undefined : rawIn + Number(usage.cache_creation_input_tokens ?? 0);
+  const tokensOut = numberOr(usage.output_tokens);
+  return {
+    ...(tokensIn === undefined ? {} : { tokensIn }),
+    ...(tokensOut === undefined ? {} : { tokensOut }),
+  };
+}
+
+/**
+ * Token deltas for providers whose stream never states a running total: pi
+ * closes them on `message_end`, codex on `turn.completed`, opencode on
+ * `step_finish` — each once per unit of work, so summing across the run is
+ * exact instead of double-counted. pi's `turn_end` is deliberately absent,
+ * for the same reason its cost is: the usage riding it is the turn's last
+ * message, already counted by that message's own `message_end`.
+ */
+function incrementalTokensFrom(payload: Record<string, unknown>): RunTokens {
+  if (payload.type === "message_end") {
+    const usage = piUsageFrom(payload);
+    const tokensIn = numberOr(usage.input);
+    const tokensOut = numberOr(usage.output);
+    return { ...(tokensIn === undefined ? {} : { tokensIn }), ...(tokensOut === undefined ? {} : { tokensOut }) };
+  }
+  if (payload.type === "turn.completed") {
+    const usage = asRecord(payload.usage);
+    const cached = Number(usage.cached_input_tokens ?? 0);
+    const rawIn = numberOr(usage.input_tokens);
+    const tokensIn = rawIn === undefined ? undefined : Math.max(0, rawIn - cached);
+    const tokensOut = numberOr(usage.output_tokens);
+    return { ...(tokensIn === undefined ? {} : { tokensIn }), ...(tokensOut === undefined ? {} : { tokensOut }) };
+  }
+  if (payload.type === "step_finish") {
+    const tokens = asRecord(asRecord(payload.part).tokens);
+    const tokensIn = numberOr(tokens.input);
+    const tokensOut = numberOr(tokens.output);
+    return { ...(tokensIn === undefined ? {} : { tokensIn }), ...(tokensOut === undefined ? {} : { tokensOut }) };
+  }
+  return {};
+}
+
+/**
+ * Rolls a run's token usage the same way `accumulateRunCost` rolls its spend:
+ * a final receipt replaces the running total, everything else adds to it. Kept
+ * as its own function rather than folded into `accumulateRunCost`'s return
+ * shape — `pi-usage.test.ts` pins that function's exact output per event, and
+ * every provider that reports tokens also reports the usage fields those
+ * assertions were not written to expect.
+ */
+export function accumulateRunTokens(current: RunTokens, payload: Record<string, unknown>): RunTokens {
+  const reported = runTokensFrom(payload);
+  if (reported.tokensIn !== undefined || reported.tokensOut !== undefined) return reported;
+  const delta = incrementalTokensFrom(payload);
+  if (delta.tokensIn === undefined && delta.tokensOut === undefined) return current;
+  return {
+    tokensIn: (current.tokensIn ?? 0) + (delta.tokensIn ?? 0),
+    tokensOut: (current.tokensOut ?? 0) + (delta.tokensOut ?? 0),
+  };
 }
 
 export function listTasks(archived: TaskListQuery["archived"] = "active"): Task[] {
@@ -400,6 +482,9 @@ async function prepareTask(
   options: DelegateOptions = {},
 ): Promise<{ task: Task; profile: Profile; inheritedFrom?: string; autoReads?: string[] }> {
   const workspace = await validateWorkspace(cwd);
+  // A `[worker]` table Inter cannot read fails the dispatch rather than the run,
+  // so the caller hears about it before a task row and a provider session exist.
+  await loadWorkerRules(workspace);
   const config = await loadConfig();
   const profile = config.profiles.find((item) => item.id === profileId);
   if (!profile) throw new Error(unknownProfileMessage(profileId, config.profiles));
@@ -540,6 +625,7 @@ async function runTask(
   // Declared out here so the finally block can bank it: the provider has
   // already charged for whatever this run reported, however the run ends.
   let runCost: { costUsd?: number; turns?: number } = {};
+  let runTokens: RunTokens = {};
   try {
     scratchDir = mkdtempSync(resolve(tmpdir(), "inter-worker-"));
     const hookUrl = `${Bun.env.INTER_BROKER_URL ?? `http://127.0.0.1:${Bun.env.INTER_PORT ?? 7331}`}/api/hooks/${task.id}`;
@@ -547,7 +633,12 @@ async function runTask(
       promptOverride ?? task.prompt,
       stateStore().listMemories(task.cwd),
     );
-    const prompt = workerPrompt(sharedPrompt, task.allowQuestions, task.scope);
+    const prompt = workerPrompt(
+      sharedPrompt,
+      task.allowQuestions,
+      task.scope,
+      await loadWorkerRules(task.cwd),
+    );
     // The caller's prompt is only part of what leaves the machine; store the
     // real text so "what was sent to this provider" is answerable later.
     stateStore().recordShippedPrompt(task.id, prompt);
@@ -593,6 +684,7 @@ async function runTask(
     let bootstrapRetries = 0;
     let resumeSessionConfirmed = false;
     let resumeSessionMismatch: string | undefined;
+    let sessionUnreachable = false;
     while (true) {
       const command = resumeWith
         ? resumeCommandFor(profile, prompt, task.cwd, resumeWith, task.model, hookUrl, task.effort)
@@ -686,6 +778,7 @@ async function runTask(
           // pi — as one `usage.cost.total` per `message_end`, which adds to it,
           // while each `turn_end` counts one turn.
           runCost = accumulateRunCost(runCost, payload);
+          runTokens = accumulateRunTokens(runTokens, payload);
           eventCount++;
           attemptEvents++;
           // The sandbox refuses out-of-scope writes inside the worker, where
@@ -764,6 +857,7 @@ async function runTask(
         resumeWith && exitCode !== 0 && attemptEvents === 0 &&
         !active.cancelled && stateStore().getTask(task.id)?.state !== "cancelled"
       ) {
+        sessionUnreachable = true;
         appendTaskEvent(task.id, "resume_failed", task.state, {
           resumedSession: resumeWith,
           exitCode,
@@ -779,6 +873,17 @@ async function runTask(
         state: "failed",
         error: message,
         completion: { blocked: true, code: "worker_error", reason: message },
+      }, ["running"]);
+      return;
+    }
+    // The provider took the session id and produced nothing at all: the context
+    // this run was continuing is gone, and only a fresh delegation gets it back.
+    // The provider's own wording stays on the `resume_failed` event.
+    if (sessionUnreachable) {
+      update(task, {
+        state: "failed",
+        error: SESSION_UNREACHABLE,
+        completion: { blocked: true, code: "worker_error", reason: SESSION_UNREACHABLE },
       }, ["running"]);
       return;
     }
@@ -832,7 +937,7 @@ async function runTask(
     // Every exit lands here: clean finish, cancel during a retry backoff, or a
     // thrown spawn error. Anywhere else and a run the provider already billed
     // for reports no spend at all.
-    stateStore().recordTaskCost(task.id, runCost.costUsd, runCost.turns);
+    stateStore().recordTaskCost(task.id, runCost.costUsd, runCost.turns, runTokens.tokensIn, runTokens.tokensOut);
     // The child is done, so its identity must not outlive it: the pid is now
     // free for the OS to hand to someone else, and a stale stamp is exactly
     // what would make the next boot probe a stranger's process.
@@ -925,7 +1030,7 @@ export function recordProfileTaskOutcome(
   }
   if (outcome.state !== "failed") return;
   const { code } = outcome.completion;
-  if (code !== "auth" && code !== "billing" && code !== "rate_limit") return;
+  if (code !== "auth" && code !== "billing" && code !== "rate_limit" && code !== "network") return;
   store.recordProfileFailure(
     profileId,
     code,
@@ -994,6 +1099,14 @@ function tail(value: string, limit: number): string {
  */
 const RESUMABLE_STATES: Task["state"][] = ["failed", "cancelled", "blocked"];
 
+/**
+ * What a caller can act on when the provider will not reopen a session. The
+ * provider's own wording names its storage — a missing file, an unknown id —
+ * which tells the reader nothing about what to do next.
+ */
+const SESSION_UNREACHABLE =
+  "the provider could not reopen this task's session — it has expired or been evicted, so the context it held is gone; delegate a fresh task carrying the context it needs";
+
 function requireTask(id: string): Task {
   const task = stateStore().getTask(id);
   if (!task) throw new Error(unknownTaskMessage(id));
@@ -1004,9 +1117,24 @@ function requireTask(id: string): Task {
  * A task that exists and is in a state a continuation verb can act on. `verb`
  * names the operation in the refusal, which is the only thing `resume` and
  * `handoff` legitimately differ on here.
+ *
+ * `resume` also takes a completed task, but only one carrying an instruction:
+ * the session is what makes a follow-up cheap, and a completed run re-entered
+ * with nothing new to do would spend a turn repeating itself. `handoff` has no
+ * such path — it rebuilds a brief for a run that died, and this one did not.
  */
-function requireContinuableTask(id: string, verb: "resumed" | "handed off"): Task {
+function requireContinuableTask(
+  id: string,
+  verb: "resumed" | "handed off",
+  instruction?: string,
+): Task {
   const task = requireTask(id);
+  if (verb === "resumed" && task.state === "completed") {
+    if (instruction?.trim()) return task;
+    throw new Error(
+      `task ${id} cannot be resumed without an instruction — it already finished, so there is nothing to retry; say what to do next in instruction`,
+    );
+  }
   if (!RESUMABLE_STATES.includes(task.state)) {
     throw new Error(`task cannot be ${verb} from state ${task.state}: ${id}`);
   }
@@ -1070,7 +1198,7 @@ export async function resumeTask(
   instruction?: string,
   options: ResumeOptions = {},
 ): Promise<Task> {
-  const old = requireContinuableTask(id, "resumed");
+  const old = requireContinuableTask(id, "resumed", instruction);
   const profile = await requireSessionProfile(
     old,
     "resume",
@@ -1080,12 +1208,15 @@ export async function resumeTask(
   // A replacement scope is a fresh statement of what this cwd may touch, so it
   // becomes the grant later delegations inherit.
   const replacement = options.scope ? resolveScope(old.cwd, old.profileId, options.scope) : undefined;
+  const followUp = old.state === "completed";
   const resumeInstruction = instruction?.trim() || "Continue the original task from where the previous run stopped.";
   const prompt = [
-    "# Resume instruction",
+    followUp ? "# Follow-up instruction" : "# Resume instruction",
     resumeInstruction,
     "",
-    `The previous Inter run ended in state \`${old.state}\`. Continue the existing provider session without repeating completed work.`,
+    followUp
+      ? "Your earlier run on this task finished. This is a follow-up in that same session: keep what you already read and decided, and do the work above without re-deriving the project from scratch."
+      : `The previous Inter run ended in state \`${old.state}\`. Continue the existing provider session without repeating completed work.`,
   ].join("\n");
   const task = stateStore().resumeTask(id, {
     ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),

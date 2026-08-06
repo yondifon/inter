@@ -97,9 +97,13 @@ export function normalizeTaskClass(value: string): TaskClass | undefined {
   return TASK_CLASSES.find((taskClass) => taskClass === normalized);
 }
 
-function validatePolicy(raw: unknown, path: string): RoutingPolicy {
+function validatePolicy(raw: unknown, path: string): RoutingPolicy | undefined {
   const root = expectRecord(raw, path, "root");
-  rejectUnknownFields(root, ["version", "routes"], path, "root");
+  rejectUnknownFields(root, ["version", "routes", "worker"], path, "root");
+  // `[worker]` alone is a complete file: prompt rules are read by
+  // loadWorkerRules, and a project with no `[routes]` has no routing policy to
+  // version or validate.
+  if (root.routes === undefined) return undefined;
   if (root.version !== 1) {
     fail(path, "version", "must be 1");
   }

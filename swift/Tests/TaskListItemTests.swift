@@ -36,6 +36,43 @@ final class TaskListItemTests: XCTestCase {
         XCTAssertEqual(item.costUsd, 0.17)
     }
 
+    func testDecodesCompletionWithSuggestedScope() throws {
+        let json = """
+        {
+            "id": "abc-123",
+            "profileId": "worker-1",
+            "model": "claude-sonnet-5",
+            "cwd": "/Users/dev/desgn/inter",
+            "state": "blocked",
+            "promptPreview": "Ship the landing page",
+            "createdAt": "2026-08-01T10:00:00Z",
+            "updatedAt": "2026-08-01T10:05:00Z",
+            "completion": {
+                "blocked": true,
+                "code": "permission_denied",
+                "reason": "operation not permitted",
+                "suggestedScope": { "read": ["**"], "write": ["src/**", "docs/**"] }
+            }
+        }
+        """.data(using: .utf8)!
+        let item = try JSONDecoder().decode(TaskListItem.self, from: json)
+        XCTAssertEqual(item.completion?.code, "permission_denied")
+        XCTAssertEqual(item.completion?.reason, "operation not permitted")
+        XCTAssertEqual(item.completion?.suggestedScope?.write, ["src/**", "docs/**"])
+    }
+
+    func testDecodesWithNoCompletionField() throws {
+        let json = """
+        {
+            "id": "1", "profileId": "w", "model": "m", "cwd": "/tmp",
+            "state": "running", "promptPreview": "p",
+            "createdAt": "", "updatedAt": ""
+        }
+        """.data(using: .utf8)!
+        let item = try JSONDecoder().decode(TaskListItem.self, from: json)
+        XCTAssertNil(item.completion)
+    }
+
     func testDisplayLabelPrefersTitle() {
         let item = TaskListItem(
             id: "1", profileId: "w", model: "m", cwd: "/tmp",

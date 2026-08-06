@@ -49,7 +49,10 @@ handoff(taskId, profile, model?, effort?, scope?)
 Same Inter task id, same title, same lineage, same attempt history. The
 destination profile must differ from the current one — a handoff to the same
 profile is a `resume`, and is rejected with that message. Valid from `failed`,
-`cancelled` and `blocked`, exactly the states `resume` accepts.
+`cancelled` and `blocked` — the dead states. `resume` accepts those too, and
+additionally `completed` when an instruction says what to do next; `handoff` has
+no such path, because the brief it builds describes a run that died and a
+completed run did not. See [resume.md](resume.md).
 
 The new run starts a **fresh provider session** on the new account, seeded with a
 brief. `session_id` is cleared on the row and captured again from the new run;
@@ -106,9 +109,9 @@ already does:
 
 ## Not built
 
-Automatic failover on `rate_limit` is Phase 2 in `.plans/task-handoff.md`. It
-spends a second account's quota and crosses a scope grant without the caller
-present, so it needs an explicit opt-in on `delegate` first.
+Automatic failover on `rate_limit`. It spends a second account's quota and
+crosses a scope grant without the caller present, so it needs an explicit
+opt-in on `delegate` first.
 
 ## Complement: write incrementally
 

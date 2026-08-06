@@ -5,19 +5,28 @@ enum SettingsSelection: Hashable {
     case about
 }
 
-/// Standard Settings window content, opened by ⌘, (see `AppDelegate.openSettings`
-/// in main.swift — this app is AppKit-lifecycle, not a SwiftUI `App`, so there is
-/// no `Settings` scene to host this for free).
+/// Shared flag that opens the Settings sheet from anywhere — the toolbar
+/// button and ⌘, (see `AppDelegate.openSettings` in main.swift) both just
+/// flip `isPresented`.
+final class SettingsPresentation: ObservableObject {
+    @Published var isPresented = false
+}
+
+/// Settings content, presented as a sheet over the main window (see
+/// `ContentView`'s `.sheet(isPresented:)` binding to `SettingsPresentation`).
 struct SettingsView: View {
     let store: ProfileStore
     let broker: BrokerManager
+    @Environment(\.dismiss) private var dismiss
     @State private var selection: SettingsSelection?
     @State private var editing: Profile?
     @State private var adding = false
     @AppStorage("settingsWorkersExpanded") private var workersExpanded = true
 
     var body: some View {
-        NavigationSplitView {
+        VStack(spacing: 0) {
+            titleBar
+            NavigationSplitView {
             List(selection: $selection) {
                 CollapsibleSection(
                     isExpanded: $workersExpanded,
@@ -70,8 +79,26 @@ struct SettingsView: View {
                 self.selection = nil
             }
         }
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+            }
+        }
+        }
+        .background { Surface.content.ignoresSafeArea() }
         .frame(minWidth: 640, minHeight: 420)
-        .navigationTitle("Settings")
+    }
+
+    /// The sheet's own top edge; a NavigationSplitView carries no title of its
+    /// own, and this is a sheet, not a window that reports one via its titlebar.
+    private var titleBar: some View {
+        HStack(spacing: 8) {
+            Text("Settings").scaledFont(.title3, weight: .semibold)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
     }
 }
 

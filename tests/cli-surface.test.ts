@@ -328,7 +328,7 @@ describe("/api/state", () => {
     expect(response.status).toBe(200);
     const body = await response.json();
     expect(Object.keys(body).sort()).toEqual([
-      "grants", "memoryProjects", "profileFailures", "profiles", "tasks",
+      "grants", "memoryProjects", "profileFailures", "profiles", "spend", "tasks",
     ]);
     const task = body.tasks.find((item: { id: string }) => item.id === seeded.id);
     expect(task.output).toBe("first\n{\"result\": \"second\"}");

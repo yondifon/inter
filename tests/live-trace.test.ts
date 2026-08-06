@@ -115,7 +115,7 @@ describe("GET /api/state?view=summary", () => {
     const body = await response.json();
     // Same envelope as today — only the task rows slim down.
     expect(Object.keys(body).sort()).toEqual([
-      "grants", "memoryProjects", "profileFailures", "profiles", "tasks",
+      "grants", "memoryProjects", "profileFailures", "profiles", "spend", "tasks",
     ]);
     const row = body.tasks.find((item: { id: string }) => item.id === seeded.id);
     expect(row.promptPreview).toBe("first line second line");

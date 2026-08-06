@@ -147,46 +147,17 @@ struct SystemSelectionHider: NSViewRepresentable {
             while let current = view {
                 if let table = current as? NSTableView {
                     table.selectionHighlightStyle = .none
-                    styleContextMenuHighlight(in: table)
                     return
                 }
                 if let scrollView = current as? NSScrollView,
                    let table = scrollView.documentView as? NSTableView {
                     table.selectionHighlightStyle = .none
-                    styleContextMenuHighlight(in: table)
                     return
                 }
                 view = current.superview
             }
         }
     }
-}
-
-/// AppKit paints the row a context menu acts on with a system-accent
-/// rounded-rectangle ring. The app already marks rows with its own `Surface`
-/// fill, so the ring would read as a foreign artifact on top of it: this class
-/// replaces that ring with the same fill a selected row wears — or nothing when
-/// the row is already selected, since the row itself is drawing the fill then.
-private final class ContextMenuHighlightTableView: NSTableView {
-    @objc
-    func drawContextMenuHighlightForRow(_ row: Int) {
-        guard row >= 0, !selectedRowIndexes.contains(row) else { return }
-        let path = NSBezierPath(
-            roundedRect: rect(ofRow: row).insetBy(dx: 4, dy: 1),
-            xRadius: Radius.small,
-            yRadius: Radius.small
-        )
-        Surface.selectionColor.setFill()
-        path.fill()
-    }
-}
-
-/// Swaps the table's runtime class so `drawContextMenuHighlightForRow` above
-/// replaces the system ring. Once the class is in place the swap is skipped,
-/// so re-running this on every walk costs a comparison and nothing more.
-private func styleContextMenuHighlight(in table: NSTableView) {
-    guard object_getClass(table) !== ContextMenuHighlightTableView.self else { return }
-    object_setClass(table, ContextMenuHighlightTableView.self)
 }
 
 /// The trace's one stroke: a 2pt rule that stands in for a container. Signals,
