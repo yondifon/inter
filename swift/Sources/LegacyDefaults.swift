@@ -28,3 +28,20 @@ enum LegacyDefaults {
         }
     }
 }
+
+/// Before grouping and sorting were separate axes, "priority" was a grouping
+/// value that stood in for a sort. A stored copy of it folds onto the new axes:
+/// the grouping it replaced and the priority sort it stood for.
+enum TaskSortDefaults {
+    private static let marker = "migratedTaskSortDefaults"
+    private static let legacyPriority = "priority"
+
+    static func migrate() {
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: marker) else { return }
+        defaults.set(true, forKey: marker)
+        guard defaults.string(forKey: "taskGrouping") == legacyPriority else { return }
+        defaults.set(TaskGrouping.parent.rawValue, forKey: "taskGrouping")
+        defaults.set(TaskSort.priority.rawValue, forKey: "taskSort")
+    }
+}

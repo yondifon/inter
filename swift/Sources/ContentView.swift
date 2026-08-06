@@ -23,7 +23,8 @@ struct ContentView: View {
     @State private var showingInstall = false
     @State private var showingMemories = false
     @AppStorage("taskProjectFilter") private var projectFilter = ""
-    @AppStorage("taskGrouping") private var groupingRaw = TaskGrouping.priority.rawValue
+    @AppStorage("taskGrouping") private var groupingRaw = TaskGrouping.parent.rawValue
+    @AppStorage("taskSort") private var sortRaw = TaskSort.priority.rawValue
     @AppStorage("collapsedTaskGroups") private var collapsedRaw = ""
     @AppStorage("showArchivedTasks") private var showArchivedTasks = false
     @AppStorage("taskSidebarWidth") private var sidebarWidth = 260.0
@@ -90,14 +91,11 @@ struct ContentView: View {
                         )
                         Spacer(minLength: 0)
                         if !store.tasks.isEmpty {
-                            HStack(spacing: 4) {
-                                filterMenu
-                                groupMenu
-                            }
+                            viewMenu
                         }
                     }
-                    // The chips carry their own height, so this header needs less
-                    // padding above them than the label-only one below it.
+                    // The control carries its own height, so this header needs less
+                    // padding above it than the label-only one below it.
                     .padding(.top, 6)
                     .padding(.bottom, 10)
                     // The header sits outside the List's row-inset chrome, so it needs
@@ -230,7 +228,8 @@ struct ContentView: View {
         return showArchivedTasks ? "No archived tasks" : "No tasks yet"
     }
 
-    private var grouping: TaskGrouping { TaskGrouping(rawValue: groupingRaw) ?? .priority }
+    private var grouping: TaskGrouping { TaskGrouping(rawValue: groupingRaw) ?? .parent }
+    private var sort: TaskSort { TaskSort(rawValue: sortRaw) ?? .priority }
 
     /// The raw value is JSON keyed by grouping mode, with the legacy newline
     /// format folded into the mode it was saved in. Only the current mode's ids
@@ -249,7 +248,8 @@ struct ContentView: View {
         TaskOrganizer.organize(
             tasks: visibleTasks,
             project: projectFilter.isEmpty ? nil : projectFilter,
-            grouping: grouping
+            grouping: grouping,
+            sort: sort
         )
     }
 
@@ -334,7 +334,7 @@ struct ContentView: View {
     /// Explicit point size, not `scaledFont`: that ladder is tuned for reading-length
     /// text, and a symbol sized off text metrics doesn't carry the same weight.
     private func sidebarIconFont() -> Font {
-        .system(size: 15 * uiScale, weight: .semibold)
+        .system(size: 19 * uiScale, weight: .semibold)
     }
 
     /// The system draws no selection fill in this list (`SystemSelectionHider`),
@@ -348,7 +348,7 @@ struct ContentView: View {
             .padding(.vertical, 1)
     }
 
-    /// Both menus rest on a raised chip. A bare symbol on the sidebar fill has
+    /// The menu rests on a raised chip. A bare symbol on the sidebar fill has
     /// only its own stroke to hold it apart from the ground, which reads as more
     /// header rather than as a control; the chip gives it a control-shaped edge
     /// and full-strength ink keeps the stroke itself legible. A control holding a
@@ -359,17 +359,30 @@ struct ContentView: View {
             .fill(active ? Surface.selection : Surface.panel)
     }
 
-    /// Status (active/archived) and project both narrow which rows show, so they
-    /// share one menu; grouping changes how the same rows are arranged and gets
-    /// its own. The rightmost control owns the shared trailing edge.
-    private var filterMenu: some View {
+    /// Grouping splits rows into sections, sorting orders the rows inside each
+    /// section, and the filter narrows which rows show at all — one menu holds
+    /// all three. The control owns the shared trailing edge.
+    private var viewMenu: some View {
         Menu {
-            Picker("Tasks", selection: $showArchivedTasks) {
+            Picker("Group by", selection: $groupingRaw) {
+                ForEach(TaskGrouping.allCases) { option in
+                    Text(option.label).tag(option.rawValue)
+                }
+            }
+            .pickerStyle(.inline)
+            Divider()
+            Picker("Sort by", selection: $sortRaw) {
+                ForEach(TaskSort.allCases) { option in
+                    Text(option.label).tag(option.rawValue)
+                }
+            }
+            .pickerStyle(.inline)
+            Divider()
+            Picker("Filter", selection: $showArchivedTasks) {
                 Text("Active").tag(false)
                 Text("Archived").tag(true)
             }
             .pickerStyle(.inline)
-            Divider()
             Picker("Project", selection: $projectFilter) {
                 Text("All projects").tag("")
                 ForEach(projects) { project in
@@ -378,47 +391,23 @@ struct ContentView: View {
             }
             .pickerStyle(.inline)
         } label: {
-            Image(systemName: isFiltering ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
+            Image(systemName: viewMenuIsActive ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
                 .font(sidebarIconFont())
                 .imageScale(.large)
                 .foregroundStyle(Color.primary)
-                .frame(width: 28 * uiScale, height: 28 * uiScale)
-                .background(sidebarMenuChip(active: isFiltering))
+                .frame(width: 36 * uiScale, height: 36 * uiScale)
+                .background(sidebarMenuChip(active: viewMenuIsActive))
                 .contentShape(Rectangle())
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help("Filter tasks by project or status")
-        .accessibilityLabel("Filter tasks by project or status")
+        .help("Group, sort, and filter tasks")
+        .accessibilityLabel("Group, sort, and filter tasks")
     }
 
-    private var groupMenu: some View {
-        Menu {
-            Picker("Group by", selection: $groupingRaw) {
-                ForEach(TaskGrouping.allCases) { option in
-                    Text(option.label).tag(option.rawValue)
-                }
-            }
-            .pickerStyle(.inline)
-        } label: {
-            Image(systemName: isGroupingCustom ? "rectangle.3.group.fill" : "rectangle.3.group")
-                .font(sidebarIconFont())
-                .imageScale(.large)
-                .foregroundStyle(Color.primary)
-                .frame(width: 28 * uiScale, height: 28 * uiScale)
-                .background(sidebarMenuChip(active: isGroupingCustom))
-                .contentShape(Rectangle())
-        }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .help("Group tasks")
-        .accessibilityLabel("Group tasks")
-    }
-
+    private var viewMenuIsActive: Bool { grouping != .parent || sort != .priority || isFiltering }
     private var isFiltering: Bool { !projectFilter.isEmpty || showArchivedTasks }
-    private var isGroupingCustom: Bool { grouping != .parent }
 
     /// Broker health is app-wide, so it sits at the foot of the sidebar instead of
     /// the toolbar, where it landed on the detail side of the divider and read as

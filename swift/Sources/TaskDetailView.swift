@@ -231,18 +231,20 @@ struct TaskDetail: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
-                // Speaks, because the marker is now the only place the state is
-                // stated: the chip that used to say the word beside it is gone.
-                StateMarker(state: state, speaks: true)
-                    .help(state.label)
                 Text(resolvedLabel)
                     .scaledFont(.body, weight: .semibold)
                     .lineLimit(1)
                     .help(resolvedLabel)
-                // No state chip: the marker beside the title already carries the
-                // state — pulsing while live, tinted and shaped once settled — and
-                // spelling it out again cost a chip that resized between states and
-                // shoved every chip right of it.
+                // Speaks, because the marker is the only place the state is
+                // stated: the chip that used to say the word beside it is gone.
+                // It rides the title's tail — the text it describes — reading as
+                // the run's status rather than as another control in the row.
+                StateMarker(state: state, speaks: true)
+                    .help(state.label)
+                // No state chip: the marker on the title's tail already carries
+                // the state — pulsing while live, tinted and shaped once settled
+                // — and spelling it out again cost a chip that resized between
+                // states and shoved every chip right of it.
                 Spacer(minLength: 8)
                 if let resumeCommand {
                     CopyIconButton(
@@ -285,26 +287,25 @@ struct TaskDetail: View {
                 // already named the pair, so here it confirms instead of teaching.
                 TaskMetaChip(text: identityLine, label: "Worker and model", full: identityLine) {
                     if let provider = worker?.provider {
-                        ProviderLogo(provider: provider, size: 8 * uiScale)
+                        ProviderLogo(provider: provider, size: 7 * uiScale)
                     } else {
                         Image(systemName: "person.crop.circle")
-                            .font(.system(size: 7 * uiScale, weight: .medium))
+                            .font(.system(size: 6 * uiScale, weight: .medium))
                     }
                 }
                 // The reasoning level the run was dispatched with is part of its
                 // identity like the model, and absent when the caller set none.
                 if let effort = task?.effort, !effort.isEmpty {
                     TaskMetaChip(text: effort, label: "Effort") {
-                        Image(systemName: "brain").font(.system(size: 7 * uiScale, weight: .medium))
+                        Image(systemName: "brain").font(.system(size: 6 * uiScale, weight: .medium))
                     }
                 }
                 // Where a run touched files is part of its identity, not a detail: two
                 // tasks with the same worker, model and prompt differ only by folder.
                 TaskMetaChip(text: resolvedDisplayPath, label: "Folder", full: resolvedCwd, maxChars: 28) {
-                    Image(systemName: "folder").font(.system(size: 7 * uiScale, weight: .medium))
+                    Image(systemName: "folder").font(.system(size: 6 * uiScale, weight: .medium))
                 }
             }
-            .padding(.leading, 8 * uiScale + 8)
         }
     }
 
@@ -312,12 +313,24 @@ struct TaskDetail: View {
     /// repeating them here would make the reader check two places for one fact; the
     /// folder repeats because the header shows it shortened and unselectable.
     private var runFactsPopover: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            TaskFactRow(icon: "number", label: "Task", value: shortTaskId, copy: taskId)
+        VStack(alignment: .leading, spacing: 4) {
+            TaskFactRow(icon: "number", label: "Task", value: shortTaskId, full: taskId, copy: taskId)
             if let sessionId {
-                TaskFactRow(icon: "terminal", label: "Session", value: sessionId, copy: sessionId)
+                TaskFactRow(
+                    icon: "terminal",
+                    label: "Session",
+                    value: middleTruncated(sessionId, maxChars: 20),
+                    full: sessionId,
+                    copy: sessionId
+                )
             }
-            TaskFactRow(icon: "folder", label: "Folder", value: resolvedCwd, copy: resolvedCwd)
+            TaskFactRow(
+                icon: "folder",
+                label: "Folder",
+                value: middleTruncated(resolvedCwd, maxChars: 28),
+                full: resolvedCwd,
+                copy: resolvedCwd
+            )
             Divider()
             TaskFactActionRow(icon: "folder", label: "Open folder") {
                 NSWorkspace.shared.open(URL(fileURLWithPath: resolvedCwd))
@@ -329,8 +342,7 @@ struct TaskDetail: View {
                 setArchived(taskId, resolvedArchivedAt == nil)
             }
         }
-        .padding(14)
-        .frame(width: 380 * uiScale, alignment: .leading)
+        .padding(10)
         // A popover defaults to a vibrant material, which samples whatever is behind
         // the window — over a dark desktop the panel turned into a grey gradient.
         .background(Surface.panel)
@@ -1431,7 +1443,7 @@ private struct TaskMetaChip<Icon: View>: View {
     }
 
     var body: some View {
-        HStack(spacing: 2 * uiScale) {
+        HStack(spacing: 1.5 * uiScale) {
             icon
             Text(displayText)
                 .scaledFont(.caption2, design: .monospaced)
@@ -1440,9 +1452,9 @@ private struct TaskMetaChip<Icon: View>: View {
         .foregroundStyle(.secondary)
         // The text is already on the ladder's bottom rung, so the chip's size is
         // set by what surrounds it: padding, the gap, and the icon.
-        .padding(.horizontal, 4 * uiScale)
-        .padding(.vertical, 1.5 * uiScale)
-        .background(Surface.sunken, in: RoundedRectangle(cornerRadius: 5.5))
+        .padding(.horizontal, 3 * uiScale)
+        .padding(.vertical, 1 * uiScale)
+        .background(Surface.sunken, in: RoundedRectangle(cornerRadius: 5))
         .help(full.map { "\(label) — \($0)" } ?? label)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(label): \(full ?? text)")
@@ -1518,11 +1530,17 @@ private struct TaskFactRow: View {
     let icon: String
     let label: String
     let value: String
+    /// The untruncated value for the tooltip and VoiceOver, when `value` is an
+    /// abbreviated display form; the copy button always copies the full value.
+    var full: String? = nil
     var copy: String?
+
+    @Environment(\.uiScale) private var uiScale
 
     var body: some View {
         HStack(spacing: 8) {
-            EventIcon(symbol: icon)
+            Image(systemName: icon)
+                .font(.system(size: 9 * uiScale, weight: .medium))
                 .foregroundStyle(.tertiary)
                 .help(label)
                 .accessibilityHidden(true)
@@ -1532,10 +1550,12 @@ private struct TaskFactRow: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .textSelection(.enabled)
-                .accessibilityLabel("\(label): \(value)")
+                .help(full.map { "\(label) — \($0)" } ?? label)
+                .accessibilityLabel("\(label): \(full ?? value)")
             Spacer(minLength: 0)
             if let copy {
                 CopyIconButton(text: copy, label: "Copy \(label.lowercased())")
+                    .font(.system(size: 9 * uiScale, weight: .medium))
             }
         }
     }
@@ -1549,10 +1569,13 @@ private struct TaskFactActionRow: View {
     let label: String
     let action: () -> Void
 
+    @Environment(\.uiScale) private var uiScale
+
     var body: some View {
         Button(action: action) {
             HStack(spacing: 8) {
-                EventIcon(symbol: icon)
+                Image(systemName: icon)
+                    .font(.system(size: 9 * uiScale, weight: .medium))
                     .foregroundStyle(.primary)
                     .accessibilityHidden(true)
                 Text(label)

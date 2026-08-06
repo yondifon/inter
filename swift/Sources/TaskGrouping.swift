@@ -14,7 +14,6 @@ enum TaskGrouping: String, CaseIterable, Identifiable {
     case project
     case status
     case none
-    case priority
 
     var id: Self { self }
 
@@ -24,6 +23,20 @@ enum TaskGrouping: String, CaseIterable, Identifiable {
         case .project: "Project"
         case .status: "Status"
         case .none: "None"
+        }
+    }
+}
+
+/// How the rows within a group are ordered.
+enum TaskSort: String, CaseIterable, Identifiable {
+    case recent
+    case priority
+
+    var id: Self { self }
+
+    var label: String {
+        switch self {
+        case .recent: "Newest first"
         case .priority: "Priority"
         }
     }
@@ -135,7 +148,8 @@ enum TaskOrganizer {
     static func organize(
         tasks: [TaskListItem],
         project: String?,
-        grouping: TaskGrouping
+        grouping: TaskGrouping,
+        sort: TaskSort = .recent
     ) -> [TaskGroup] {
         let known = Set(tasks.map(\.cwd))
         let active = project.flatMap { known.contains($0) ? $0 : nil }
@@ -143,15 +157,13 @@ enum TaskOrganizer {
 
         switch grouping {
         case .none:
-            return [TaskGroup(id: "all", title: nil, tasks: scoped)]
+            return [TaskGroup(id: "all", title: nil, tasks: sorted(scoped, by: sort))]
         case .project:
-            return bucket(scoped) { ($0.cwd, projectName($0.cwd)) }
+            return sortedGroups(bucket(scoped) { ($0.cwd, projectName($0.cwd)) }, by: sort)
         case .parent:
-            return parentGroups(scoped)
+            return sortedGroups(parentGroups(scoped), by: sort)
         case .status:
-            return statusGroups(scoped, orderedBy: statusOrder)
-        case .priority:
-            return statusGroups(scoped, orderedBy: priorityOrder)
+            return sortedGroups(statusGroups(scoped, orderedBy: statusOrder), by: sort)
         }
     }
 
@@ -244,6 +256,35 @@ enum TaskOrganizer {
         return order.compactMap { state in
             guard let rows = buckets[state], !rows.isEmpty else { return nil }
             return TaskGroup(id: state.rawValue, title: state.label, tasks: rows)
+        }
+    }
+
+    /// Orders the rows of one group. `.recent` keeps the store's newest-first
+    /// order; `.priority` ranks by attention state, ties keeping the store order.
+    private static func sorted(_ tasks: [TaskListItem], by sort: TaskSort) -> [TaskListItem] {
+        switch sort {
+        case .recent:
+            return tasks
+        case .priority:
+            return tasks.enumerated()
+                .sorted { lhs, rhs in
+                    let l = priorityRank(lhs.element)
+                    let r = priorityRank(rhs.element)
+                    if l != r { return l < r }
+                    return lhs.offset < rhs.offset
+                }
+                .map(\.element)
+        }
+    }
+
+    private static func priorityRank(_ task: TaskListItem) -> Int {
+        priorityOrder.firstIndex(of: TaskState(task.state)) ?? priorityOrder.count
+    }
+
+    /// Rebuilds each group with its rows sorted, carrying the full heading over.
+    private static func sortedGroups(_ groups: [TaskGroup], by sort: TaskSort) -> [TaskGroup] {
+        groups.map { group in
+            TaskGroup(id: group.id, title: group.title, tasks: sorted(group.tasks, by: sort), fullTitle: group.fullTitle)
         }
     }
 

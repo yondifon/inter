@@ -391,4 +391,70 @@ final class TaskGroupingTests: XCTestCase {
         XCTAssertEqual(TaskOrganizer.neighbor(afterRemoving: "third", from: ["first", "second", "third"]), "second")
         XCTAssertNil(TaskOrganizer.neighbor(afterRemoving: "only", from: ["only"]))
     }
+
+    func testPrioritySortOrdersAttentionFirst() {
+        let groups = TaskOrganizer.organize(
+            tasks: [
+                item("1", cwd: inter, state: "completed"),
+                item("2", cwd: inter, state: "running"),
+                item("3", cwd: inter, state: "failed"),
+                item("4", cwd: inter, state: "needs_input"),
+                item("5", cwd: inter, state: "blocked"),
+            ],
+            project: nil,
+            grouping: .none,
+            sort: .priority
+        )
+        XCTAssertEqual(
+            groups[0].tasks.map(\.id), ["4", "5", "3", "2", "1"],
+            "attention first, then live work, then the settled ledger"
+        )
+    }
+
+    func testPrioritySortTiesKeepTheStoresOrder() {
+        let groups = TaskOrganizer.organize(
+            tasks: [
+                item("1", cwd: inter, state: "completed"),
+                item("2", cwd: inter, state: "failed"),
+                item("3", cwd: inter, state: "completed"),
+            ],
+            project: nil,
+            grouping: .none,
+            sort: .priority
+        )
+        XCTAssertEqual(groups[0].tasks.map(\.id), ["2", "1", "3"], "equal ranks fall back to the store's order")
+    }
+
+    func testGroupingComposesWithPrioritySort() {
+        let groups = TaskOrganizer.organize(
+            tasks: [
+                item("1", cwd: inter, state: "completed"),
+                item("2", cwd: site, state: "running"),
+                item("3", cwd: inter, state: "needs_input"),
+                item("4", cwd: site, state: "failed"),
+            ],
+            project: nil,
+            grouping: .project,
+            sort: .priority
+        )
+        XCTAssertEqual(groups.map(\.title), ["inter", "site"])
+        XCTAssertEqual(groups[0].tasks.map(\.id), ["3", "1"], "priority orders the rows inside the project group")
+        XCTAssertEqual(groups[1].tasks.map(\.id), ["4", "2"])
+    }
+
+    func testDefaultSortKeepsTheStoresOrder() {
+        let groups = TaskOrganizer.organize(
+            tasks: [
+                item("1", cwd: inter, state: "needs_input"),
+                item("2", cwd: inter, state: "completed"),
+                item("3", cwd: inter, state: "failed"),
+            ],
+            project: nil,
+            grouping: .none
+        )
+        XCTAssertEqual(
+            groups[0].tasks.map(\.id), ["1", "2", "3"],
+            "the sort defaults to the list's recent-first order, not priority"
+        )
+    }
 }
