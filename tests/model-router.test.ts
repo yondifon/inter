@@ -40,8 +40,12 @@ describe("model routing", () => {
   test("reads the project policy from the supplied cwd, never the broker's", async () => {
     const root = mkdtempSync(join(tmpdir(), "inter-router-"));
     const elsewhere = mkdtempSync(join(tmpdir(), "inter-router-elsewhere-"));
+    // Routing merges `~/.inter.toml` as its user layer; an empty temp home
+    // keeps `elsewhere` genuinely unpoliced whatever this machine's dotfiles say.
+    const home = mkdtempSync(join(tmpdir(), "inter-router-home-"));
     const previousCwd = process.cwd();
     const previousDb = process.env.INTER_DB;
+    const previousHome = process.env.HOME;
     writeFileSync(join(root, ".inter.toml"), `
 version = 1
 [routes.build]
@@ -50,6 +54,7 @@ allow = [{ provider = "claude", model = "opus" }]
 
     try {
       closeStateStore();
+      process.env.HOME = home;
       process.env.INTER_DB = join(root, "inter.db");
       stateStore().saveProfiles([{
         id: "antigravity",
@@ -73,8 +78,10 @@ allow = [{ provider = "claude", model = "opus" }]
       process.chdir(previousCwd);
       if (previousDb === undefined) delete process.env.INTER_DB;
       else process.env.INTER_DB = previousDb;
+      process.env.HOME = previousHome;
       rmSync(root, { recursive: true, force: true });
       rmSync(elsewhere, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
     }
   }, 20_000);
 

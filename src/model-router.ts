@@ -112,7 +112,6 @@ export interface ModelRoute {
   rejectedCount: number;
   /** Worst usage window on the chosen account; null when its provider reports none. */
   quotaUsedPercent: number | null;
-  policyPath?: string;
   warnings: string[];
 }
 
@@ -416,7 +415,6 @@ export function chooseModel(
     rejected: topRejections(rejected),
     rejectedCount: rejected.length,
     quotaUsedPercent: used ?? null,
-    ...(policy ? { policyPath: policy.path } : {}),
     warnings: [
       ...warnings,
       ...(options.difficulty !== undefined && !heuristicAgreed
@@ -447,7 +445,6 @@ export interface NamedRouteAudit {
   effortReason: string;
   quotaUsedPercent: number | null;
   rejected: SelectionRejection[];
-  policyPath?: string;
   warnings: string[];
 }
 
@@ -564,7 +561,6 @@ export function checkNamedRoute(
     effortReason: effort.reason,
     quotaUsedPercent: used ?? null,
     rejected: topRejections(rejected),
-    ...(policy ? { policyPath: policy.path } : {}),
     warnings,
   };
 }

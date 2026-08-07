@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { z } from "zod/v4";
-import { loadConfig, loadStoredConfig, maskSecretEnv, resolveProfileChain, saveConfig } from "./config";
+import { loadConfig, loadStoredConfig, resolveProfileChain, saveConfig } from "./config";
 import { loadTomlLayers } from "./inter-toml";
 import {
   appendTaskEvent,
@@ -34,12 +34,14 @@ import {
   type ModelRoute,
   type NamedRouteAudit,
 } from "./model-router";
+import { startHoldSweep } from "./holds";
+
+let stopHoldSweep: (() => void) | undefined;
 import { listProfileStatuses } from "./profile-status";
 import { listProfileUsage } from "./usage";
 import { stateStore } from "./store";
 import type {
   Difficulty,
-  Profile,
   Provider,
   RoutePreference,
   SelectionDecision,
@@ -50,6 +52,7 @@ import { COMPLETE_DESCRIPTION, DELEGATE_DESCRIPTION, HANDOFF_DESCRIPTION, MCP_IN
 import { defaultModelFor } from "./provider-defaults";
 import { normalizeProfile } from "./profile-input";
 import { deleteMemory, getMemory, listMemories, setMemory } from "./memories";
+import { profilesForCaller, publicProfile, publicProfiles } from "./profile-view";
 import { publicTaskSummary, taskView, waitEventsView, waitTaskView, settled, TASK_FIELD_KEYS, type TaskField } from "./public-task";
 import { mcpWaitBlockMs } from "./mcp-wait";
 import { loadRoutingPolicy } from "./routing-policy";
@@ -77,7 +80,7 @@ const scopeSchema = z.object({
   write: z.array(z.string()).max(200),
 });
 const taskStateSchema = z.enum([
-  "queued", "running", "needs_input", "answered", "blocked", "completed", "failed", "cancelled",
+  "queued", "pending", "running", "needs_input", "answered", "blocked", "completed", "failed", "cancelled",
 ]);
 
 // Bounds the MCP `tasks` tool's context cost independently of the /state
@@ -570,6 +573,18 @@ export function startBroker(options: { port?: number } = {}) {
   const cleanupDays = scheduledCleanupDays();
   if (cleanupDays !== undefined) startScheduledCleanup(stateStore(), cleanupDays);
 
+  // Releases held tasks. The immediate first pass is the catch-up for holds
+  // that came due while the broker was down: run late, never silently skipped.
+  // One sweep per process: tests call startBroker repeatedly, and each call
+  // must not stack another interval over the same database.
+  stopHoldSweep?.();
+  stopHoldSweep = startHoldSweep(() => stateStore(), {
+    listStatuses: (query) => listProfileStatuses(query),
+    release: (taskId, instruction) => resumeTask(taskId, instruction),
+    now: () => new Date(),
+    log: console.log,
+  });
+
   if (process.argv.includes("--stdio")) {
     serveStdio(() => createMcpServer());
   }
@@ -724,10 +739,18 @@ async function createMcpServer(): Promise<McpServer> {
       timeoutMs: z.number().int().min(1).max(86_400_000).optional(),
       scope: scopeSchema.optional(),
       allowQuestions: z.boolean().optional(),
+      startAt: z.string().min(1).max(64).optional()
+        .describe(
+          "Hold the resume instead of running it now. Pass the literal \"rate_limit\" after a " +
+          "rate-limited run to continue automatically once that account has usage again — the reset " +
+          "time is the hint, the account's live status is the release rule. Also accepts an ISO " +
+          "instant or a duration like \"45m\" / \"4h\". The task waits as `pending`; resume it " +
+          "again without startAt to start it now, or cancel to drop it.",
+        ),
       fields: taskFieldSchema,
     }),
-  }, async ({ taskId, instruction, timeoutMs, scope, allowQuestions, fields }) =>
-    result(startedTask(await resumeTask(taskId, instruction, { timeoutMs, scope, allowQuestions }), fields ?? DEFAULT_RESUME_FIELDS)));
+  }, async ({ taskId, instruction, timeoutMs, scope, allowQuestions, startAt, fields }) =>
+    result(startedTask(await resumeTask(taskId, instruction, { timeoutMs, scope, allowQuestions, startAt }), fields ?? DEFAULT_RESUME_FIELDS)));
   server.registerTool("handoff", {
     description: HANDOFF_DESCRIPTION,
     inputSchema: z.object({
@@ -806,7 +829,7 @@ async function createMcpServer(): Promise<McpServer> {
       wanted.has("status") ? listProfileStatuses(query) : undefined,
       wanted.has("usage") ? listProfileUsage(query) : undefined,
     ]);
-    const profiles = publicProfiles((await loadConfig(query.cwd)).profiles)
+    const profiles = profilesForCaller((await loadConfig(query.cwd)).profiles)
       .filter((item) => (!profile || item.id === profile) && (!provider || item.provider === provider));
     return result({
       profiles,
@@ -938,7 +961,6 @@ function decisionFromRoute(
       ? { runnersUp: route.candidates.slice(1).map(({ profileId, model }) => ({ profileId, model })) }
       : {}),
     ...(route.rejected.length ? { rejected: route.rejected, rejectedCount: route.rejectedCount } : {}),
-    ...(route.policyPath ? { policyPath: route.policyPath } : {}),
     ...(route.warnings.length ? { warnings: route.warnings } : {}),
   };
 }
@@ -964,7 +986,6 @@ function decisionFromAudit(
     ...(audit.rejected.length
       ? { rejected: audit.rejected, rejectedCount: audit.rejected.length }
       : {}),
-    ...(audit.policyPath ? { policyPath: audit.policyPath } : {}),
     ...(audit.warnings.length ? { warnings: audit.warnings } : {}),
   };
 }
@@ -1004,7 +1025,7 @@ async function policyWarnings(cwd: string, task: Task): Promise<string[]> {
   const provider = config.profiles.find(({ id }) => id === task.profileId)?.provider;
   if (allowed.some((entry) => entry.provider === provider && entry.model === task.model)) return [];
   return [
-    `${provider}/${task.model} is not in any allow list in ${policy.path}; the explicit profile overrode project routing policy`,
+    `${provider}/${task.model} is not in any allow list in the project's routing policy; the explicit profile overrode project routing policy`,
   ];
 }
 
@@ -1041,17 +1062,6 @@ function startedTask(task: Task, fields: readonly TaskField[]) {
   return {
     ...taskView(task, fields),
     cursor: stateStore().latestTaskEventId([task.id], true),
-  };
-}
-
-function publicProfiles(profiles: Profile[]) {
-  return profiles.map(publicProfile);
-}
-
-function publicProfile(profile: Profile): Profile {
-  return {
-    ...profile,
-    env: maskSecretEnv(profile.env),
   };
 }
 

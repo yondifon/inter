@@ -21,6 +21,7 @@ import { deniedScopePaths, promptReadPaths } from "./prompt-paths";
 import { stateStore, type StateStore, type TaskListQuery } from "./store";
 import { promptWithMemories } from "./memories";
 import { contextMapSection, ensureContextMap, queueContextFold } from "./context-map";
+import { HOLD_EXPIRY_MS, resolveStartAt } from "./holds";
 import { settled } from "./public-task";
 import { TaskWaiter, type TaskWaitResult, type WaitUntil } from "./task-waiter";
 import type { Profile, SelectionDecision, Task, TaskScope, TaskSummary } from "./types";
@@ -76,6 +77,13 @@ export interface ResumeOptions {
   scope?: TaskScope;
   allowQuestions?: boolean;
   timeoutMs?: number;
+  /**
+   * Hold the resume instead of running it now: the literal `"rate_limit"` to
+   * wait for this task's own account to be usable again, an ISO instant, or a
+   * duration like `"45m"` / `"4h"`. The task parks as `pending` and the hold
+   * sweep releases it when the condition is true.
+   */
+  startAt?: string;
 }
 
 export interface ReplyOptions {
@@ -1114,7 +1122,9 @@ function tail(value: string, limit: number): string {
  * SQL on the write itself; this is the copy the entry points check, stated once
  * so `resume` and `handoff` cannot drift apart.
  */
-const RESUMABLE_STATES: Task["state"][] = ["failed", "cancelled", "blocked"];
+// `pending` is resumable on purpose: resuming a held task is "start now" — it
+// drops the hold and replays the stored resume immediately.
+const RESUMABLE_STATES: Task["state"][] = ["failed", "cancelled", "blocked", "pending"];
 
 /**
  * What a caller can act on when the provider will not reopen a session. The
@@ -1222,6 +1232,11 @@ export async function resumeTask(
     " — the worker exited before the provider created a session; delegate a fresh task instead",
   );
   validateTimeoutMs(options.timeoutMs);
+  if (options.startAt) return armResumeHold(old, instruction?.trim(), options.startAt);
+  // A resume on a held task is its force-start: drop the hold and run now.
+  if (old.state === "pending") {
+    stateStore().dropTaskHold(id, "hold_released", { forced: true });
+  }
   // A replacement scope is a fresh statement of what this cwd may touch, so it
   // becomes the grant later delegations inherit.
   const replacement = options.scope ? resolveScope(old.cwd, old.profileId, options.scope) : undefined;
@@ -1245,6 +1260,38 @@ export async function resumeTask(
   });
   taskWaiter.notify(id);
   launchTask(task, profile, old.sessionId, prompt);
+  return task;
+}
+
+/**
+ * Parks a resume behind a hold instead of running it. `"rate_limit"` reads the
+ * failed run's own `resetsAt` and keys the release on the account's status —
+ * the reset time is only the poll hint, and the sweep will not release into an
+ * account still reporting `unavailable`.
+ */
+function armResumeHold(old: Task, instruction: string | undefined, startAt: string): Task {
+  const now = new Date();
+  const rateLimit = startAt === "rate_limit";
+  const until = rateLimit
+    ? old.completion?.resetsAt ?? new Date(now.getTime() + 10 * 60_000).toISOString()
+    : resolveStartAt(startAt, now);
+  const note = rateLimit
+    ? `waiting for ${old.profileId}/${old.model} to have usage again; not before ${until}`
+    : `scheduled to continue at ${until}`;
+  const task = stateStore().armTaskHold({
+    taskId: old.id,
+    verb: "resume",
+    args: instruction ? { instruction } : {},
+    startAt: until,
+    ...(rateLimit ? { awaitProfile: old.profileId, awaitModel: old.model } : {}),
+    nextCheckAt: until,
+    expiresAt: new Date(now.getTime() + HOLD_EXPIRY_MS).toISOString(),
+    probeCount: 0,
+    note,
+    createdAt: now.toISOString(),
+    updatedAt: now.toISOString(),
+  });
+  taskWaiter.notify(old.id);
   return task;
 }
 

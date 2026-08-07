@@ -22,6 +22,7 @@ import type {
   TaskCompletion,
   TaskCompletionOverride,
   TaskSelection,
+  TaskHold,
   TaskState,
   TaskSummary,
   TaskScope,
@@ -668,6 +669,107 @@ export class StateStore {
     `).run(project, next.scheme, next.state, next.builtAt, next.fileCount, next.symbolCount, next.pendingProse, next.updatedAt);
   }
 
+  /**
+   * Parks a resumable task behind a hold: the row moves to `pending` and the
+   * hold records when the sweep should next look. Guarded to the same states
+   * `resume` accepts — a hold is a deferred resume, never a pause of live work.
+   */
+  armTaskHold(hold: TaskHold): Task {
+    let armed = false;
+    this.transaction(() => {
+      const changed = this.database.query(`
+        UPDATE tasks SET state = 'pending', updated_at = ?
+        WHERE id = ? AND state IN ('failed', 'cancelled', 'blocked')
+      `).run(hold.updatedAt, hold.taskId);
+      if (changed.changes !== 1) {
+        throw new Error(`task cannot be held: ${hold.taskId}`);
+      }
+      this.database.query(`
+        INSERT INTO task_holds(
+          task_id, verb, args_json, start_at, await_profile, await_model,
+          next_check_at, expires_at, probe_count, note, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(task_id) DO UPDATE SET
+          verb = excluded.verb, args_json = excluded.args_json,
+          start_at = excluded.start_at, await_profile = excluded.await_profile,
+          await_model = excluded.await_model, next_check_at = excluded.next_check_at,
+          expires_at = excluded.expires_at, probe_count = excluded.probe_count,
+          note = excluded.note, updated_at = excluded.updated_at
+      `).run(
+        hold.taskId, hold.verb, JSON.stringify(hold.args), hold.startAt ?? null,
+        hold.awaitProfile ?? null, hold.awaitModel ?? null, hold.nextCheckAt,
+        hold.expiresAt, hold.probeCount, hold.note, hold.createdAt, hold.updatedAt,
+      );
+      this.addTaskEvent(hold.taskId, "hold_armed", "pending", { note: hold.note });
+      armed = true;
+    });
+    if (!armed) throw new Error(`task cannot be held: ${hold.taskId}`);
+    return this.getTask(hold.taskId)!;
+  }
+
+  getTaskHold(taskId: string): TaskHold | undefined {
+    const row = this.database.query<TaskHoldRow, [string]>(
+      "SELECT * FROM task_holds WHERE task_id = ?",
+    ).get(taskId);
+    return row ? taskHoldFromRow(row) : undefined;
+  }
+
+  /** Holds the sweep should evaluate now, oldest first so releases keep arm order. */
+  dueTaskHolds(now: string): TaskHold[] {
+    return this.database.query<TaskHoldRow, [string]>(
+      "SELECT * FROM task_holds WHERE next_check_at <= ? ORDER BY created_at",
+    ).all(now).map(taskHoldFromRow);
+  }
+
+  touchTaskHold(taskId: string, nextCheckAt: string, probeCount?: number): void {
+    this.database.query(`
+      UPDATE task_holds
+      SET next_check_at = ?, probe_count = COALESCE(?, probe_count), updated_at = ?
+      WHERE task_id = ?
+    `).run(nextCheckAt, probeCount ?? null, new Date().toISOString(), taskId);
+  }
+
+  /**
+   * Deletes the hold and reports whether this call claimed it. The delete is
+   * the atomic claim: two sweep passes racing over one due hold cannot both
+   * see `true`, so only one of them releases the task.
+   */
+  dropTaskHold(
+    taskId: string,
+    event: "hold_released" | "hold_released_late" | "hold_expired" | "hold_dropped",
+    payload: Record<string, unknown> = {},
+  ): boolean {
+    let claimed = false;
+    this.transaction(() => {
+      const changed = this.database.query("DELETE FROM task_holds WHERE task_id = ?").run(taskId);
+      if (changed.changes !== 1) return;
+      const state = this.database.query<{ state: TaskState }, [string]>(
+        "SELECT state FROM tasks WHERE id = ?",
+      ).get(taskId)?.state ?? "pending";
+      this.addTaskEvent(taskId, event, state, payload);
+      claimed = true;
+    });
+    return claimed;
+  }
+
+  /**
+   * Lands a held task `blocked` when its hold gave up — expiry or the probe
+   * cap. `blocked` rather than `cancelled` so a task that silently never ran
+   * stays in front of a human instead of joining the quiet ledger.
+   */
+  blockHeldTask(taskId: string, reason: string): void {
+    const now = new Date().toISOString();
+    const completion: TaskCompletion = { blocked: true, code: "cancelled", reason };
+    this.transaction(() => {
+      const changed = this.database.query(`
+        UPDATE tasks SET state = 'blocked', error = ?, completion_json = ?, updated_at = ?
+        WHERE id = ? AND state IN ('pending', 'failed')
+      `).run(reason, JSON.stringify(completion), now, taskId);
+      if (changed.changes !== 1) return;
+      this.addTaskEvent(taskId, "blocked", "blocked", { error: reason, completion });
+    });
+  }
+
   createTask(task: Task): void {
     this.database.query(`
       INSERT INTO tasks(
@@ -839,9 +941,10 @@ export class StateStore {
       const changed = this.database.query(`
         UPDATE tasks
         SET state = ?, error = ?, completion_json = ?, updated_at = ?
-        WHERE id = ? AND state IN ('queued', 'running', 'needs_input', 'blocked')
+        WHERE id = ? AND state IN ('queued', 'pending', 'running', 'needs_input', 'blocked')
       `).run(state, reason, JSON.stringify(completion), now, id);
       if (changed.changes !== 1) return;
+      this.database.query("DELETE FROM task_holds WHERE task_id = ?").run(id);
       this.addTaskEvent(id, state, state, { error: reason, completion });
       cancelled = true;
     });
@@ -1055,7 +1158,9 @@ export class StateStore {
       // `completed` is here and not on handoff: resume reopens the session that
       // holds the finished run's context, which is the whole point of following
       // one up. The finished result is not lost — closeAttempt files it first.
-      if (!current || !["failed", "cancelled", "blocked", "completed"].includes(current.state)) {
+      // `pending` is here for the hold sweep: releasing a held task replays the
+      // stored resume, and the row is `pending` at that moment.
+      if (!current || !["failed", "cancelled", "blocked", "completed", "pending"].includes(current.state)) {
         throw new Error(`task cannot be resumed: ${id}`);
       }
       const attempts = this.closeAttempt(id, now);
@@ -1067,7 +1172,7 @@ export class StateStore {
             grant_id = COALESCE(?, grant_id),
             allow_questions = COALESCE(?, allow_questions), updated_at = ?
         WHERE id = ?
-          AND state IN ('failed', 'cancelled', 'blocked', 'completed')
+          AND state IN ('failed', 'cancelled', 'blocked', 'completed', 'pending')
       `).run(
         JSON.stringify(attempts),
         updates.timeoutMs ?? null,
@@ -1750,6 +1855,38 @@ function memoryFromRow(row: {
  * map must not be able to fail a dispatch or a query, and a row that survived
  * a write bug or a hand edit is exactly the kind of damage that could.
  */
+interface TaskHoldRow {
+  task_id: string;
+  verb: string;
+  args_json: string;
+  start_at: string | null;
+  await_profile: string | null;
+  await_model: string | null;
+  next_check_at: string;
+  expires_at: string;
+  probe_count: number;
+  note: string;
+  created_at: string;
+  updated_at: string;
+}
+
+function taskHoldFromRow(row: TaskHoldRow): TaskHold {
+  return {
+    taskId: row.task_id,
+    verb: row.verb as TaskHold["verb"],
+    args: JSON.parse(row.args_json) as TaskHold["args"],
+    ...(row.start_at ? { startAt: row.start_at } : {}),
+    ...(row.await_profile ? { awaitProfile: row.await_profile } : {}),
+    ...(row.await_model ? { awaitModel: row.await_model } : {}),
+    nextCheckAt: row.next_check_at,
+    expiresAt: row.expires_at,
+    probeCount: row.probe_count,
+    note: row.note,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
 function contextFileFromRow(row: ContextFileRow): ContextFile {
   let symbols: ContextFile["symbols"] = [];
   try {

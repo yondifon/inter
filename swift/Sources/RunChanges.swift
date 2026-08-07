@@ -154,8 +154,8 @@ struct RunChangesPanel: View {
         HStack(alignment: .top, spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Changed files").scaledFont(.callout, weight: .semibold)
-                if let summary {
-                    Text(summary)
+                if !changes.files.isEmpty {
+                    summary
                         .scaledFont(.caption2, design: .monospaced, monospacedDigit: true)
                         .foregroundStyle(.secondary)
                 }
@@ -169,14 +169,17 @@ struct RunChangesPanel: View {
     }
 
     /// How much the run changed, in the same tally the hunks below are marked
-    /// with. Absent while there is nothing to count.
-    private var summary: String? {
-        guard !changes.files.isEmpty else { return nil }
+    /// with.
+    private var summary: Text {
         let count = changes.files.count
-        var parts = ["\(count) file\(count == 1 ? "" : "s")"]
-        if changes.added > 0 { parts.append("+\(changes.added)") }
-        if changes.removed > 0 { parts.append("−\(changes.removed)") }
-        return parts.joined(separator: " · ")
+        var result = Text("\(count) file\(count == 1 ? "" : "s")")
+        if changes.added > 0 {
+            result = result + Text(" · ") + Text("+\(changes.added)").foregroundColor(DiffTint.added)
+        }
+        if changes.removed > 0 {
+            result = result + Text(" · ") + Text("−\(changes.removed)").foregroundColor(DiffTint.removed)
+        }
+        return result
     }
 
     @ViewBuilder private var content: some View {
@@ -282,9 +285,8 @@ private struct RunFileRow: View {
                     }
                 },
                 trailing: {
-                    Text(tally)
+                    tally
                         .scaledFont(.caption2, design: .monospaced, monospacedDigit: true)
-                        .foregroundStyle(.secondary)
                         .layoutPriority(1)
                 }
             )
@@ -307,11 +309,21 @@ private struct RunFileRow: View {
 
     /// The same `+`/`−` the lines below are marked with, counted. A file the
     /// run rewrote to the same text has neither, and says so in words.
-    private var tally: String {
-        var parts: [String] = []
-        if file.added > 0 { parts.append("+\(file.added)") }
-        if file.removed > 0 { parts.append("−\(file.removed)") }
-        return parts.isEmpty ? "no lines changed" : parts.joined(separator: " ")
+    private var tally: Text {
+        guard file.added > 0 || file.removed > 0 else {
+            return Text("no lines changed").foregroundColor(.secondary)
+        }
+        var result = Text("")
+        if file.added > 0 {
+            result = result + Text("+\(file.added)").foregroundColor(DiffTint.added)
+        }
+        if file.added > 0, file.removed > 0 {
+            result = result + Text(" ").foregroundColor(.secondary)
+        }
+        if file.removed > 0 {
+            result = result + Text("−\(file.removed)").foregroundColor(DiffTint.removed)
+        }
+        return result
     }
 
     private var accessibilityLabel: String {

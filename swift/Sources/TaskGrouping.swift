@@ -252,7 +252,7 @@ enum TaskOrganizer {
     /// Wants a person first, live work next, the settled ledger after, unknown last.
     private static let statusOrder: [TaskState] = [
         .needsInput, .blocked,
-        .running, .queued, .answered,
+        .running, .queued, .pending, .answered,
         .completed, .failed, .cancelled,
         .unknown,
     ]
@@ -262,7 +262,7 @@ enum TaskOrganizer {
     /// closes the list. Unknown goes last like every other order.
     private static let priorityOrder: [TaskState] = [
         .needsInput, .blocked, .failed,
-        .running, .answered, .queued,
+        .running, .answered, .queued, .pending,
         .completed, .cancelled,
         .unknown,
     ]

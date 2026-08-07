@@ -386,16 +386,16 @@ private struct DiffLineRow: View {
 
     private var tint: Color {
         switch line.kind {
-        case .added: .green
-        case .removed: .red
+        case .added: DiffTint.added
+        case .removed: DiffTint.removed
         default: .secondary
         }
     }
 
     private var fill: Color {
         switch line.kind {
-        case .added: .green.opacity(0.12)
-        case .removed: .red.opacity(0.12)
+        case .added: DiffTint.added.opacity(0.12)
+        case .removed: DiffTint.removed.opacity(0.12)
         default: .clear
         }
     }

@@ -169,6 +169,15 @@ struct SystemSelectionHider: NSViewRepresentable {
     }
 }
 
+/// The diff's own colors — added lines and their counts read green, removed
+/// lines and their counts read red, everywhere a diff appears. One pair so a
+/// count next to a file never lands on a different green than the lines it
+/// is counting.
+enum DiffTint {
+    static let added = Color.green
+    static let removed = Color.red
+}
+
 /// The trace's one stroke: a 2pt rule that stands in for a container. Signals,
 /// quotes, and handoffs draw one of these on the page's edge instead of a
 /// filled surface — the color is all that varies.
@@ -389,13 +398,14 @@ struct SidebarSectionLabel: View {
 /// Task lifecycle presentation. One source of truth so a state reads the same
 /// way in the sidebar, the detail header, and the timeline.
 enum TaskState: String {
-    case queued, running, needsInput = "needs_input", answered, blocked, completed, failed, cancelled, unknown
+    case queued, pending, running, needsInput = "needs_input", answered, blocked, completed, failed, cancelled, unknown
 
     init(_ raw: String) { self = TaskState(rawValue: raw) ?? .unknown }
 
     var label: String {
         switch self {
         case .queued: "Queued"
+        case .pending: "Waiting"
         case .running: "Running"
         case .needsInput: "Needs input"
         case .answered: "Answered"
@@ -416,7 +426,9 @@ enum TaskState: String {
         case .blocked: Color(nsColor: .systemOrange)
         case .cancelled: .secondary
         case .needsInput: .blue
-        case .running, .answered: .secondary
+        // Real work with a real future, not a hole in the list — so not the
+        // tertiary grey queued uses.
+        case .running, .answered, .pending: .secondary
         case .queued, .unknown: Color(nsColor: .tertiaryLabelColor)
         }
     }
@@ -427,7 +439,8 @@ enum TaskState: String {
         switch self {
         case .running: .pulse
         case .completed, .blocked, .needsInput: .filled
-        case .failed, .queued, .answered, .cancelled, .unknown: .ring
+        // A ring, not a pulse: nothing is running while a task waits.
+        case .failed, .queued, .pending, .answered, .cancelled, .unknown: .ring
         }
     }
 
@@ -442,9 +455,10 @@ enum TaskState: String {
         case .failed: "exclamationmark.triangle"
         case .blocked: "hand.raised"
         case .cancelled: "xmark"
-        case .needsInput: "questionmark.circle"
+        case .needsInput: "questionmark"
         case .answered: "arrow.turn.down.right"
         case .running: "circle.dotted"
+        case .pending: "clock"
         case .queued: "circle"
         case .unknown: "minus"
         }
@@ -459,7 +473,7 @@ enum TaskState: String {
             return false
         case .blocked, .failed, .cancelled:
             return false
-        case .needsInput, .answered, .queued, .unknown:
+        case .needsInput, .answered, .queued, .pending, .unknown:
             return true
         }
     }

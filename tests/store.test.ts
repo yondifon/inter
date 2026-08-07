@@ -1315,6 +1315,7 @@ describe("SQLite state store", () => {
       { version: 12, name: "profile failure network code" },
       { version: 13, name: "task token usage" },
       { version: 14, name: "project context maps" },
+      { version: 15, name: "task holds" },
     ]);
     const taskColumns = new Set(migrated.query<{ name: string }, []>(
       "PRAGMA table_info(tasks)",

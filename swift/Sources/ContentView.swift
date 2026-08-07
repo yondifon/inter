@@ -103,17 +103,17 @@ struct ContentView: View {
                                 .listRowBackground(sidebarRowFill(selected: selection == .task(task.id)))
                                 .contextMenu {
                                     if canComplete(task) {
-                                        Button("Mark as completed", systemImage: "checkmark.circle") {
+                                        Button("Mark as completed", systemImage: "checkmark") {
                                             taskPendingComplete = task.id
                                         }
                                     }
                                     if canCancel(task) {
-                                        Button("Cancel Task", systemImage: "xmark.circle", role: .destructive) {
+                                        Button("Cancel Task", systemImage: "xmark", role: .destructive) {
                                             taskPendingCancel = task.id
                                         }
                                     }
                                     if canResume(task) {
-                                        Button("Resume", systemImage: "arrow.clockwise.circle") {
+                                        Button("Resume", systemImage: "arrow.clockwise") {
                                             Task { await performResume(task.id) }
                                         }
                                     }
@@ -156,6 +156,9 @@ struct ContentView: View {
                 } footer: {
                     loadMoreFooter
                 }
+                // It is the only section, so a disclosure control on its header
+                // would toggle nothing worth toggling.
+                .collapsible(false)
             }
             .listStyle(.sidebar)
             .animation(.easeOut(duration: 0.2), value: visibleTasks)
@@ -342,11 +345,13 @@ struct ContentView: View {
     /// Context menu entries mirror the detail header's preconditions, so a menu
     /// never offers an action the broker would reject.
     private func canCancel(_ task: TaskListItem) -> Bool {
-        [.queued, .running, .needsInput, .blocked].contains(TaskState(task.state))
+        [.queued, .pending, .running, .needsInput, .blocked].contains(TaskState(task.state))
     }
 
     private func canResume(_ task: TaskListItem) -> Bool {
-        [.failed, .cancelled, .blocked].contains(TaskState(task.state))
+        // Resuming a waiting task is its "start now": the broker drops the
+        // hold and replays the stored resume immediately.
+        [.failed, .cancelled, .blocked, .pending].contains(TaskState(task.state))
     }
 
     /// A task that will not end on its own can be force-settled — the broker
@@ -482,7 +487,7 @@ struct ContentView: View {
                     .truncationMode(.tail)
             }
         } label: {
-            Image(systemName: viewMenuIsActive ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
+            Image(systemName: "line.3.horizontal.decrease")
                 .font(sidebarIconFont())
                 .imageScale(.large)
                 .foregroundStyle(Color.primary)
@@ -680,7 +685,7 @@ private struct UpdateBanner: View {
                     .scaledFont(.caption)
                     .foregroundStyle(.secondary)
             } else {
-                Image(systemName: "arrow.down.circle.fill")
+                Image(systemName: "arrow.down")
                     .scaledFont(.callout)
                     .foregroundStyle(.tint)
                 Text("Update available — \(commit.map { String($0.prefix(7)) } ?? "new commit") on remote")
@@ -721,7 +726,7 @@ private struct InstallResultsView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     ForEach(Array(results.enumerated()), id: \.offset) { _, result in
                         HStack(alignment: .center, spacing: 8) {
-                            Image(systemName: result.success ? "checkmark.circle.fill" : "xmark.circle.fill")
+                            Image(systemName: result.success ? "checkmark" : "xmark")
                                 .foregroundStyle(result.success ? .green : .red)
                                 .accessibilityHidden(true)
                             VStack(alignment: .leading, spacing: 2) {

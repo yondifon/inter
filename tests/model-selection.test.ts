@@ -388,7 +388,8 @@ describe("the caller-named pair is advised, never blocked", () => {
     expect(audit.rejected.map(({ stage }) => stage)).toEqual(["policy"]);
     expect(audit.warnings.some((warning) => warning.includes("overrode the project's routing policy")))
       .toBe(true);
-    expect(audit.policyPath).toBe("/project/.inter.toml");
+    // The policy file's own path is broker-internal config, never surfaced to a caller.
+    expect(audit).not.toHaveProperty("policyPath");
   });
 
   test("an account with almost nothing left warns and is still dispatched to", () => {

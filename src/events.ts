@@ -869,6 +869,11 @@ function lifecycleTitle(type: string): string {
     events_truncated: "Event capture limit reached",
     event_dropped: "Large event skipped",
     handed_off: "Handed off to another profile",
+    hold_armed: "Waiting to start",
+    hold_released: "Started",
+    hold_released_late: "Started late",
+    hold_expired: "Hold expired",
+    hold_dropped: "Hold removed",
     handoff_brief: "Handoff brief built",
     scope_refusal: "Write refused by scope" } as Record<string, string>)[type] ?? humanize(type);
 }

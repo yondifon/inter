@@ -34,6 +34,7 @@ const MIGRATIONS = [
   [12, "profile failure network code"],
   [13, "task token usage"],
   [14, "project context maps"],
+  [15, "task holds"],
 ] as const;
 
 /**
@@ -74,7 +75,7 @@ export function migrateDatabase(db: Database): { needsSessionBackfill: boolean }
       prompt TEXT NOT NULL,
       cwd TEXT NOT NULL,
       state TEXT NOT NULL CHECK(state IN (
-        'queued','running','needs_input','answered','blocked','completed','failed','cancelled'
+        'queued','pending','running','needs_input','answered','blocked','completed','failed','cancelled'
       )),
       output TEXT NOT NULL DEFAULT '',
       error TEXT,
@@ -164,6 +165,21 @@ export function migrateDatabase(db: Database): { needsSessionBackfill: boolean }
       PRIMARY KEY(cwd, path)
     );
     CREATE INDEX IF NOT EXISTS context_files_touched ON context_files(cwd, touched_at DESC);
+    CREATE TABLE IF NOT EXISTS task_holds (
+      task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+      verb TEXT NOT NULL CHECK(verb IN ('resume')),
+      args_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(args_json)),
+      start_at TEXT,
+      await_profile TEXT,
+      await_model TEXT,
+      next_check_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      probe_count INTEGER NOT NULL DEFAULT 0,
+      note TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS task_holds_due ON task_holds(next_check_at);
     INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (1, 'profiles tasks and events');
   `);
   const columns = new Set(db.query<{ name: string }, []>(
@@ -238,6 +254,7 @@ export function migrateDatabase(db: Database): { needsSessionBackfill: boolean }
   }
   widenProviderCheck(db);
   widenProfileFailureCodeCheck(db);
+  widenTaskStateCheck(db);
   const backfilled = db.query<{ version: number }, []>(
     "SELECT version FROM schema_migrations WHERE version = 5",
   ).get();
@@ -275,6 +292,34 @@ function widenProviderCheck(db: Database): void {
     FROM profiles;
     DROP TABLE profiles;
     ALTER TABLE profiles_v2 RENAME TO profiles;
+  `);
+}
+
+// Same rebuild dance for the tasks state CHECK, which predates 'pending'.
+// The tasks table has grown columns through ALTERs since its CREATE, so the
+// rebuild derives both the new table's SQL and the copy column list from the
+// live schema instead of pinning either here.
+function widenTaskStateCheck(db: Database): void {
+  const existing = db.query<{ sql: string }, []>(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'tasks'",
+  ).get();
+  if (!existing || existing.sql.includes("'pending'")) return;
+  const widened = existing.sql
+    .replace(/^CREATE TABLE "?tasks"?/, "CREATE TABLE tasks_v2")
+    .replace("'queued'", "'queued','pending'");
+  if (!widened.includes("'pending'")) {
+    throw new Error("tasks table CHECK could not be widened to accept 'pending'");
+  }
+  const columns = db.query<{ name: string }, []>("PRAGMA table_info(tasks)")
+    .all().map(({ name }) => `"${name}"`).join(", ");
+  rebuildTable(db, `
+    ${widened};
+    INSERT INTO tasks_v2(${columns}) SELECT ${columns} FROM tasks;
+    DROP TABLE tasks;
+    ALTER TABLE tasks_v2 RENAME TO tasks;
+    CREATE INDEX IF NOT EXISTS tasks_parent ON tasks(parent_task_id);
+    CREATE INDEX IF NOT EXISTS tasks_updated_at ON tasks(updated_at DESC, id DESC);
+    CREATE INDEX IF NOT EXISTS tasks_profile_updated ON tasks(profile_id, updated_at DESC);
   `);
 }
 

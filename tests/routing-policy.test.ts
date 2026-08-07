@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,7 +12,17 @@ import {
 
 const roots: string[] = [];
 
+// Policy resolution reads `~/.inter.toml` as its user layer, so an empty temp
+// home keeps these tests independent of the machine's real dotfiles.
+const realHome = process.env.HOME;
+beforeEach(() => {
+  const home = mkdtempSync(join(tmpdir(), "inter-policy-home-"));
+  roots.push(home);
+  process.env.HOME = home;
+});
+
 afterEach(() => {
+  process.env.HOME = realHome;
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 

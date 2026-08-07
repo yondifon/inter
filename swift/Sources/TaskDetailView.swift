@@ -48,7 +48,6 @@ struct TaskDetail: View {
     @State private var loading = true
     @State private var loadFailed = false
     @State private var showingTechnicalEvents = false
-    @State private var showingRunFacts = false
     @State private var confirmingCancel = false
     @State private var showingResumeSheet = false
     @State private var showingFollowUpSheet = false
@@ -297,27 +296,15 @@ struct TaskDetail: View {
                 // — and spelling it out again cost a chip that resized between
                 // states and shoved every chip right of it.
                 Spacer(minLength: 8)
-                if let resumeCommand {
-                    CopyIconButton(
-                        text: resumeCommand,
-                        label: "Copy resume command — \(resumeCommand)",
-                        symbol: "doc.on.clipboard"
-                    )
-                    .font(.system(size: 12 * uiScale))
-                }
                 if canResume || canFollowUp {
                     if resumeInFlight {
                         ProgressView().controlSize(.small)
                             .frame(width: 24 * uiScale, height: 24 * uiScale)
                             .help(canFollowUp ? "Sending…" : "Resuming task…")
                     } else if canFollowUp {
-                        IconButton(symbol: "arrow.turn.down.right", label: "Follow up") {
-                            showingFollowUpSheet = true
-                        }
-                        .font(.system(size: 12 * uiScale))
+                        HeaderTextButton(label: "Follow up") { showingFollowUpSheet = true }
                     } else {
-                        IconButton(symbol: "arrow.clockwise", label: "Resume task") { resumeAction() }
-                            .font(.system(size: 12 * uiScale))
+                        HeaderTextButton(label: "Resume") { resumeAction() }
                     }
                 }
                 if canCancel {
@@ -326,25 +313,30 @@ struct TaskDetail: View {
                             .frame(width: 24 * uiScale, height: 24 * uiScale)
                             .help("Cancelling task…")
                     } else {
-                        IconButton(symbol: "xmark.octagon", label: "Cancel task", tint: AnyShapeStyle(.red)) {
+                        HeaderTextButton(label: "Cancel", tint: AnyShapeStyle(.red)) {
                             confirmingCancel = true
                         }
-                        .font(.system(size: 12 * uiScale))
                     }
                 }
                 IconButton(
-                    symbol: "sidebar.right",
+                    symbol: "plusminus",
                     label: showingChanges ? "Hide changed files" : "Show changed files",
                     tint: showingChanges ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary)
                 ) {
                     withAnimation(.easeOut(duration: 0.2)) { showingChanges.toggle() }
                 }
                 .font(.system(size: 12 * uiScale))
-                IconButton(symbol: "ellipsis", label: "Run details", rotation: .degrees(90)) {
-                    showingRunFacts.toggle()
+                Menu {
+                    taskActionsMenu
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .rotationEffect(.degrees(90))
                 }
-                .font(.system(size: 12 * uiScale))
-                .popover(isPresented: $showingRunFacts, arrowEdge: .bottom) { runFactsPopover }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .foregroundStyle(.secondary)
+                .help("More")
+                .accessibilityLabel("More")
             }
             HStack(spacing: 8) {
                 // Worker and model share one chip: the list the reader clicked from
@@ -353,7 +345,7 @@ struct TaskDetail: View {
                     if let provider = worker?.provider {
                         ProviderLogo(provider: provider, size: 7 * uiScale)
                     } else {
-                        Image(systemName: "person.crop.circle")
+                        Image(systemName: "person")
                             .font(.system(size: 6 * uiScale, weight: .medium))
                     }
                 }
@@ -373,44 +365,34 @@ struct TaskDetail: View {
         }
     }
 
-    /// Only the identifiers worth copying. Worker and model live in the header, so
-    /// repeating them here would make the reader check two places for one fact; the
-    /// folder repeats because the header shows it shortened and unselectable.
-    private var runFactsPopover: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            TaskFactRow(icon: "number", label: "Task", value: shortTaskId, full: taskId, copy: taskId)
-            if let sessionId {
-                TaskFactRow(
-                    icon: "terminal",
-                    label: "Session",
-                    value: middleTruncated(sessionId, maxChars: 20),
-                    full: sessionId,
-                    copy: sessionId
-                )
-            }
-            TaskFactRow(
-                icon: "folder",
-                label: "Folder",
-                value: middleTruncated(resolvedCwd, maxChars: 28),
-                full: resolvedCwd,
-                copy: resolvedCwd
-            )
-            Divider()
-            TaskFactActionRow(icon: "folder", label: "Open folder") {
-                NSWorkspace.shared.open(URL(fileURLWithPath: resolvedCwd))
-            }
-            TaskFactActionRow(
-                icon: resolvedArchivedAt == nil ? "archivebox" : "arrow.uturn.backward",
-                label: resolvedArchivedAt == nil ? "Archive task" : "Restore task"
-            ) {
-                setArchived(taskId, resolvedArchivedAt == nil)
-            }
+    /// The task's remaining actions, grouped like Claude Code's session menu: plain
+    /// text rows, thin separators between groups, nothing that needs an icon to be
+    /// read. Worker and model live in the header, so they are not repeated here.
+    /// A native `Menu` rather than a hand-built popover — the real `NSMenu` chrome
+    /// already reads as belonging to macOS (no vibrant-material glitch to work
+    /// around), and it gets keyboard navigation and right-click placement for free.
+    @ViewBuilder
+    private var taskActionsMenu: some View {
+        Button("Copy task ID") { copyToPasteboard(taskId) }
+        if let sessionId {
+            Button("Copy session ID") { copyToPasteboard(sessionId) }
         }
-        .padding(10)
-        // A popover defaults to a vibrant material, which samples whatever is behind
-        // the window — over a dark desktop the panel turned into a grey gradient.
-        .background(Surface.panel)
-        .presentationBackground(Surface.panel)
+        Button("Copy folder path") { copyToPasteboard(resolvedCwd) }
+        if let resumeCommand {
+            Button("Copy resume command") { copyToPasteboard(resumeCommand) }
+        }
+        Divider()
+        Button("Open folder") {
+            NSWorkspace.shared.open(URL(fileURLWithPath: resolvedCwd))
+        }
+        Button(resolvedArchivedAt == nil ? "Archive task" : "Restore task") {
+            setArchived(taskId, resolvedArchivedAt == nil)
+        }
+    }
+
+    private func copyToPasteboard(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
     }
 
     /// A profile with its own `command` is opaque to us, so no resume line is
@@ -427,12 +409,13 @@ struct TaskDetail: View {
 
     /// Cancel preconditions on the broker: the worker is live or about to be.
     private var canCancel: Bool {
-        [.queued, .running, .needsInput, .blocked].contains(state)
+        [.queued, .pending, .running, .needsInput, .blocked].contains(state)
     }
 
     /// Resume preconditions on the broker: the run settled without completing.
+    /// A waiting task resumes too — that is its "start now".
     private var canResume: Bool {
-        [.failed, .cancelled, .blocked].contains(state)
+        [.failed, .cancelled, .blocked, .pending].contains(state)
     }
 
     /// A finished run has nothing to retry, but its session still holds what the
@@ -629,13 +612,6 @@ struct TaskDetail: View {
             if seen.insert(path).inserted { ordered.append(path) }
         }
         return ordered
-    }
-
-    /// The UUID's first hyphen-delimited segment — enough to tell tasks apart
-    /// at a glance; the full id stays in the copy button.
-    private var shortTaskId: String {
-        guard let end = taskId.firstIndex(of: "-") else { return taskId }
-        return String(taskId[..<end])
     }
 
     private var state: TaskState { TaskState(resolvedTaskState) }
@@ -1324,10 +1300,7 @@ private struct ActivityWorkRow: View {
                         .truncationMode(presentation.type == "file" ? .middle : .tail)
                 }
                 ForEach(chips, id: \.self) { chip in
-                    Text(chip).scaledFont(.caption, weight: .medium, design: .monospaced)
-                        .lineLimit(1)
-                        .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(Surface.sunken, in: RoundedRectangle(cornerRadius: Radius.small))
+                    ActivityChip(text: chip)
                 }
             }
             .textSelection(.enabled)
@@ -1347,6 +1320,42 @@ private struct ActivityWorkRow: View {
             presentation.exitCode.flatMap { $0 == 0 ? nil : "exit \($0)" },
             presentation.outcome,
         ].compactMap { $0 }
+    }
+}
+
+/// A pill beside a row's subject — a change summary, an exit code, a patch's
+/// signed line count. One step below the subject on the type ladder: the
+/// subject is what the row is naming, the badge is what became of it. A
+/// signed tally (`+6 −2`, the broker's own format for a patch's line count)
+/// reads in the same colors as the diff it counts; anything else is plain.
+private struct ActivityChip: View {
+    let text: String
+
+    var body: some View {
+        content
+            .scaledFont(.caption2, weight: .medium, design: .monospaced)
+            .lineLimit(1)
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(Surface.sunken, in: RoundedRectangle(cornerRadius: Radius.small))
+    }
+
+    @ViewBuilder private var content: some View {
+        if let tally = ActivityChip.tally(text) {
+            Text("+\(tally.added)").foregroundColor(DiffTint.added)
+                + Text(" ")
+                + Text("−\(tally.removed)").foregroundColor(DiffTint.removed)
+        } else {
+            Text(text)
+        }
+    }
+
+    private static func tally(_ text: String) -> (added: Int, removed: Int)? {
+        let parts = text.split(separator: " ")
+        guard parts.count == 2,
+              parts[0].hasPrefix("+"), let added = Int(parts[0].dropFirst()),
+              parts[1].hasPrefix("−"), let removed = Int(parts[1].dropFirst())
+        else { return nil }
+        return (added, removed)
     }
 }
 
@@ -1577,10 +1586,7 @@ struct TaskEventPresentationView: View {
                         .lineLimit(1).truncationMode(.middle)
                 }
                 ForEach([presentation.change, presentation.outcome].compactMap { $0 }, id: \.self) { chip in
-                    Text(chip).scaledFont(.caption, weight: .medium, design: .monospaced)
-                        .lineLimit(1)
-                        .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(Surface.sunken, in: RoundedRectangle(cornerRadius: Radius.small))
+                    ActivityChip(text: chip)
                 }
             }
             .textSelection(.enabled)
@@ -1792,67 +1798,20 @@ private struct TaskSectionTabs: View {
     }
 }
 
-private struct TaskFactRow: View {
-    let icon: String
+/// A top-level header action, rendered as text rather than a glyph — a button
+/// that says "Cancel" needs no icon to explain it.
+private struct HeaderTextButton: View {
     let label: String
-    let value: String
-    /// The untruncated value for the tooltip and VoiceOver, when `value` is an
-    /// abbreviated display form; the copy button always copies the full value.
-    var full: String? = nil
-    var copy: String?
-
-    @Environment(\.uiScale) private var uiScale
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: icon)
-                .font(.system(size: 9 * uiScale, weight: .medium))
-                .foregroundStyle(.tertiary)
-                .help(label)
-                .accessibilityHidden(true)
-            Text(value)
-                .scaledFont(.caption, design: .monospaced)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .textSelection(.enabled)
-                .help(full.map { "\(label) — \($0)" } ?? label)
-                .accessibilityLabel("\(label): \(full ?? value)")
-            Spacer(minLength: 0)
-            if let copy {
-                CopyIconButton(text: copy, label: "Copy \(label.lowercased())")
-                    .font(.system(size: 9 * uiScale, weight: .medium))
-            }
-        }
-    }
-}
-
-/// A launch or mutate control, distinct from the copy rows above it — those
-/// read a value, this one acts. Rendered as a plain full-width button so it
-/// never reads like the copy-to-clipboard rows.
-private struct TaskFactActionRow: View {
-    let icon: String
-    let label: String
+    var tint: AnyShapeStyle = AnyShapeStyle(.secondary)
     let action: () -> Void
-
-    @Environment(\.uiScale) private var uiScale
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 8) {
-                Image(systemName: icon)
-                    .font(.system(size: 9 * uiScale, weight: .medium))
-                    .foregroundStyle(.primary)
-                    .accessibilityHidden(true)
-                Text(label)
-                    .scaledFont(.caption)
-                    .foregroundStyle(.primary)
-                Spacer(minLength: 0)
-            }
-            .contentShape(Rectangle())
+            Text(label)
+                .scaledFont(.caption, weight: .medium)
         }
         .buttonStyle(.plain)
-        .help(label)
+        .foregroundStyle(tint)
         .accessibilityLabel(label)
     }
 }

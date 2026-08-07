@@ -64,7 +64,7 @@ struct ProfileFormView: View {
                             } else {
                                 TextField("Value or path", text: $row.value).scaledFont(.body, design: .monospaced)
                             }
-                            IconButton(symbol: "minus.circle", label: "Remove \(row.key.isEmpty ? "variable" : row.key)") {
+                            IconButton(symbol: "minus", label: "Remove \(row.key.isEmpty ? "variable" : row.key)") {
                                 envRows.removeAll { $0.id == row.id }
                             }
                         }

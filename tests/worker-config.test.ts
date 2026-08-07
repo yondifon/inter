@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,7 +7,17 @@ import { DEFAULT_WORKER_RULES, loadWorkerRules, WorkerRulesError } from "../src/
 
 const roots: string[] = [];
 
+// Worker rules and routing policy both read `~/.inter.toml` as their user
+// layer, so an empty temp home keeps these tests off the machine's dotfiles.
+const realHome = process.env.HOME;
+beforeEach(() => {
+  const home = mkdtempSync(join(tmpdir(), "inter-worker-home-"));
+  roots.push(home);
+  process.env.HOME = home;
+});
+
 afterEach(() => {
+  process.env.HOME = realHome;
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 

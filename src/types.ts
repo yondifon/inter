@@ -1,6 +1,12 @@
 export type Provider = "claude" | "codex" | "opencode" | "antigravity" | "pi";
 export type TaskState =
   | "queued"
+  /**
+   * Held: the broker knows when or on what condition this task starts, and it
+   * is not before then. Survives restarts untouched — recovery names its states
+   * explicitly and this is not one of them. Release moves it to `queued`.
+   */
+  | "pending"
   | "running"
   | "needs_input"
   /**
@@ -150,7 +156,6 @@ export interface TaskSelection {
   rejected?: SelectionRejection[];
   /** Total rejections, since `rejected` carries only the most informative few. */
   rejectedCount?: number;
-  policyPath?: string;
   warnings?: string[];
 }
 
@@ -187,6 +192,33 @@ export interface TaskAttempt {
    */
   profileId?: string;
   sessionId?: string;
+}
+
+/**
+ * Why a `pending` task has not started. One row per task; the sweep in
+ * `src/holds.ts` is the only reader of `nextCheckAt`.
+ */
+export interface TaskHold {
+  taskId: string;
+  /** What release calls. v1 arms holds only from resume. */
+  verb: "resume";
+  /** Arguments release replays, currently the stored resume instruction. */
+  args: { instruction?: string };
+  /** Clock condition, ISO: not before this instant. */
+  startAt?: string;
+  /** Availability condition: hold until this profile+model is not unavailable. */
+  awaitProfile?: string;
+  awaitModel?: string;
+  /** When the sweep should next evaluate this hold, ISO. */
+  nextCheckAt: string;
+  /** Give-up time, ISO. Past it the hold is dropped and the task lands blocked. */
+  expiresAt: string;
+  /** Releases that ran into a still-limited account and re-armed. Capped at 3. */
+  probeCount: number;
+  /** The one human line every surface shows, written at arm time. */
+  note: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface MemoryEntry {
