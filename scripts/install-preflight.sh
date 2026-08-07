@@ -9,7 +9,8 @@
 #      start the new broker anyway.
 #
 # INTER_INSTALL_YES=1 skips the prompt: an install that cannot be overridden
-# is worse than one that destroys work quietly.
+# is worse than one that destroys work quietly. When stdin is a terminal the
+# wait is bounded, so a session with no one at it cannot hang the install.
 bin=$1
 install_yes=$2
 
@@ -23,13 +24,16 @@ case "$code" in
     ;;
 esac
 
-if [ -t 0 ] && [ -z "$install_yes" ]; then
-  printf 'Stop them and continue? [y/N] '
-  read -r reply
-  case "$reply" in
-    [yY]*) exit 0 ;;
-    *) echo "install aborted"; exit 1 ;;
-  esac
+if [ -z "$install_yes" ]; then
+  if [ -t 0 ]; then
+    printf 'Stop them and continue? [y/N] '
+    read -r -t "${INTER_PROMPT_TIMEOUT:-15}" reply
+    case "$reply" in
+      [yY]*) exit 0 ;;
+    esac
+    echo "install aborted"
+    exit 1
+  fi
+  echo "install: continuing anyway (non-interactive)"
 fi
-echo "install: continuing anyway (non-interactive)"
 exit 0

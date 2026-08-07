@@ -375,10 +375,10 @@ struct TaskDetail: View {
                 Menu {
                     taskActionsMenu
                 } label: {
-                    Image(systemName: "ellipsis")
-                        .rotationEffect(.degrees(90))
+                    Image(systemName: "ellipsis.vertical")
                 }
                 .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
                 .fixedSize()
                 .foregroundStyle(.secondary)
                 .help("More")

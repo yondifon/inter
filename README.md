@@ -59,7 +59,11 @@ confinement are macOS-only.
    ```
    This builds the broker binary and the Swift app, copies both into
    `/Applications/Inter.app`, links `inter` onto your PATH, and launches the
-   app.
+   app. Run it as your own user, never with sudo — an app installed as root
+   cannot be opened from your session, and the install refuses to run that
+   way. If the install says Inter is installed but could not be launched
+   (typical over SSH or in a session without a GUI), open Inter from
+   Applications and its broker starts with it.
 4. **Confirm it is running.** `make install` already checks this and prints
    `install: broker verified`; to check again later:
    ```bash

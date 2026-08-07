@@ -2,7 +2,7 @@ DIST := dist
 APP := $(DIST)/Inter.app
 BINDIR ?= $(HOME)/.local/bin
 
-.PHONY: dev server swift-build app-icon bundle install clean
+.PHONY: dev server swift-build app-icon bundle guard install clean
 
 dev:
 	cd swift && swift run
@@ -40,7 +40,10 @@ bundle: server swift-build app-icon
 		> $(APP)/Contents/Info.plist
 	codesign --force --deep --sign - $(APP)
 
-install: bundle
+guard:
+	@sh scripts/install-guard.sh
+
+install: guard bundle
 	@# Retiring the broker stops whatever it is driving, so say what that costs
 	@# before doing it rather than leaving the wreckage to be discovered. On a
 	@# terminal this asks; in a script it warns and continues, because an install
@@ -54,7 +57,6 @@ install: bundle
 	pkill -f 'Contents/Resources/inter-server' || true
 	rm -rf /Applications/Inter.app
 	cp -R $(APP) /Applications/Inter.app
-	open /Applications/Inter.app
 	@# The bundle is the app, not the CLI: link the broker binary onto PATH so
 	@# `inter` names this install. BINDIR overrides where the link lands, and a
 	@# link directory missing from PATH is a warning, never a failure.
@@ -67,28 +69,39 @@ install: bundle
 	@# open(1) returning is not success: a cold launch takes seconds to answer,
 	@# and a broker that survived the pkill answers with the previous build's
 	@# contract. Success is the port answering with exactly what the binary
-	@# just built reports; anything else fails the install loudly.
-	@health=""; \
-	for i in $$(seq 1 30); do \
-		health=$$(curl -sf --max-time 2 http://127.0.0.1:7331/health 2>/dev/null) && break; \
-		sleep 1; \
-	done; \
-	if [ -z "$$health" ]; then \
-		echo "install: FAILED: no broker answered /health on port 7331 within 30s of launch"; \
-		exit 1; \
-	fi; \
-	built=$$($(DIST)/inter-server version); \
-	if [ "$$health" != "$$built" ]; then \
-		echo "install: FAILED: the broker on port 7331 is not the build just installed"; \
-		echo "  /health answers: $$health"; \
-		echo "  just built:      $$built"; \
-		exit 1; \
-	fi; \
-	echo "install: broker verified — $$health"; \
-	if [ -S "$$HOME/.inter/inter.sock" ]; then \
-		echo "install: event socket bound — $$HOME/.inter/inter.sock"; \
+	@# just built reports; anything else fails the install loudly. When open(1)
+	@# itself refuses (no GUI session to ask — over SSH, say), the app is on
+	@# disk, the broker check is skipped, and the message says how to open it.
+	@launched=1; \
+	open /Applications/Inter.app || launched=0; \
+	if [ "$$launched" -eq 0 ]; then \
+		echo "install: Inter is installed at /Applications/Inter.app but could not be launched"; \
+		echo "install: open(1) had no GUI session to ask — typical over SSH or in a session without one"; \
+		echo "install: open Inter from Applications; the broker check was skipped"; \
 	else \
-		echo "install: warning: no event socket at $$HOME/.inter/inter.sock; watch will fall back to database polling (harmless, but push is off)"; \
+		health=""; \
+		for i in $$(seq 1 30); do \
+			health=$$(curl -sf --max-time 2 http://127.0.0.1:7331/health 2>/dev/null) && break; \
+			sleep 1; \
+		done; \
+		if [ -z "$$health" ]; then \
+			echo "install: FAILED: the app was launched but no broker answered /health on port 7331 within 30s"; \
+			echo "install: open Inter from Applications and check whether the broker comes up"; \
+			exit 1; \
+		fi; \
+		built=$$($(DIST)/inter-server version); \
+		if [ "$$health" != "$$built" ]; then \
+			echo "install: FAILED: the broker on port 7331 is not the build just installed"; \
+			echo "  /health answers: $$health"; \
+			echo "  just built:      $$built"; \
+			exit 1; \
+		fi; \
+		echo "install: broker verified — $$health"; \
+		if [ -S "$$HOME/.inter/inter.sock" ]; then \
+			echo "install: event socket bound — $$HOME/.inter/inter.sock"; \
+		else \
+			echo "install: warning: no event socket at $$HOME/.inter/inter.sock; watch will fall back to database polling (harmless, but push is off)"; \
+		fi; \
 	fi
 
 clean:
