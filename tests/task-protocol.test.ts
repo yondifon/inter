@@ -16,9 +16,20 @@ const DEFAULT_PREAMBLE = `Do.
 This reporting protocol is part of the task contract.
 File access is OS-enforced relative to your working directory — readable: src/**, src/api.ts; writable: src/api.ts. Access outside that scope fails with "operation not permitted"; report it as out of scope instead of retrying.
 
+## How to work
+The rules below are set by your user and apply to how you carry out this task.
+1. Blocked means stop. A command that will not run, a missing credential, an account or signup, a permission denial, a path outside your scope, a decision this brief does not answer — stop and report it, naming the blocker and the one decision you need.
+2. Do not work around a blocker. No retry loops, no second tool for the same job, no creating accounts, no linking or authenticating anything, no editing outside your write scope, no faking or stubbing the result.
+3. One attempt, then report. If the same command fails twice the same way, that is the answer — quote the error exactly and stop.
+4. Partial work is a valid result. Finish what is unblocked, then report what you stopped on. Never discard finished work to keep trying.
+5. Never report a result you did not observe. If you could not run a check, say so and say why, instead of describing an outcome you did not see.
+6. Build on what is already there. When the brief says something is done, read it and continue from it instead of starting over.
+
 ## User rules
 The rules below are set by your user and apply to every delegation. Honor them for your final report.
 1. Open your final report with \`## TL;DR\` — 1-3 plain-language sentences stating what was done or found and the outcome. Detail follows after; this applies to your final answer, not to intermediate messages.
+2. Write that TL;DR as bullets — one idea per line, never a paragraph — and make it stand alone: no bullet may need the detail below it to make sense.
+3. Cover in it, one line each: the verdict, done or partial or blocked; what changed or was found, with every changed path on its own line; each check you ran and its result, quoting any failure exactly; and what is left, broken or uncertain, or "nothing".
 If a product choice, secret, destructive action, or new authority is required, stop and end with: INTER_NEEDS_INPUT: <one clear question>
 If the requested work is fully done, end with: INTER_RESULT: completed
 If work cannot be completed, end with: INTER_BLOCKED: <permission_denied|needs_authority|worker_error> | <short reason>
@@ -76,10 +87,10 @@ describe("configured worker rules", () => {
     expect(prompt).not.toContain("## User rules");
   });
 
-  test("number report rules after the TL;DR rule", () => {
+  test("number report rules after the TL;DR rule and the shipped ones", () => {
     const prompt = workerPrompt("Do.", true, scope, withRules({ report: ["Cite code as path:line.", "No tables."] }));
-    expect(prompt).toContain("2. Cite code as path:line.");
-    expect(prompt).toContain("3. No tables.");
+    expect(prompt).toContain("4. Cite code as path:line.");
+    expect(prompt).toContain("5. No tables.");
   });
 
   test("renumber report rules from one when the TL;DR rule is off", () => {
@@ -89,14 +100,14 @@ describe("configured worker rules", () => {
   });
 
   test("put conduct rules in their own section between the scope line and the report rules", () => {
-    const prompt = workerPrompt("Do.", true, scope, withRules({ conduct: ["Run bun test before reporting."] }));
+    const prompt = workerPrompt("Do.", true, scope, withRules({ builtins: false, conduct: ["Run bun test before reporting."] }));
     expect(prompt).toContain("## How to work\nThe rules below are set by your user and apply to how you carry out this task.\n1. Run bun test before reporting.");
     expect(prompt.indexOf("## How to work")).toBeGreaterThan(prompt.indexOf("operation not permitted"));
     expect(prompt.indexOf("## User rules")).toBeGreaterThan(prompt.indexOf("## How to work"));
   });
 
   test("leave no conduct heading behind when none are configured", () => {
-    expect(workerPrompt("Do.", true, scope, withRules({ report: ["Be brief."] })))
+    expect(workerPrompt("Do.", true, scope, withRules({ builtins: false, report: ["Be brief."] })))
       .not.toContain("## How to work");
   });
 
@@ -125,6 +136,69 @@ describe("configured worker rules", () => {
   test("never offer the question marker when the task disallows questions", () => {
     const prompt = workerPrompt("Do.", false, scope, withRules({ report: ["Ask me anything you like."] }));
     expect(prompt).not.toContain("INTER_NEEDS_INPUT");
+  });
+});
+
+describe("shipped conduct rules", () => {
+  test("reach a worker with nothing configured and nothing in the caller's prompt", () => {
+    const prompt = workerPrompt("Do.", true, scope);
+    expect(prompt).toContain("## How to work");
+    expect(prompt).toContain("Blocked means stop.");
+    expect(prompt).toContain("Do not work around a blocker.");
+    expect(prompt).toContain("One attempt, then report.");
+    expect(prompt).toContain("Partial work is a valid result.");
+    expect(prompt).toContain("Never report a result you did not observe.");
+    expect(prompt).toContain("Build on what is already there.");
+  });
+
+  test("keep their numbering when a project adds its own", () => {
+    const prompt = workerPrompt("Do.", true, scope, withRules({ conduct: ["Run bun test before reporting."] }));
+    expect(prompt).toContain("1. Blocked means stop.");
+    expect(prompt).toContain("7. Run bun test before reporting.");
+  });
+
+  test("sit above the status lines like any other rule", () => {
+    const prompt = workerPrompt("Do.", true, scope);
+    expect(prompt.indexOf("Blocked means stop.")).toBeGreaterThan(prompt.indexOf("operation not permitted"));
+    expect(prompt.indexOf("Blocked means stop.")).toBeLessThan(prompt.indexOf("INTER_RESULT: completed"));
+  });
+});
+
+describe("shipped report shape", () => {
+  test("tells the worker what the TL;DR carries", () => {
+    const prompt = workerPrompt("Do.", true, scope);
+    expect(prompt).toContain("2. Write that TL;DR as bullets");
+    expect(prompt).toContain("3. Cover in it, one line each: the verdict");
+    expect(prompt).toContain("every changed path on its own line");
+  });
+
+  test("goes away with the TL;DR rule it describes", () => {
+    const prompt = workerPrompt("Do.", true, scope, withRules({ tldr: false, report: ["Answer in French."] }));
+    expect(prompt).not.toContain("Write that TL;DR as bullets");
+    expect(prompt).toContain("1. Answer in French.");
+  });
+});
+
+describe("builtins = false", () => {
+  test("drops both shipped lists and leaves the project's own rules alone", () => {
+    const prompt = workerPrompt(
+      "Do.",
+      true,
+      scope,
+      withRules({ builtins: false, conduct: ["Run bun test before reporting."], report: ["Cite code as path:line."] }),
+    );
+    expect(prompt).not.toContain("Blocked means stop.");
+    expect(prompt).not.toContain("Write that TL;DR as bullets");
+    expect(prompt).toContain("1. Run bun test before reporting.");
+    expect(prompt).toContain("1. Open your final report with `## TL;DR`");
+    expect(prompt).toContain("2. Cite code as path:line.");
+  });
+
+  test("still ships the protocol the worker signs off with", () => {
+    const prompt = workerPrompt("Do.", true, scope, withRules({ builtins: false }));
+    expect(prompt).toContain("File access is OS-enforced relative to your working directory");
+    expect(prompt).toContain("If the requested work is fully done, end with: INTER_RESULT: completed");
+    expect(prompt).not.toContain("## How to work");
   });
 });
 

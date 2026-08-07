@@ -4,6 +4,7 @@ import {
   parseCodexRateLimits,
   withObservedRateLimit,
   withUpstreamRateLimits,
+  worstWindowUsedPercent,
   type ProfileUsage,
 } from "../src/usage";
 
@@ -35,12 +36,39 @@ describe("claude usage parsing", () => {
 
   test("keeps windows without reset text and ignores prose", () => {
     expect(parseClaudeUsage("Current week (Opus): 5% used\n83% of your usage was at >150k context"))
-      .toEqual([{ label: "Current week (Opus)", kind: "week", usedPercent: 5 }]);
+      .toEqual([{ label: "Current week (Opus)", kind: "week", usedPercent: 5, model: "opus" }]);
   });
 
   test("returns nothing for unusable output", () => {
     expect(parseClaudeUsage("")).toEqual([]);
     expect(parseClaudeUsage("no limits here")).toEqual([]);
+  });
+});
+
+describe("headroom for one model", () => {
+  const usage: ProfileUsage = {
+    profile: "default",
+    provider: "claude",
+    supported: true,
+    source: "claude-cli",
+    windows: parseClaudeUsage([
+      "Current session: 15% used",
+      "Current week (all models): 2% used",
+      "Current week (Opus): 99% used",
+    ].join("\n")),
+  };
+
+  test("a spent model window governs that model alone", () => {
+    expect(worstWindowUsedPercent(usage, "claude-opus-5")).toBe(99);
+    expect(worstWindowUsedPercent(usage, "sonnet")).toBe(15);
+  });
+
+  test("asked without a model, only account-wide windows count", () => {
+    expect(worstWindowUsedPercent(usage)).toBe(15);
+  });
+
+  test("reports nothing rather than zero when there is no window to read", () => {
+    expect(worstWindowUsedPercent({ ...usage, windows: [] })).toBeUndefined();
   });
 });
 
@@ -107,6 +135,28 @@ describe("codex rate limit parsing", () => {
     });
     expect(withObservedRateLimit(usage, [{ ...failure, code: "auth" as const }])).toEqual(usage);
     expect(withObservedRateLimit(usage, [{ ...failure, profileId: "codex" }])).toEqual(usage);
+  });
+
+  test("names the model the rate limit was metered against", () => {
+    const usage: ProfileUsage = {
+      profile: "default",
+      provider: "claude",
+      supported: true,
+      source: "claude-cli",
+      windows: [{ label: "Current session", kind: "session", usedPercent: 15 }],
+    };
+    const limited = withObservedRateLimit(usage, [{
+      profileId: "default",
+      code: "rate_limit" as const,
+      message: "rate_limit",
+      failedAt: "2026-08-06T20:00:00.000Z",
+      consecutiveFailures: 1,
+      model: "fable",
+    }]);
+    expect(limited.lastRateLimit).toMatchObject({ model: "fable" });
+    // The account window stays what it is: a rate-limited model does not make
+    // the account read as spent.
+    expect(worstWindowUsedPercent(limited)).toBe(15);
   });
 
   test("ignores lines without usable rate limits", () => {

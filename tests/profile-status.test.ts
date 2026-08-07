@@ -135,6 +135,73 @@ describe("profile status normalization", () => {
     });
   });
 
+  test("a later success retires a failure the settle path never cleared", () => {
+    const failure: ProfileFailure = {
+      profileId: profile.id,
+      code: "auth",
+      message: "invalid api key",
+      failedAt: "2026-07-30T09:00:00.000Z",
+      consecutiveFailures: 4,
+    };
+    const after: ProfileSuccess[] = [{ profileId: profile.id, succeededAt: "2026-07-30T11:00:00.000Z" }];
+    expect(normalizeProfileStatuses([profile], [model], [failure], after, now)[0]).toMatchObject({
+      state: "available",
+      reason: "Observed successful generation",
+      checkedAt: after[0]!.succeededAt,
+    });
+
+    // The order is what decides it, not the mere existence of a success.
+    const before: ProfileSuccess[] = [{ profileId: profile.id, succeededAt: "2026-07-30T08:00:00.000Z" }];
+    expect(normalizeProfileStatuses([profile], [model], [failure], before, now)[0]).toMatchObject({
+      state: "unavailable",
+      reason: "Observed authentication failure",
+    });
+  });
+
+  test("a rate limit takes out the model that hit it, not the whole account", () => {
+    const fable: ModelInfo = { ...model, id: "fable", label: "Fable" };
+    const failure: ProfileFailure = {
+      profileId: profile.id,
+      code: "rate_limit",
+      message: "429",
+      failedAt: "2026-07-30T11:55:00.000Z",
+      consecutiveFailures: 1,
+      retryAt: "2026-07-30T12:05:00.000Z",
+      model: "fable",
+    };
+    const statuses = normalizeProfileStatuses([profile], [model, fable], [failure], [], now);
+    expect(statuses.find(({ model: id }) => id === "fable")).toMatchObject({ state: "unavailable" });
+    expect(statuses.find(({ model: id }) => id === "opus")).toMatchObject({ state: "unknown" });
+  });
+
+  test("keeps an unattributed rate limit account-wide", () => {
+    const fable: ModelInfo = { ...model, id: "fable", label: "Fable" };
+    const failure: ProfileFailure = {
+      profileId: profile.id,
+      code: "rate_limit",
+      message: "429",
+      failedAt: "2026-07-30T11:55:00.000Z",
+      consecutiveFailures: 1,
+      retryAt: "2026-07-30T12:05:00.000Z",
+    };
+    const statuses = normalizeProfileStatuses([profile], [model, fable], [failure], [], now);
+    expect(statuses.map(({ state }) => state)).toEqual(["unavailable", "unavailable"]);
+  });
+
+  test("keeps auth failures account-wide even when a model is on record", () => {
+    const fable: ModelInfo = { ...model, id: "fable", label: "Fable" };
+    const failure: ProfileFailure = {
+      profileId: profile.id,
+      code: "auth",
+      message: "invalid api key",
+      failedAt: "2026-07-30T11:00:00.000Z",
+      consecutiveFailures: 1,
+      model: "fable",
+    };
+    const statuses = normalizeProfileStatuses([profile], [model, fable], [failure], [], now);
+    expect(statuses.map(({ state }) => state)).toEqual(["unavailable", "unavailable"]);
+  });
+
   test("refresh only invokes model catalog discovery", async () => {
     const queries: unknown[] = [];
     const statuses = await listProfileStatuses(

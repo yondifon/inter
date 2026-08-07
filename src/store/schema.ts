@@ -33,6 +33,7 @@ const MIGRATIONS = [
   [11, "task selection records"],
   [12, "profile failure network code"],
   [13, "task token usage"],
+  [14, "project context maps"],
 ] as const;
 
 /**
@@ -113,7 +114,8 @@ export function migrateDatabase(db: Database): { needsSessionBackfill: boolean }
       message TEXT NOT NULL,
       failed_at TEXT NOT NULL,
       consecutive_failures INTEGER NOT NULL,
-      retry_at TEXT
+      retry_at TEXT,
+      model TEXT
     );
     CREATE TABLE IF NOT EXISTS memories (
       cwd TEXT NOT NULL,
@@ -134,6 +136,34 @@ export function migrateDatabase(db: Database): { needsSessionBackfill: boolean }
       use_count INTEGER NOT NULL DEFAULT 1
     );
     CREATE INDEX IF NOT EXISTS scope_grants_cwd ON scope_grants(cwd, last_used_at DESC);
+    CREATE TABLE IF NOT EXISTS context_maps (
+      cwd TEXT PRIMARY KEY,
+      scheme INTEGER NOT NULL,
+      state TEXT NOT NULL CHECK(state IN ('building','ready','partial')),
+      built_at TEXT,
+      file_count INTEGER NOT NULL DEFAULT 0,
+      symbol_count INTEGER NOT NULL DEFAULT 0,
+      pending_prose INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS context_files (
+      cwd TEXT NOT NULL,
+      path TEXT NOT NULL,
+      lang TEXT NOT NULL,
+      purpose TEXT,
+      lines INTEGER NOT NULL,
+      size INTEGER NOT NULL,
+      mtime_ms INTEGER NOT NULL,
+      digest TEXT NOT NULL,
+      symbols_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(symbols_json)),
+      status TEXT NOT NULL CHECK(status IN ('mapped','unparsed')),
+      touch_count INTEGER NOT NULL DEFAULT 0,
+      touched_at TEXT,
+      mapped_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY(cwd, path)
+    );
+    CREATE INDEX IF NOT EXISTS context_files_touched ON context_files(cwd, touched_at DESC);
     INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (1, 'profiles tasks and events');
   `);
   const columns = new Set(db.query<{ name: string }, []>(
@@ -199,6 +229,9 @@ export function migrateDatabase(db: Database): { needsSessionBackfill: boolean }
       WHERE code = 'rate_limit'
     `);
   }
+  if (failureColumns.size > 0 && !failureColumns.has("model")) {
+    db.exec("ALTER TABLE profile_failures ADD COLUMN model TEXT");
+  }
   for (const [version, name] of MIGRATIONS) {
     db.query("INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)")
       .run(version, name);
@@ -260,12 +293,13 @@ function widenProfileFailureCodeCheck(db: Database): void {
       message TEXT NOT NULL,
       failed_at TEXT NOT NULL,
       consecutive_failures INTEGER NOT NULL,
-      retry_at TEXT
+      retry_at TEXT,
+      model TEXT
     );
     INSERT INTO profile_failures_v2(
-      profile_id, code, message, failed_at, consecutive_failures, retry_at
+      profile_id, code, message, failed_at, consecutive_failures, retry_at, model
     )
-    SELECT profile_id, code, message, failed_at, consecutive_failures, retry_at
+    SELECT profile_id, code, message, failed_at, consecutive_failures, retry_at, model
     FROM profile_failures;
     DROP TABLE profile_failures;
     ALTER TABLE profile_failures_v2 RENAME TO profile_failures;

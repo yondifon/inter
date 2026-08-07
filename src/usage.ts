@@ -13,6 +13,12 @@ export interface UsageWindow {
   windowMinutes?: number;
   resetsAt?: string;
   resetsText?: string;
+  /**
+   * The model family this window meters, when the provider scopes it to one —
+   * claude's `Current week (Opus)`. Absent means the window covers the account,
+   * and an account window says nothing about any single model's own limit.
+   */
+  model?: string;
 }
 
 export interface ProfileUsage {
@@ -29,6 +35,8 @@ export interface ProfileUsage {
     failedAt: string;
     consecutiveFailures: number;
     retryAt?: string;
+    /** The model that was metered, when the run recorded one. */
+    model?: string;
   };
   observedRateLimits?: Array<{
     upstream: string;
@@ -42,10 +50,12 @@ export interface UsageQuery {
   profile?: string;
   provider?: Provider;
   refresh?: boolean;
+  /** Project to scope the profile set to; omitted reads user-level profiles. */
+  cwd?: string;
 }
 
 export async function listProfileUsage(query: UsageQuery = {}): Promise<ProfileUsage[]> {
-  const config = await loadConfig();
+  const config = await loadConfig(query.cwd);
   const profiles = config.profiles.filter((profile) =>
     profile.enabled &&
     (!query.profile || profile.id === query.profile) &&
@@ -107,6 +117,7 @@ export function withObservedRateLimit(usage: ProfileUsage, failures: ProfileFail
       failedAt: failure.failedAt,
       consecutiveFailures: failure.consecutiveFailures,
       ...(failure.retryAt ? { retryAt: failure.retryAt } : {}),
+      ...(failure.model ? { model: failure.model } : {}),
     },
   };
 }
@@ -180,11 +191,16 @@ export function parseClaudeUsage(text: string): UsageWindow[] {
     const match = line.trim().match(/^(.+?):\s+(\d+)% used(?:\s*·\s*resets\s+(.+))?$/);
     if (!match) continue;
     const label = match[1]!.trim();
+    // `Current week (Opus)` meters one model family; `Current week (all models)`
+    // is the account's own window and qualifies nothing.
+    const scoped = label.match(/\(([^)]+)\)\s*$/)?.[1]?.trim();
+    const model = scoped && !/^all models$/i.test(scoped) ? scoped.toLowerCase() : undefined;
     windows.push({
       label,
       kind: /session/i.test(label) ? "session" : /week/i.test(label) ? "week" : "other",
       usedPercent: Number(match[2]),
       ...(match[3] ? { resetsText: match[3].trim() } : {}),
+      ...(model ? { model } : {}),
     });
   }
   return windows;
@@ -278,9 +294,19 @@ function codexWindow(label: string, window: CodexWindow | null | undefined): Usa
   };
 }
 
-export function worstWindowUsedPercent(usage: ProfileUsage): number | undefined {
-  if (usage.windows.length === 0) return undefined;
-  return Math.max(...usage.windows.map(({ usedPercent }) => usedPercent));
+/**
+ * How much of the capacity that governs `model` is already spent. Windows the
+ * provider scoped to a different model family are excluded: an Opus week at 99%
+ * is not a reason to stop dispatching Sonnet. Asked without a model, only the
+ * account-wide windows count, so the number never passes a single model's limit
+ * off as the account's.
+ */
+export function worstWindowUsedPercent(usage: ProfileUsage, model?: string): number | undefined {
+  const windows = usage.windows.filter(({ model: scope }) =>
+    !scope || (model !== undefined && model.toLowerCase().includes(scope))
+  );
+  if (windows.length === 0) return undefined;
+  return Math.max(...windows.map(({ usedPercent }) => usedPercent));
 }
 
 function unsupported(profile: Profile, reason: string): ProfileUsage {

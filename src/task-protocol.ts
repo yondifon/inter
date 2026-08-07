@@ -1,5 +1,5 @@
 import type { CompletionCode, TaskCompletion, TaskScope } from "./types";
-import { DEFAULT_WORKER_RULES, type WorkerRules } from "./worker-config";
+import { BUILTIN_CONDUCT, BUILTIN_REPORT, DEFAULT_WORKER_RULES, type WorkerRules } from "./worker-config";
 
 // Models format their sign-off. Bold, backticks, a bullet, a block quote or a
 // heading in front of the marker used to read as "no marker at all", which
@@ -47,7 +47,13 @@ export function workerPrompt(
   scope?: TaskScope,
   rules: WorkerRules = DEFAULT_WORKER_RULES,
 ): string {
-  const report = [...(rules.tldr ? [tldrRule(rules.tldrSentences, rules.tldrTemplate)] : []), ...rules.report];
+  const conduct = [...(rules.builtins ? BUILTIN_CONDUCT : []), ...rules.conduct];
+  // The built-in report rules describe the TL;DR block, so they go wherever it
+  // does — a project that turned the TL;DR off is not told how to shape one.
+  const report = [
+    ...(rules.tldr ? [tldrRule(rules.tldrSentences, rules.tldrTemplate), ...(rules.builtins ? BUILTIN_REPORT : [])] : []),
+    ...rules.report,
+  ];
   return [
     prompt,
     "",
@@ -57,7 +63,7 @@ export function workerPrompt(
     ...section(
       "## How to work",
       "The rules below are set by your user and apply to how you carry out this task.",
-      rules.conduct,
+      conduct,
     ),
     ...section(
       "## User rules",

@@ -292,13 +292,28 @@ struct SpendTotals: Codable, Equatable, Sendable {
     var costUsd: Double
     var tokens: Int
     var since: String
+    /// Finished tasks whose provider never reported a price, which makes the
+    /// total a floor. Absent on a broker predating this field.
+    var unpricedTasks: Int?
 
     /// `$1.24 · 847k` for the sidebar footer. Nil when the window saw no
     /// activity at all — an ambient "$0.00 · 0" next to the broker dot would
     /// read as broken, not calm.
     var summary: String? {
         guard costUsd > 0 || tokens > 0 else { return nil }
-        return "\(ActivityFormat.cost(costUsd)) · \(ActivityFormat.count(tokens))"
+        let cost = ActivityFormat.cost(costUsd)
+        let floor = (unpricedTasks ?? 0) > 0 ? "\(cost)+" : cost
+        return "\(floor) · \(ActivityFormat.count(tokens))"
+    }
+
+    /// What the footer says on hover. A trailing `+` is only honest if something
+    /// says what it stands for.
+    var detail: String? {
+        guard let summary = summary else { return nil }
+        let window = "\(summary) over the last 24 hours"
+        guard let unpriced = unpricedTasks, unpriced > 0 else { return window }
+        let tasks = unpriced == 1 ? "1 task" : "\(unpriced) tasks"
+        return "\(window) · cost unknown for \(tasks)"
     }
 }
 

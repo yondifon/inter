@@ -79,6 +79,7 @@ its own runtime, so every command below works with no Bun and no checkout.
 | `inter serve` | Run the broker. The menu-bar app starts it for you. |
 | `inter watch <task-id>...` | Wait for a task; prints one line when it settles. |
 | `inter inflight` | List the tasks still running, so you know what a restart interrupts. |
+| `inter config [cwd]` | Print the effective config for a directory — profiles, routes, worker rules — and which file each setting came from. |
 | `inter version` | Print which build this is. |
 
 ## Following a task
@@ -182,15 +183,64 @@ response payload. Defaults are minimal — `cancel` returns just `id` and
   watch/wait/inspect hierarchy, not a replacement. Research preview; requires
   `--dangerously-load-development-channels`.
 
-## Project routing policy
+## Configuration
 
-Create `.inter.toml` in a project root to constrain automatic model routing for
-that project. Rules name providers and models, never local profile IDs. Inter
-still chooses between matching local accounts using their availability.
+Configuration resolves through three layers, highest first:
+
+1. `<project>/.inter.toml` — the project's own file, resolved from the task's `cwd`
+2. `~/.inter.toml` — your personal config
+3. Inter's built-in defaults — discovered accounts and the shipped worker rules
+
+A missing file at any layer is normal. A file that fails to parse fails the
+read that consulted it, naming the file. `inter config [cwd]` prints the
+effective config for a directory and which file each setting came from.
+
+### Routing policy
+
+A `.inter.toml` constrains which provider/model pairs may run in a project.
+Rules name providers and models, never local profile IDs. Inter still chooses
+between matching local accounts using their availability.
 
 Route names describe the work: `mechanical`, `context`, `build`, `reasoning`,
 `general`. Each route has a provider/model `allow` list and optional
 `preference` and `min_quality`.
+
+Routes layer like everything else: a project file's `[routes]` table merges
+over the user file's, per class. Scalar fields (`preference`, `min_quality`)
+override; an `allow` list the project writes replaces the user's whole list,
+because allow lists are written best-first and merging two would scramble their
+meaning. A class neither file mentions stays unconstrained.
+
+### Profiles
+
+A `[profiles.<id>]` table lets a file take over the profile list and tune
+individual profiles:
+
+```toml
+[profiles.claude-work]
+label = "Work Claude"
+
+[profiles.claude-personal]
+enabled = false
+```
+
+Two rules carry the semantics:
+
+- **A layer's `[profiles]` table replaces the list it sees**: ids it does not
+  mention are disabled in that scope. That is how a project restricts itself to
+  work profiles — it names the ones that may run, and everything below that it
+  does not name stops being usable there. A disabled profile cannot be
+  dispatched to, routed to, or listed in that project.
+- **A named id merges field by field onto the same id below it**: a layer
+  overrides only the fields it writes, so the user file's `label` and the
+  project file's `model` both land. A file may also introduce an id no lower
+  layer has; `provider` is required then, and `model` falls back to the
+  provider's default.
+
+Profiles you manage in the Inter app stay in the app's own store — the file
+layer only reads. The narrowing binds where it matters: `delegate`, `handoff`,
+and every routing read resolve profiles against the task's `cwd`, so a project
+file's list is what a dispatch into that project sees.
 
 ## Docs
 

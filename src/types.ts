@@ -282,3 +282,58 @@ export interface ModelInfo {
   defaultEffort?: string;
   toolCall?: boolean;
 }
+
+/** One top-level declaration the context map knows about. */
+export interface ContextSymbol {
+  line: number;
+  kind: "fn" | "class" | "type" | "const" | "struct" | "enum" | "ext" | "view";
+  name: string;
+  /** Parameter names only, `?` kept; absent when the declaration has none. */
+  params?: string;
+  /** Present only when the source declares a return type. */
+  returns?: string;
+  exported: boolean;
+  /** Null until a describe pass or a worker correction wrote one. */
+  purpose: string | null;
+  /** False when the purpose came from a worker correction or a changed signature. */
+  confirmed: boolean;
+}
+
+/** One mapped file's row in context_files. */
+export interface ContextFile {
+  cwd: string;
+  path: string;
+  lang: "ts" | "swift";
+  purpose: string | null;
+  lines: number;
+  size: number;
+  mtimeMs: number;
+  digest: string;
+  symbols: ContextSymbol[];
+  status: "mapped" | "unparsed";
+  touchCount: number;
+  touchedAt: string | null;
+  mappedAt: string;
+  updatedAt: string;
+}
+
+/** One project's row in context_maps. */
+export interface ContextMapRow {
+  cwd: string;
+  scheme: number;
+  state: "building" | "ready" | "partial";
+  builtAt: string | null;
+  fileCount: number;
+  symbolCount: number;
+  pendingProse: number;
+  updatedAt: string;
+}
+
+/** One cwd's map footprint, sized without loading the rows themselves. */
+export interface ContextFileProject {
+  cwd: string;
+  fileCount: number;
+  symbolCount: number;
+  pendingProse: number;
+  updatedAt: string;
+}

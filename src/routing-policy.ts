@@ -1,7 +1,6 @@
-import { join, resolve } from "node:path";
+import { loadTomlLayers, TomlConfigError, type TomlLayer, type TomlLayers } from "./inter-toml";
 import type { RoutePreference, TaskClass } from "./types";
 
-const POLICY_FILE = ".inter.toml";
 const TASK_CLASSES: TaskClass[] = ["mechanical", "context", "build", "reasoning", "general"];
 const PREFERENCES: RoutePreference[] = ["balanced", "quality", "cost", "speed"];
 
@@ -18,7 +17,10 @@ export interface RoutingPolicyRoute {
 
 export interface RoutingPolicy {
   version: 1;
+  /** The highest file that contributed a route. */
   path: string;
+  /** Every file that contributed a route, highest first. */
+  sources?: string[];
   routes: Partial<Record<TaskClass, RoutingPolicyRoute>>;
 }
 
@@ -33,23 +35,52 @@ export class RoutingPolicyError extends Error {
   }
 }
 
+/**
+ * The effective policy for a cwd: the project file's routes merged over the
+ * user file's, which in turn stands where the project says nothing. Per class,
+ * scalar fields override and `allow` replaces whole — an allow list is written
+ * best-first, so merging two lists would scramble its meaning.
+ */
 export async function loadRoutingPolicy(cwd: string): Promise<RoutingPolicy | undefined> {
-  const path = join(resolve(cwd), POLICY_FILE);
-  let source: string;
+  let layers: TomlLayers;
   try {
-    source = await Bun.file(path).text();
+    layers = await loadTomlLayers(cwd);
   } catch (error) {
-    if (isMissingFile(error)) return undefined;
-    throw error;
+    throw policyLayerError(error);
   }
+  const project = layers.project ? validatePolicy(layers.project.root, layers.project.path) : undefined;
+  const user = layers.user ? validatePolicy(layers.user.root, layers.user.path) : undefined;
+  return mergePolicies(project, user);
+}
 
-  let raw: unknown;
-  try {
-    raw = Bun.TOML.parse(source);
-  } catch (error) {
-    throw new RoutingPolicyError(path, "syntax", errorMessage(error));
+function policyLayerError(error: unknown): unknown {
+  if (error instanceof TomlConfigError) {
+    return new RoutingPolicyError(error.path, error.field, error.message);
   }
-  return validatePolicy(raw, path);
+  return error;
+}
+
+function mergePolicies(
+  project: RoutingPolicy | undefined,
+  user: RoutingPolicy | undefined,
+): RoutingPolicy | undefined {
+  if (!project && !user) return undefined;
+  const classes = new Set<TaskClass>([
+    ...Object.keys(project?.routes ?? {}),
+    ...Object.keys(user?.routes ?? {}),
+  ] as TaskClass[]);
+  const routes: RoutingPolicy["routes"] = {};
+  for (const taskClass of classes) {
+    const p = project?.routes[taskClass];
+    const u = user?.routes[taskClass];
+    routes[taskClass] = {
+      preference: p?.preference ?? u?.preference,
+      minQuality: p?.minQuality ?? u?.minQuality,
+      allow: (p ?? u)!.allow,
+    };
+  }
+  const sources = [project?.path, user?.path].filter((path): path is string => Boolean(path));
+  return { version: 1, path: sources[0]!, sources, routes };
 }
 
 export function routeForTask(
@@ -99,7 +130,7 @@ export function normalizeTaskClass(value: string): TaskClass | undefined {
 
 function validatePolicy(raw: unknown, path: string): RoutingPolicy | undefined {
   const root = expectRecord(raw, path, "root");
-  rejectUnknownFields(root, ["version", "routes", "worker"], path, "root");
+  rejectUnknownFields(root, ["version", "routes", "worker", "profiles"], path, "root");
   // `[worker]` alone is a complete file: prompt rules are read by
   // loadWorkerRules, and a project with no `[routes]` has no routing policy to
   // version or validate.
@@ -200,13 +231,4 @@ function rejectUnknownFields(
 
 function fail(path: string, field: string, message: string): never {
   throw new RoutingPolicyError(path, field, message);
-}
-
-function isMissingFile(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "code" in error &&
-    (error as { code?: unknown }).code === "ENOENT";
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

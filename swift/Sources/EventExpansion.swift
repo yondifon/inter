@@ -35,8 +35,9 @@ enum EventExpansion: Equatable {
             self = .command(command, output)
         } else if EventExpansion.isPlan(event), let raw, let plan = TodoPlan(rawEvent: raw) {
             self = .todo(plan)
-        } else if event.kind == "error" || event.kind == "lifecycle",
-                  let text = event.detail, EventExpansion.isLong(text) {
+        } else if (event.kind == "error" || event.kind == "lifecycle"),
+                  let text = event.detail,
+                  EventExpansion.isResumeEntry(event) || EventExpansion.isLong(text) {
             self = .detail(text)
         } else if event.kind == "file", let raw, let found = ToolContent.read(rawEvent: raw) {
             self = .content(found)
@@ -59,6 +60,13 @@ enum EventExpansion: Equatable {
         event.presentation?.type == "todo"
     }
 
+    /// A task resumed on its existing provider session. The row carries the
+    /// caller's reason when one was given; a retry-style resume with no reason
+    /// stays a plain row.
+    static func isResumeEntry(_ event: TaskEventSnapshot) -> Bool {
+        event.kind == "lifecycle" && event.title == "Resumed"
+    }
+
     /// A clipped line earns its expansion only once it runs past what one line
     /// can hold — the same bar a quotation is held to.
     private static func isLong(_ text: String) -> Bool {
@@ -75,6 +83,7 @@ enum EventExpansion: Equatable {
         let raw = event.rawText ?? ""
         if isProse(event) { return "full text" }
         if isPlan(event) { return "plan" }
+        if isResumeEntry(event) { return "why it was resumed" }
         if event.kind == "error" { return "full error" }
         if event.kind == "lifecycle" { return "full details" }
         if event.kind == "file" {
@@ -121,7 +130,7 @@ enum EventExpansion: Equatable {
             // script spanning lines is more than that line can show.
             return output != nil || command?.contains(where: \.isNewline) == true
         case .prose(let text), .detail(let text):
-            return EventExpansion.isLong(text)
+            return EventExpansion.isResumeEntry(event) || EventExpansion.isLong(text)
         case .content:
             return true
         case .todo:

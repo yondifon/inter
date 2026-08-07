@@ -171,15 +171,16 @@ interface RoutingInputs {
   usage: ProfileUsage[];
 }
 
-/// Everything selection reads about the world, gathered once. The policy comes
-/// from the task's cwd so it is the workspace's own file that decides, never the
-/// directory the broker happened to be launched from.
+/// Everything selection reads about the world, gathered once. The policy and
+/// the profile set come from the task's cwd, so it is the workspace's own
+/// files that decide, never the directory the broker happened to be launched
+/// from.
 async function routingInputs(cwd: string): Promise<RoutingInputs> {
   const [models, config, policy, usage] = await Promise.all([
-    listModels(),
-    loadConfig(),
+    listModels({ cwd }),
+    loadConfig(cwd),
     loadRoutingPolicy(cwd),
-    listProfileUsage().catch(() => [] as ProfileUsage[]),
+    listProfileUsage({ cwd }).catch(() => [] as ProfileUsage[]),
   ]);
   const store = stateStore();
   const statuses = normalizeProfileStatuses(
@@ -290,36 +291,43 @@ export function chooseModel(
   // A provider that reports no usage at all — opencode and pi report none — is
   // unknown headroom, so it is neither filtered nor penalised. Reading a silent
   // provider as spent would exclude the accounts that carry most of the work;
-  // reading it as free would make silence the cheapest thing to buy.
-  const usedByProfile = new Map<string, number>();
-  for (const row of usage) {
-    const worst = worstWindowUsedPercent(row);
-    if (worst !== undefined) usedByProfile.set(row.profile, worst);
+  // reading it as free would make silence the cheapest thing to buy. Headroom is
+  // read per model, because a provider that meters one model family separately
+  // reports a window that governs that family and no other.
+  const usageByProfile = new Map(usage.map((row) => [row.profile, row]));
+  const usedByCandidate = new Map<string, number>();
+  for (const model of available) {
+    const row = usageByProfile.get(model.profileId);
+    const used = row ? worstWindowUsedPercent(row, model.id) : undefined;
+    if (used !== undefined) usedByCandidate.set(statusKey(model.profileId, model.id), used);
   }
-  const exhausted = new Set([...usedByProfile]
-    .filter(([, used]) => used >= NEAR_EXHAUSTED_PERCENT)
-    .map(([profileId]) => profileId));
-  for (const profileId of exhausted) {
-    if (!available.some((model) => model.profileId === profileId)) continue;
+  const usedBy = (model: ModelInfo): number | undefined =>
+    usedByCandidate.get(statusKey(model.profileId, model.id));
+  const isExhausted = (model: ModelInfo): boolean =>
+    (usedBy(model) ?? 0) >= NEAR_EXHAUSTED_PERCENT;
+  for (const [profileId, spent] of groupByProfile(available.filter(isExhausted), usedBy)) {
     warnings.push(
-      `${profileId} has ${100 - usedByProfile.get(profileId)!}% of its usage window left, ` +
-      `too little to finish a task`,
+      `${profileId} has ${100 - Math.min(...spent.map(({ used }) => used))}% left on the window covering ` +
+      `${spent.map(({ id }) => id).join(", ")}, too little to finish a task`,
     );
   }
   // Only automatic routing may lose a candidate to quota. A caller that named
   // the account gets the warning and keeps the dispatch.
   const usable = options.profileId === undefined
     ? available.filter((model) => {
-      if (!exhausted.has(model.profileId)) return true;
-      const used = usedByProfile.get(model.profileId);
-      return reject(model, "quota", `${used}% of the usage window is spent`);
+      if (!isExhausted(model)) return true;
+      return reject(model, "quota", `${usedBy(model)}% of the usage window is spent`);
     })
     : available;
-  for (const [profileId, used] of usedByProfile) {
-    if (used >= 75 && !exhausted.has(profileId) &&
-        usable.some((model) => model.profileId === profileId)) {
-      warnings.push(`profile ${profileId} is ${used}% into a rate-limit window; deprioritized`);
-    }
+  const strained = usable.filter((model) => {
+    const used = usedBy(model);
+    return used !== undefined && used >= 75 && used < NEAR_EXHAUSTED_PERCENT;
+  });
+  for (const [profileId, spent] of groupByProfile(strained, usedBy)) {
+    warnings.push(
+      `${profileId} is ${Math.max(...spent.map(({ used }) => used))}% into the rate-limit window covering ` +
+      `${spent.map(({ id }) => id).join(", ")}; deprioritized`,
+    );
   }
 
   if (usable.length === 0) {
@@ -375,7 +383,7 @@ export function chooseModel(
     return {
       profileId: model.profileId,
       model: model.id,
-      score: score(traits, effectiveFloor, preference) - usagePenalty(usedByProfile.get(model.profileId)),
+      score: score(traits, effectiveFloor, preference) - usagePenalty(usedBy(model)),
       traits,
     };
   }).sort((a, b) =>
@@ -389,7 +397,7 @@ export function chooseModel(
     model.profileId === selected.profileId && model.id === selected.model
   )!;
   const effort = projectEffort(chosen, difficulty);
-  const used = usedByProfile.get(selected.profileId);
+  const used = usedByCandidate.get(statusKey(selected.profileId, selected.model));
   return {
     profileId: selected.profileId,
     model: selected.model,
@@ -452,10 +460,10 @@ export async function auditNamedRoute(
   // wait on providers it is not using. Both queries reject on an unknown or
   // disabled profile, which is `delegate`'s error to report, not the audit's — so
   // the audit reports what it can see and lets the dispatch produce it.
-  const query = { profile: options.profileId };
+  const query = { profile: options.profileId, cwd: options.cwd };
   const [models, config, policy, usage] = await Promise.all([
     listModels(query).catch(() => [] as ModelInfo[]),
-    loadConfig(),
+    loadConfig(options.cwd),
     loadRoutingPolicy(options.cwd),
     listProfileUsage(query).catch(() => [] as ProfileUsage[]),
   ]);
@@ -516,11 +524,12 @@ export function checkNamedRoute(
   }
 
   const measured = usage.find(({ profile }) => profile === profileId);
-  const used = measured ? worstWindowUsedPercent(measured) : undefined;
+  const used = measured ? worstWindowUsedPercent(measured, modelId) : undefined;
   if (used !== undefined && used >= LOW_HEADROOM_PERCENT) {
     if (used >= NEAR_EXHAUSTED_PERCENT) add("quota", `${used}% of the usage window is spent`);
     warnings.push(
-      `${profileId} has ${100 - used}% of its usage window left; the run may stop part-way through.`,
+      `${profileId} has ${100 - used}% left on the window covering ${modelId}; ` +
+      `the run may stop part-way through.`,
     );
   }
 
@@ -738,4 +747,22 @@ function canonical(value: string): string {
 
 function statusKey(profileId: string, modelId: string): string {
   return `${profileId}\0${modelId}`;
+}
+
+/// Quota findings read per model but are said per account: a claude profile
+/// whose session window covers four models would otherwise repeat one number
+/// four times.
+function groupByProfile(
+  models: ModelInfo[],
+  usedBy: (model: ModelInfo) => number | undefined,
+): Map<string, Array<{ id: string; used: number }>> {
+  const groups = new Map<string, Array<{ id: string; used: number }>>();
+  for (const model of models) {
+    const used = usedBy(model);
+    if (used === undefined) continue;
+    const group = groups.get(model.profileId) ?? [];
+    group.push({ id: model.id, used });
+    groups.set(model.profileId, group);
+  }
+  return groups;
 }

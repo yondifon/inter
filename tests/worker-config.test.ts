@@ -31,6 +31,7 @@ allow = [{ provider = "claude", model = "opus" }]
 tldr = true
 tldr_sentences = "2-4"
 tldr_template = "Say hi — {count}."
+builtins = false
 conduct = ["Run bun test before reporting."]
 report = ["Cite code as path:line.", "  No tables.  "]
 `);
@@ -38,6 +39,7 @@ report = ["Cite code as path:line.", "  No tables.  "]
       tldr: true,
       tldrSentences: "2-4",
       tldrTemplate: "Say hi — {count}.",
+      builtins: false,
       conduct: ["Run bun test before reporting."],
       report: ["Cite code as path:line.", "No tables."],
     });
@@ -56,6 +58,15 @@ report = ["Cite code as path:line.", "  No tables.  "]
       ...DEFAULT_WORKER_RULES,
       tldrTemplate: "Custom — {count}.",
     });
+    expect(await loadWorkerRules(projectWith(`[worker]\nbuiltins = false`))).toEqual({
+      ...DEFAULT_WORKER_RULES,
+      builtins: false,
+    });
+  });
+
+  test("ships Inter's own rules unless the project turns them off", async () => {
+    expect(DEFAULT_WORKER_RULES.builtins).toBe(true);
+    expect((await loadWorkerRules(projectWith(`[worker]\nconduct = ["Be brief."]`))).builtins).toBe(true);
   });
 
   test("accepts a bare sentence count and normalizes it", async () => {
@@ -73,6 +84,7 @@ report = ["Cite code as path:line.", "  No tables.  "]
 
   test.each([
     [`[worker]\ntldr = "yes"`, "worker.tldr"],
+    [`[worker]\nbuiltins = "no"`, "worker.builtins"],
     [`[worker]\nreports = ["x"]`, "worker.reports"],
     [`[worker]\ntldr_sentences = 3`, "worker.tldr_sentences"],
     [`[worker]\ntldr_sentences = "many"`, "worker.tldr_sentences"],

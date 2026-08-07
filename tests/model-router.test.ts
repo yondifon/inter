@@ -108,7 +108,36 @@ allow = [{ provider = "claude", model = "opus" }]
       [claudeNearLimit],
     );
     expect(route.profileId).toBe("opencode");
-    expect(route.warnings).toContain("profile claude is 96% into a rate-limit window; deprioritized");
+    expect(route.warnings.some((warning) =>
+      warning.startsWith("claude is 96% into the rate-limit window covering") &&
+      warning.endsWith("; deprioritized")
+    )).toBe(true);
+  });
+
+  test("an exhausted model window leaves the account's other models routable", () => {
+    const opusExhausted = {
+      profile: "claude",
+      provider: "claude" as const,
+      supported: true,
+      source: "claude-cli" as const,
+      windows: [
+        { label: "Current session", kind: "session" as const, usedPercent: 15 },
+        { label: "Current week (Opus)", kind: "week" as const, usedPercent: 99, model: "opus" },
+      ],
+    };
+    const route = chooseModel(
+      "Rename this variable in two files.",
+      models,
+      profiles,
+      { difficulty: "mechanical" },
+      [],
+      undefined,
+      [opusExhausted],
+    );
+    expect(route.model).toBe("haiku");
+    expect(route.quotaUsedPercent).toBe(15);
+    expect(route.rejected.some(({ model, stage }) => model === "opus" && stage === "quota")).toBe(true);
+    expect(route.rejected.some(({ model, stage }) => model === "haiku" && stage === "quota")).toBe(false);
   });
 
   test("uses stronger context comprehension for codebase reading", () => {

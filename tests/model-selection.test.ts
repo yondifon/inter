@@ -206,8 +206,9 @@ describe("remaining usage", () => {
     expect(route.profileId).toBe("opencode");
     expect(route.rejected.some(({ stage, profileId }) => stage === "quota" && profileId === "claude"))
       .toBe(true);
-    expect(route.warnings.some((warning) => warning.includes("1% of its usage window left")))
-      .toBe(true);
+    expect(route.warnings.some((warning) =>
+      warning.startsWith("claude has 1% left on the window covering")
+    )).toBe(true);
   });
 
   test("keeps the account the caller named, however little is left of it", () => {
@@ -396,8 +397,9 @@ describe("the caller-named pair is advised, never blocked", () => {
     ]);
     expect(audit.quotaUsedPercent).toBe(99);
     expect(audit.rejected.map(({ stage }) => stage)).toEqual(["quota"]);
-    expect(audit.warnings.some((warning) => warning.includes("1% of its usage window left")))
-      .toBe(true);
+    expect(audit.warnings.some((warning) =>
+      warning.includes("1% left on the window covering opus")
+    )).toBe(true);
   });
 
   test("a caller effort the model does not accept is warned about, not dropped", () => {

@@ -224,6 +224,31 @@ describe("SQLite state store", () => {
     store.close();
   });
 
+  test("records the resume instruction on the resumed event, not the row", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const failing = task("running");
+    store.createTask(failing);
+    failing.state = "failed";
+    failing.error = "provider timed out";
+    store.saveTask(failing);
+
+    store.resumeTask(failing.id, { instruction: "Finish the remaining work." });
+
+    const resumed = store.listTaskEvents(failing.id).find(({ type }) => type === "resumed");
+    expect(resumed?.payload).toMatchObject({ previousState: "failed", instruction: "Finish the remaining work." });
+    // A retry-style resume carries no instruction key at all, so the app never
+    // offers an expansion that opens onto nothing.
+    const requeued = store.getTask(failing.id)!;
+    requeued.state = "failed";
+    requeued.error = "provider timed out again";
+    store.saveTask(requeued);
+    store.resumeTask(failing.id);
+    const retried = store.listTaskEvents(failing.id).filter(({ type }) => type === "resumed").at(-1);
+    expect(retried?.payload.instruction).toBeUndefined();
+    store.close();
+  });
+
   test("resume holds the profile and session steady where handoff moves them", () => {
     const { db } = paths();
     const spare: Profile = { ...profile, id: "claude-spare", model: "haiku" };
@@ -416,6 +441,53 @@ describe("SQLite state store", () => {
     store.recordTaskCost(work.id, undefined, undefined, 142, 1160);
     const totals = store.spendTotals();
     expect(totals.tokens).toBe(1938 + 113 + 142 + 1160);
+    store.close();
+  });
+
+  test("leaves spend unknown when the run reported turns but no price", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const work = task("running");
+    store.createTask(work);
+
+    store.recordTaskCost(work.id, undefined, 7, 400, 90);
+    const settled = store.getTask(work.id);
+    expect(settled?.turns).toBe(7);
+    expect(settled?.costUsd).toBeUndefined();
+
+    // A later run that does report a price starts from the price, not from a
+    // zero the first run never stated.
+    store.recordTaskCost(work.id, 0.25, 2);
+    expect(store.getTask(work.id)?.costUsd).toBe(0.25);
+    store.close();
+  });
+
+  test("counts settled tasks with no reported price so the total reads as a floor", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const priced = task("completed");
+    const unpriced = task("completed");
+    const running = task("running");
+    for (const row of [priced, unpriced, running]) store.createTask(row);
+    store.recordTaskCost(priced.id, 0.5, 3);
+    store.recordTaskCost(unpriced.id, undefined, 3);
+
+    const totals = store.spendTotals();
+    expect(totals.costUsd).toBe(0.5);
+    // The in-flight task has no price yet either, but it has not finished, so
+    // it is not something the window failed to read.
+    expect(totals.unpricedTasks).toBe(1);
+    store.close();
+  });
+
+  test("attributes a rate limit to the model that hit it", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    store.recordProfileFailure(profile.id, "rate_limit", "429", undefined, "fable");
+    expect(store.listProfileFailures()[0]).toMatchObject({ code: "rate_limit", model: "fable" });
+
+    store.recordProfileFailure(profile.id, "auth", "invalid key");
+    expect(store.listProfileFailures()[0]).not.toHaveProperty("model");
     store.close();
   });
 
@@ -1184,6 +1256,7 @@ describe("SQLite state store", () => {
       { version: 11, name: "task selection records" },
       { version: 12, name: "profile failure network code" },
       { version: 13, name: "task token usage" },
+      { version: 14, name: "project context maps" },
     ]);
     const taskColumns = new Set(migrated.query<{ name: string }, []>(
       "PRAGMA table_info(tasks)",

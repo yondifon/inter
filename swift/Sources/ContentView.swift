@@ -555,14 +555,14 @@ struct ContentView: View {
                 // Cost first since it reads at a glance, tokens after it: at a
                 // narrow sidebar width, tail truncation drops the token count
                 // before it ever touches the dollar figure.
-                if let summary = store.spend?.summary {
+                if let spend = store.spend, let summary = spend.summary {
                     Text(summary)
                         .scaledFont(.caption2, design: .monospaced)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.tail)
-                        .help("\(summary) over the last 24 hours")
-                        .accessibilityLabel("\(summary) over the last 24 hours")
+                        .help(spend.detail ?? summary)
+                        .accessibilityLabel(spend.detail ?? summary)
                 }
             }
             .padding(.horizontal, 8)

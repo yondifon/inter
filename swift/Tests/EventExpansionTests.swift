@@ -133,6 +133,49 @@ final class EventExpansionTests: XCTestCase {
         )
     }
 
+    /// A resumed task carries the reason the caller gave. Even a one-line reason
+    /// is more than the row can show, so the disclosure opens on it.
+    func testResumeEntryOpensOnTheInstruction() {
+        let resumed = event(
+            kind: "lifecycle",
+            title: "Resumed",
+            detail: "Finish the remaining work.",
+            rawText: #"{"previousState":"failed","attempt":2,"instruction":"Finish the remaining work."}"#
+        )
+
+        XCTAssertEqual(EventExpansion(event: resumed), .detail("Finish the remaining work."))
+        XCTAssertTrue(EventExpansion.shouldOfferExpansion(resumed))
+        XCTAssertEqual(
+            EventExpansion.label(for: resumed, expanded: false),
+            "Show why it was resumed"
+        )
+        XCTAssertEqual(
+            EventExpansion.label(for: resumed, expanded: true),
+            "Hide why it was resumed"
+        )
+    }
+
+    /// A multi-line instruction stays whole behind the same disclosure.
+    func testMultiLineResumeInstructionIsOffered() {
+        let resumed = event(kind: "lifecycle", title: "Resumed", detail: "line one\nline two")
+
+        XCTAssertEqual(EventExpansion(event: resumed), .detail("line one\nline two"))
+        XCTAssertTrue(EventExpansion.shouldOfferExpansion(resumed))
+    }
+
+    /// A retry-style resume carries no reason, so nothing is hidden behind the
+    /// row and no disclosure earns its place.
+    func testRetryStyleResumeIsNotExpandable() {
+        let retried = event(
+            kind: "lifecycle",
+            title: "Resumed",
+            rawText: #"{"previousState":"failed","attempt":2}"#
+        )
+
+        XCTAssertEqual(EventExpansion(event: retried), .payload)
+        XCTAssertFalse(EventExpansion.shouldOfferExpansion(retried))
+    }
+
     /// The chevron is a promise that something is hidden. A collapsed row shows
     /// one line, so the offer stands exactly when the expansion holds more than
     /// that line — and never on a row the reader can already see whole.

@@ -78,7 +78,9 @@ export function taskEventView(event: TaskEvent, provider: Profile["provider"]): 
             ? truncate((firstString(event.payload.question) ?? "").replace(/\s+/g, " "), 160)
             : event.type === "answered"
               ? truncate((firstString(event.payload.answer) ?? "").replace(/\s+/g, " "), 160)
-              : firstString(event.payload.provider, event.payload.model));
+              : event.type === "resumed"
+                ? firstString(event.payload.instruction)
+                : firstString(event.payload.provider, event.payload.model));
     return {
       ...base,
       kind: event.type === "failed" || event.type === "scope_refusal" ? "error" : "lifecycle",

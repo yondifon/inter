@@ -25,6 +25,9 @@ import type {
   TaskState,
   TaskSummary,
   TaskScope,
+  ContextFile,
+  ContextFileProject,
+  ContextMapRow,
 } from "./types";
 
 interface ProfileRow {
@@ -36,6 +39,23 @@ interface ProfileRow {
   env_json: string;
   capabilities_json: string;
   command_json: string | null;
+}
+
+interface ContextFileRow {
+  cwd: string;
+  path: string;
+  lang: "ts" | "swift";
+  purpose: string | null;
+  lines: number;
+  size: number;
+  mtime_ms: number;
+  digest: string;
+  symbols_json: string;
+  status: "mapped" | "unparsed";
+  touch_count: number;
+  touched_at: string | null;
+  mapped_at: string;
+  updated_at: string;
 }
 
 interface TaskRow {
@@ -87,6 +107,9 @@ const MAX_ATTEMPTS = 10;
 const SPEND_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 const GRANT_COLUMNS = "id, cwd, profile_id, scope_json, created_at, last_used_at, use_count";
+
+const CONTEXT_FILE_COLUMNS = `cwd, path, lang, purpose, lines, size, mtime_ms, digest, symbols_json,
+              status, touch_count, touched_at, mapped_at, updated_at`;
 
 /**
  * The only states whose history cleanup may ever delete. `queued`, `running`,
@@ -166,6 +189,8 @@ export interface SpendTotals {
   tokens: number;
   /** Start of the window this was summed over. */
   since: string;
+  /** Settled tasks in the window whose provider reported no price, so the total is a floor. */
+  unpricedTasks: number;
 }
 
 const LAST_CLEANUP_KEY = "cleanup_last_run";
@@ -229,6 +254,8 @@ export interface ProfileFailure {
   failedAt: string;
   consecutiveFailures: number;
   retryAt?: string;
+  /** The model the run was using. A rate limit belongs to it, not to the account. */
+  model?: string;
 }
 
 export interface ProfileSuccess {
@@ -528,6 +555,117 @@ export class StateStore {
       .run(project, key).changes === 1;
   }
 
+  /** Sizes every cwd holding map rows, values left behind, like listMemoryProjects. */
+  listContextProjects(): ContextFileProject[] {
+    return this.database.query<{
+      cwd: string; file_count: number; symbol_count: number; pending_prose: number; updated_at: string;
+    }, []>(`
+      SELECT cwd, file_count, symbol_count, pending_prose, updated_at
+      FROM context_maps ORDER BY cwd
+    `).all().map((row) => ({
+      cwd: row.cwd,
+      fileCount: row.file_count,
+      symbolCount: row.symbol_count,
+      pendingProse: row.pending_prose,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  listContextFiles(cwd: string): ContextFile[] {
+    return this.database.query<ContextFileRow, [string]>(`
+      SELECT ${CONTEXT_FILE_COLUMNS}
+      FROM context_files WHERE cwd = ? ORDER BY path
+    `).all(resolve(cwd)).map(contextFileFromRow);
+  }
+
+  getContextFile(cwd: string, path: string): ContextFile | undefined {
+    const row = this.database.query<ContextFileRow, [string, string]>(`
+      SELECT ${CONTEXT_FILE_COLUMNS}
+      FROM context_files WHERE cwd = ? AND path = ?
+    `).get(resolve(cwd), path);
+    return row ? contextFileFromRow(row) : undefined;
+  }
+
+  /** Rows whose path starts with a directory prefix; the primary key keeps them contiguous. */
+  listContextFilesUnder(cwd: string, prefix: string): ContextFile[] {
+    return this.database.query<ContextFileRow, [string, string, string]>(`
+      SELECT ${CONTEXT_FILE_COLUMNS}
+      FROM context_files
+      WHERE cwd = ? AND path >= ? AND path < ?
+      ORDER BY path
+    `).all(resolve(cwd), prefix, `${prefix}\uffff`).map(contextFileFromRow);
+  }
+
+  upsertContextFile(file: ContextFile): void {
+    this.database.query(`
+      INSERT INTO context_files(
+        cwd, path, lang, purpose, lines, size, mtime_ms, digest, symbols_json, status,
+        touch_count, touched_at, mapped_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(cwd, path) DO UPDATE SET
+        lang = excluded.lang,
+        purpose = excluded.purpose,
+        lines = excluded.lines,
+        size = excluded.size,
+        mtime_ms = excluded.mtime_ms,
+        digest = excluded.digest,
+        symbols_json = excluded.symbols_json,
+        status = excluded.status,
+        touch_count = excluded.touch_count,
+        touched_at = excluded.touched_at,
+        mapped_at = excluded.mapped_at,
+        updated_at = excluded.updated_at
+    `).run(
+      file.cwd, file.path, file.lang, file.purpose, file.lines, file.size, file.mtimeMs,
+      file.digest, JSON.stringify(file.symbols), file.status, file.touchCount, file.touchedAt,
+      file.mappedAt, file.updatedAt,
+    );
+  }
+
+  deleteContextFile(cwd: string, path: string): boolean {
+    return this.database.query("DELETE FROM context_files WHERE cwd = ? AND path = ?")
+      .run(resolve(cwd), path).changes === 1;
+  }
+
+  getContextMap(cwd: string): ContextMapRow | undefined {
+    const row = this.database.query<{
+      cwd: string; scheme: number; state: ContextMapRow["state"]; built_at: string | null;
+      file_count: number; symbol_count: number; pending_prose: number; updated_at: string;
+    }, [string]>(`
+      SELECT cwd, scheme, state, built_at, file_count, symbol_count, pending_prose, updated_at
+      FROM context_maps WHERE cwd = ?
+    `).get(resolve(cwd));
+    return row ? contextMapFromRow(row) : undefined;
+  }
+
+  /** The map row is derived bookkeeping, so a patch replaces the fields it names. */
+  setContextMap(cwd: string, patch: Partial<ContextMapRow>): void {
+    const project = resolve(cwd);
+    const existing = this.getContextMap(project);
+    const next: ContextMapRow = {
+      cwd: project,
+      scheme: patch.scheme ?? existing?.scheme ?? 1,
+      state: patch.state ?? existing?.state ?? "building",
+      builtAt: patch.builtAt ?? existing?.builtAt ?? null,
+      fileCount: patch.fileCount ?? existing?.fileCount ?? 0,
+      symbolCount: patch.symbolCount ?? existing?.symbolCount ?? 0,
+      pendingProse: patch.pendingProse ?? existing?.pendingProse ?? 0,
+      updatedAt: patch.updatedAt ?? new Date().toISOString(),
+    };
+    this.database.query(`
+      INSERT INTO context_maps(cwd, scheme, state, built_at, file_count, symbol_count, pending_prose, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(cwd) DO UPDATE SET
+        scheme = excluded.scheme,
+        state = excluded.state,
+        built_at = excluded.built_at,
+        file_count = excluded.file_count,
+        symbol_count = excluded.symbol_count,
+        pending_prose = excluded.pending_prose,
+        updated_at = excluded.updated_at
+    `).run(project, next.scheme, next.state, next.builtAt, next.fileCount, next.symbolCount, next.pendingProse, next.updatedAt);
+  }
+
   createTask(task: Task): void {
     this.database.query(`
       INSERT INTO tasks(
@@ -572,16 +710,21 @@ export class StateStore {
     return row?.selection_json ? JSON.parse(row.selection_json) as TaskSelection : undefined;
   }
 
-  /** Rolls a run's reported cost and token usage onto the task so spend survives the event stream. */
+  /**
+   * Rolls a run's reported cost and token usage onto the task so spend survives
+   * the event stream. A column the run reported nothing for stays NULL: adding
+   * zero to it would turn "the provider never said" into a task that confidently
+   * claims it cost nothing, and a run that reports turns but no price is common.
+   */
   recordTaskCost(id: string, costUsd?: number, turns?: number, tokensIn?: number, tokensOut?: number): void {
     if (costUsd === undefined && turns === undefined && tokensIn === undefined && tokensOut === undefined) return;
     this.database.query(`
       UPDATE tasks
-      SET cost_usd = COALESCE(cost_usd, 0) + COALESCE(?, 0),
-          turns = COALESCE(turns, 0) + COALESCE(?, 0),
-          tokens_in = COALESCE(tokens_in, 0) + COALESCE(?, 0),
-          tokens_out = COALESCE(tokens_out, 0) + COALESCE(?, 0)
-      WHERE id = ?
+      SET cost_usd = CASE WHEN ?1 IS NULL THEN cost_usd ELSE COALESCE(cost_usd, 0) + ?1 END,
+          turns = CASE WHEN ?2 IS NULL THEN turns ELSE COALESCE(turns, 0) + ?2 END,
+          tokens_in = CASE WHEN ?3 IS NULL THEN tokens_in ELSE COALESCE(tokens_in, 0) + ?3 END,
+          tokens_out = CASE WHEN ?4 IS NULL THEN tokens_out ELSE COALESCE(tokens_out, 0) + ?4 END
+      WHERE id = ?5
     `).run(costUsd ?? null, turns ?? null, tokensIn ?? null, tokensOut ?? null, id);
   }
 
@@ -898,6 +1041,7 @@ export class StateStore {
       scope?: TaskScope;
       grantId?: string;
       allowQuestions?: boolean;
+      instruction?: string;
     } = {},
   ): Task {
     const now = new Date().toISOString();
@@ -938,6 +1082,7 @@ export class StateStore {
         ...(updates.timeoutMs !== undefined ? { timeoutMs: updates.timeoutMs } : {}),
         ...(updates.scope ? { scopeUpdated: true } : {}),
         ...(updates.allowQuestions !== undefined ? { allowQuestions: updates.allowQuestions } : {}),
+        ...(updates.instruction ? { instruction: updates.instruction } : {}),
       });
       resumed = true;
     });
@@ -1087,11 +1232,23 @@ export class StateStore {
    */
   spendTotals(windowMs = SPEND_WINDOW_MS): SpendTotals {
     const since = new Date(Date.now() - windowMs).toISOString();
-    const row = this.database.query<{ cost_usd: number | null; tokens: number | null }, [string]>(`
-      SELECT SUM(cost_usd) AS cost_usd, SUM(COALESCE(tokens_in, 0) + COALESCE(tokens_out, 0)) AS tokens
+    const row = this.database.query<{
+      cost_usd: number | null;
+      tokens: number | null;
+      unpriced: number;
+    }, [string]>(`
+      SELECT SUM(cost_usd) AS cost_usd,
+             SUM(COALESCE(tokens_in, 0) + COALESCE(tokens_out, 0)) AS tokens,
+             SUM(CASE WHEN cost_usd IS NULL AND state IN ('completed','failed','blocked','cancelled')
+                      THEN 1 ELSE 0 END) AS unpriced
       FROM tasks WHERE updated_at >= ?
     `).get(since)!;
-    return { costUsd: row.cost_usd ?? 0, tokens: row.tokens ?? 0, since };
+    return {
+      costUsd: row.cost_usd ?? 0,
+      tokens: row.tokens ?? 0,
+      since,
+      unpricedTasks: row.unpriced,
+    };
   }
 
   setTaskArchived(id: string, archived: boolean): Task {
@@ -1337,6 +1494,7 @@ export class StateStore {
     code: ProfileFailure["code"],
     message: string,
     retryAt?: string,
+    model?: string,
   ): void {
     const failedAt = new Date().toISOString();
     // A rejected credential will not fix itself, but an unreachable host often
@@ -1349,16 +1507,17 @@ export class StateStore {
       : null;
     this.database.query(`
       INSERT INTO profile_failures(
-        profile_id, code, message, failed_at, consecutive_failures, retry_at
+        profile_id, code, message, failed_at, consecutive_failures, retry_at, model
       )
-      VALUES (?, ?, ?, ?, 1, ?)
+      VALUES (?, ?, ?, ?, 1, ?, ?)
       ON CONFLICT(profile_id) DO UPDATE SET
         code = excluded.code,
         message = excluded.message,
         failed_at = excluded.failed_at,
         consecutive_failures = profile_failures.consecutive_failures + 1,
-        retry_at = excluded.retry_at
-    `).run(profileId, code, message.slice(0, 1_000), failedAt, resolvedRetryAt);
+        retry_at = excluded.retry_at,
+        model = excluded.model
+    `).run(profileId, code, message.slice(0, 1_000), failedAt, resolvedRetryAt, model ?? null);
   }
 
   clearProfileFailure(profileId: string): void {
@@ -1373,8 +1532,9 @@ export class StateStore {
       failed_at: string;
       consecutive_failures: number;
       retry_at: string | null;
+      model: string | null;
     }, []>(`
-      SELECT profile_id, code, message, failed_at, consecutive_failures, retry_at
+      SELECT profile_id, code, message, failed_at, consecutive_failures, retry_at, model
       FROM profile_failures
     `).all().map((row) => ({
       profileId: row.profile_id,
@@ -1383,6 +1543,7 @@ export class StateStore {
       failedAt: row.failed_at,
       consecutiveFailures: row.consecutive_failures,
       ...(row.retry_at ? { retryAt: row.retry_at } : {}),
+      ...(row.model ? { model: row.model } : {}),
     }));
   }
 
@@ -1577,6 +1738,51 @@ function memoryFromRow(row: {
     value: row.value,
     version: row.version,
     createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+/**
+ * A corrupt symbols_json renders as an unparsed file, never as a crash: the
+ * map must not be able to fail a dispatch or a query, and a row that survived
+ * a write bug or a hand edit is exactly the kind of damage that could.
+ */
+function contextFileFromRow(row: ContextFileRow): ContextFile {
+  let symbols: ContextFile["symbols"] = [];
+  try {
+    const parsed = JSON.parse(row.symbols_json) as unknown;
+    if (Array.isArray(parsed)) symbols = parsed as ContextFile["symbols"];
+  } catch {}
+  return {
+    cwd: row.cwd,
+    path: row.path,
+    lang: row.lang,
+    purpose: row.purpose,
+    lines: row.lines,
+    size: row.size,
+    mtimeMs: row.mtime_ms,
+    digest: row.digest,
+    symbols,
+    status: row.status,
+    touchCount: row.touch_count,
+    touchedAt: row.touched_at,
+    mappedAt: row.mapped_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function contextMapFromRow(row: {
+  cwd: string; scheme: number; state: ContextMapRow["state"]; built_at: string | null;
+  file_count: number; symbol_count: number; pending_prose: number; updated_at: string;
+}): ContextMapRow {
+  return {
+    cwd: row.cwd,
+    scheme: row.scheme,
+    state: row.state,
+    builtAt: row.built_at,
+    fileCount: row.file_count,
+    symbolCount: row.symbol_count,
+    pendingProse: row.pending_prose,
     updatedAt: row.updated_at,
   };
 }

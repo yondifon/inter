@@ -564,6 +564,26 @@ describe("task event views", () => {
     expect(view.detail).toBeUndefined();
   });
 
+  test("shows the instruction a resume carried", () => {
+    const view = taskEventView({
+      id: 39, taskId: "task", type: "resumed", state: "queued",
+      payload: { previousState: "failed", attempt: 2, instruction: "Finish the remaining work." },
+      createdAt: "now",
+    }, "claude");
+    expect(view.title).toBe("Resumed");
+    expect(view.detail).toBe("Finish the remaining work.");
+  });
+
+  test("renders a retry-style resume with no instruction as a plain row", () => {
+    const view = taskEventView({
+      id: 40, taskId: "task", type: "resumed", state: "queued",
+      payload: { previousState: "failed", attempt: 2 },
+      createdAt: "now",
+    }, "claude");
+    expect(view.title).toBe("Resumed");
+    expect(view.detail).toBeUndefined();
+  });
+
   test("reduces each tool result shape to the figure worth showing", () => {
     const outcome = (toolUseResult: unknown, isError = false) => taskEventView({
       id: 42, taskId: "task", type: "agent.user", state: "running",

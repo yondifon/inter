@@ -15,10 +15,12 @@ export interface ModelQuery {
   profile?: string;
   provider?: Provider;
   refresh?: boolean;
+  /** Project to scope the profile set to; omitted reads user-level profiles. */
+  cwd?: string;
 }
 
 export async function listModels(query: ModelQuery = {}): Promise<ModelInfo[]> {
-  const config = await loadConfig();
+  const config = await loadConfig(query.cwd);
   const profiles = config.profiles.filter((profile) =>
     profile.enabled &&
     (!query.profile || profile.id === query.profile) &&

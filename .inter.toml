@@ -1,83 +1,87 @@
 version = 1
 
-# Routing policy for this repo. Each class lists more than one provider so the
-# rate-limit penalty in model-router has somewhere to route when an account is
-# spent. Entries are ordered best-first per provider: that order decides which
-# model a caller gets when they name the profile but not the model.
+# Routing policy for this repo. In production Inter reads the operator's config
+# from ~/.inter.toml; this copy is the source that gets synced there, so it is
+# tuned to his budgets first. Expensive models are opt-in: uncomment an entry
+# and it joins routing.
 #
-# No haiku, and the only free-tier entry is deepseek-v4-flash-free — the free
-# catalog's one full-strength model, and the reason `build` sits at min_quality
-# 4. Cheapest-wins otherwise produced models that answer without thinking, so
-# the floor is sonnet on claude and a deepseek-flash or gpt-5.6 elsewhere.
-# Deepseek-flash leads on opencode and pi and carries every class up to build;
-# raise effort rather than reaching for a bigger model when one of those needs
-# more thinking. Kimi is reserved for the reasoning class alone — it costs like
-# a frontier model and buys nothing on work that is merely long. Luna leads on
-# codex everywhere but reasoning, which leads with sol — codex's deep tier, and
-# the only codex model that scores like opus and kimi rather than beside luna.
-# Terra is deliberately absent: it scores identically to luna, so listing both
-# would only make the file longer. Pi and opencode reach the same catalog, so
-# pi is the second account to route to when opencode is spent.
+# deepseek-v4-flash is the default everywhere, with effort raised instead of
+# reaching for a bigger model; deepseek-v4-pro is never routed to; kimi-k3 is
+# reserved for the reasoning class alone. Entries are ordered best-first per
+# provider: that order decides which model a caller gets when they name the
+# profile but not the model.
 
 [routes.mechanical]
 preference = "speed"
 min_quality = 3
 allow = [
-  { provider = "claude", model = "sonnet" },
   { provider = "opencode", model = "opencode-go/deepseek-v4-flash" },
   { provider = "pi", model = "opencode-go/deepseek-v4-flash" },
-  { provider = "codex", model = "gpt-5.6-luna" },
+  # Claude sonnet — for a budget-rich environment wanting Anthropic's default tier.
+  # { provider = "claude", model = "sonnet" },
+  # gpt-5.6-luna on codex — for a codex account with credits.
+  # { provider = "codex", model = "gpt-5.6-luna" },
 ]
 
 [routes.general]
 preference = "balanced"
 min_quality = 4
 allow = [
-  { provider = "claude", model = "sonnet" },
   { provider = "opencode", model = "opencode-go/deepseek-v4-flash" },
   { provider = "pi", model = "opencode-go/deepseek-v4-flash" },
-  { provider = "codex", model = "gpt-5.6-luna" },
+  # Claude sonnet — for a budget-rich environment wanting Anthropic's default tier.
+  # { provider = "claude", model = "sonnet" },
+  # gpt-5.6-luna on codex — for a codex account with credits.
+  # { provider = "codex", model = "gpt-5.6-luna" },
 ]
 
 [routes.context]
 preference = "quality"
 min_quality = 4
 allow = [
-  { provider = "claude", model = "sonnet" },
-  { provider = "claude", model = "opus" },
   { provider = "opencode", model = "opencode-go/deepseek-v4-flash" },
   { provider = "pi", model = "opencode-go/deepseek-v4-flash" },
-  { provider = "codex", model = "gpt-5.6-luna" },
+  # Claude sonnet — for a budget-rich environment wanting Anthropic's default tier.
+  # { provider = "claude", model = "sonnet" },
+  # Claude opus — the strongest claude tier, for hard analysis with headroom to spend.
+  # { provider = "claude", model = "opus" },
+  # gpt-5.6-luna on codex — for a codex account with credits.
+  # { provider = "codex", model = "gpt-5.6-luna" },
 ]
 
 [routes.build]
 preference = "quality"
 min_quality = 4
 allow = [
-  { provider = "claude", model = "opus" },
-  { provider = "claude", model = "sonnet" },
-  { provider = "opencode", model = "opencode/deepseek-v4-flash-free" },
   { provider = "opencode", model = "opencode-go/deepseek-v4-flash" },
   { provider = "pi", model = "opencode-go/deepseek-v4-flash" },
-  { provider = "codex", model = "gpt-5.6-luna" },
+  { provider = "opencode", model = "opencode/deepseek-v4-flash-free" },
+  # Claude opus — the strongest claude tier, for builds worth a frontier price.
+  # { provider = "claude", model = "opus" },
+  # Claude sonnet — for a budget-rich environment wanting Anthropic's default tier.
+  # { provider = "claude", model = "sonnet" },
+  # gpt-5.6-luna on codex — for a codex account with credits.
+  # { provider = "codex", model = "gpt-5.6-luna" },
 ]
 
-# Security, architecture, and root-cause work lands here, and kimi is the only
-# opencode entry on purpose. Selection is score-driven, not list order: while
-# luna was also listed it won every time on cost, so listing kimi first bought
-# nothing. Leaving kimi alone is what actually routes this class to it. This is
-# also where provider policy refusals bite hardest on authorized security work.
-# Claude/opus is the fallback whose remaining headroom Inter can measure, since
-# opencode reports no usage at all.
+# Reasoning sits at the same floor as build so deepseek-v4-flash, which the
+# operator runs at raised effort, clears it without an override.
 [routes.reasoning]
 preference = "quality"
-min_quality = 5
+min_quality = 4
 allow = [
-  { provider = "opencode", model = "opencode-go/kimi-k3" },
-  { provider = "pi", model = "opencode-go/kimi-k3" },
-  { provider = "claude", model = "opus" },
-  { provider = "codex", model = "gpt-5.6-sol" },
-  { provider = "codex", model = "gpt-5.6-luna" },
+  { provider = "opencode", model = "opencode-go/deepseek-v4-flash" },
+  { provider = "pi", model = "opencode-go/deepseek-v4-flash" },
+  # opencode-go/kimi-k3 — frontier reasoning for design and architecture that
+  # will pay a frontier price; the only kimi entry allowed.
+  # { provider = "opencode", model = "opencode-go/kimi-k3" },
+  # { provider = "pi", model = "opencode-go/kimi-k3" },
+  # Claude opus — the strongest claude tier, for hard analysis with headroom to spend.
+  # { provider = "claude", model = "opus" },
+  # gpt-5.6-sol on codex — codex's deep-reasoning tier, for a codex account with credits.
+  # { provider = "codex", model = "gpt-5.6-sol" },
+  # gpt-5.6-luna on codex — for a codex account with credits.
+  # { provider = "codex", model = "gpt-5.6-luna" },
 ]
 
 # Rules a worker reads in its <inter_protocol> preamble, spelled out at the

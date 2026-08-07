@@ -26,8 +26,14 @@ enum Surface {
     /// stays the loudest thing inside it.
     static let selection = Color(nsColor: selectionColor)
     /// `selection` as an NSColor, for the AppKit layers that paint fills
-    /// themselves — `Color` cannot draw onto an `NSBezierPath`.
-    static let selectionColor = NSColor.labelColor.withAlphaComponent(0.09)
+    /// themselves — `Color` cannot draw onto an `NSBezierPath`. `labelColor` at
+    /// 0.09 darkens the light sidebar enough to read as selected; the same
+    /// alpha over the dark sidebar barely lightens it, so dark mode gets a
+    /// stronger alpha to land at a comparable, clearly-selected contrast.
+    static let selectionColor = NSColor(name: nil) { appearance in
+        let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        return NSColor.labelColor.withAlphaComponent(isDark ? 0.16 : 0.09)
+    }
 
     static let sidebarColor = neutral(light: 0.957, dark: 0.118)
     static let contentColor = neutral(light: 0.980, dark: 0.150)

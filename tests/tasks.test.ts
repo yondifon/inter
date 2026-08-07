@@ -429,6 +429,33 @@ describe("profile outcome recording", () => {
     );
     expect(calls).toEqual(["rate_limit"]);
   });
+
+  test("attributes a rate limit to the model, and a credential failure to the account", () => {
+    const recorded: Array<string | undefined> = [];
+    const store = {
+      clearProfileFailure: () => {},
+      recordProfileFailure: (
+        _profileId: string,
+        _code: string,
+        _message: string,
+        _retryAt?: string,
+        model?: string,
+      ) => recorded.push(model),
+    };
+    recordProfileTaskOutcome(
+      store,
+      "claude-work",
+      interpretWorkerOutcome(1, "", "statusCode: 429 Too many requests"),
+      "fable",
+    );
+    recordProfileTaskOutcome(
+      store,
+      "claude-work",
+      interpretWorkerOutcome(1, "", "statusCode: 401 invalid api key"),
+      "fable",
+    );
+    expect(recorded).toEqual(["fable", undefined]);
+  });
 });
 
 describe("Antigravity bootstrap retry", () => {

@@ -14,12 +14,14 @@ import {
 } from "./task-protocol";
 import { handoffBrief } from "./handoff-brief";
 import { normalizeTaskScope, sandboxedCommand, scopeCoversPath, scopeRefusedWrite } from "./task-scope";
-import { loadWorkerRules } from "./worker-config";
+import { loadWorkerRules, loadMapConfig, DEFAULT_MAP_CONFIG } from "./worker-config";
 import { workerPath } from "./worker-path";
 import { captureWorkerIdentity } from "./worker-identity";
 import { deniedScopePaths, promptReadPaths } from "./prompt-paths";
 import { stateStore, type StateStore, type TaskListQuery } from "./store";
 import { promptWithMemories } from "./memories";
+import { contextMapSection, ensureContextMap, queueContextFold } from "./context-map";
+import { settled } from "./public-task";
 import { TaskWaiter, type TaskWaitResult, type WaitUntil } from "./task-waiter";
 import type { Profile, SelectionDecision, Task, TaskScope, TaskSummary } from "./types";
 
@@ -485,7 +487,12 @@ async function prepareTask(
   // A `[worker]` table Inter cannot read fails the dispatch rather than the run,
   // so the caller hears about it before a task row and a provider session exist.
   await loadWorkerRules(workspace);
-  const config = await loadConfig();
+  // First delegate into a cwd the map does not know builds it — bounded by the
+  // build's own budget, never a dispatch blocker.
+  ensureContextMap(workspace);
+  // The effective profile set for this workspace: a project file that narrows
+  // the list binds here, so a profile it dropped is not dispatachable.
+  const config = await loadConfig(workspace);
   const profile = config.profiles.find((item) => item.id === profileId);
   if (!profile) throw new Error(unknownProfileMessage(profileId, config.profiles));
   if (!profile.enabled) throw new Error(`profile disabled: ${profileId}`);
@@ -629,9 +636,15 @@ async function runTask(
   try {
     scratchDir = mkdtempSync(resolve(tmpdir(), "inter-worker-"));
     const hookUrl = `${Bun.env.INTER_BROKER_URL ?? `http://127.0.0.1:${Bun.env.INTER_PORT ?? 7331}`}/api/hooks/${task.id}`;
-    const sharedPrompt = promptWithMemories(
-      promptOverride ?? task.prompt,
-      stateStore().listMemories(task.cwd),
+    const sharedPrompt = contextMapSection(
+      promptWithMemories(
+        promptOverride ?? task.prompt,
+        stateStore().listMemories(task.cwd),
+      ),
+      task,
+      // The map is an accelerator; a project that wrote a broken `[map]` table
+      // ships today's behaviour rather than a failed run.
+      await loadMapConfig(task.cwd).catch(() => DEFAULT_MAP_CONFIG),
     );
     const prompt = workerPrompt(
       sharedPrompt,
@@ -919,7 +932,7 @@ async function runTask(
       completion: withScopeSuggestion(task, outcome.completion),
     }, ["running"]);
     if (!persisted) return;
-    recordProfileTaskOutcome(stateStore(), task.profileId, outcome);
+    recordProfileTaskOutcome(stateStore(), task.profileId, outcome, task.model);
   } catch (error) {
     // A throw from the stream handler abandons a worker mid-flight: its pipe
     // reader is gone, so it would block on a full buffer forever. The cancel
@@ -1023,6 +1036,7 @@ export function recordProfileTaskOutcome(
   store: Pick<StateStore, "clearProfileFailure" | "recordProfileFailure">,
   profileId: string,
   outcome: ReturnType<typeof interpretWorkerOutcome>,
+  model?: string,
 ): void {
   if (outcome.state === "completed") {
     store.clearProfileFailure(profileId);
@@ -1038,6 +1052,9 @@ export function recordProfileTaskOutcome(
     // The provider said when it will answer again; the ten-minute guess this
     // otherwise falls back to is what made a five-hour window look retryable.
     outcome.completion.resetsAt,
+    // Which model was metered. A rate limit read as the account's would take
+    // every other model on it out of service too.
+    code === "rate_limit" ? model : undefined,
   );
 }
 
@@ -1153,7 +1170,7 @@ async function requireSessionProfile(
   verb: "reply to" | "resume",
   hint = "",
 ): Promise<Profile> {
-  const profile = (await loadConfig()).profiles.find((item) => item.id === task.profileId);
+  const profile = (await loadConfig(task.cwd)).profiles.find((item) => item.id === task.profileId);
   if (!profile || !canResumeSession(profile)) {
     throw new Error(sessionResumeUnsupported(task.profileId, profile));
   }
@@ -1209,7 +1226,8 @@ export async function resumeTask(
   // becomes the grant later delegations inherit.
   const replacement = options.scope ? resolveScope(old.cwd, old.profileId, options.scope) : undefined;
   const followUp = old.state === "completed";
-  const resumeInstruction = instruction?.trim() || "Continue the original task from where the previous run stopped.";
+  const given = instruction?.trim();
+  const resumeInstruction = given || "Continue the original task from where the previous run stopped.";
   const prompt = [
     followUp ? "# Follow-up instruction" : "# Resume instruction",
     resumeInstruction,
@@ -1223,6 +1241,7 @@ export async function resumeTask(
     ...(replacement ? { scope: replacement.scope } : {}),
     ...(replacement?.grantId ? { grantId: replacement.grantId } : {}),
     ...(options.allowQuestions !== undefined ? { allowQuestions: options.allowQuestions } : {}),
+    ...(given ? { instruction: given } : {}),
   });
   taskWaiter.notify(id);
   launchTask(task, profile, old.sessionId, prompt);
@@ -1250,7 +1269,8 @@ export async function handoffTask(
       `handoff needs a different profile: task ${id} is already on ${profileId} — use resume to continue on the same account and provider session`,
     );
   }
-  const config = await loadConfig();
+  // The destination must be usable in the task's workspace, not just anywhere.
+  const config = await loadConfig(old.cwd);
   const profile = config.profiles.find((item) => item.id === profileId);
   if (!profile) throw new Error(unknownProfileMessage(profileId, config.profiles));
   if (!profile.enabled) throw new Error(`profile disabled: ${profileId}`);
@@ -1332,6 +1352,7 @@ export async function cancelTask(id: string, reason = "cancelled by caller", tim
     active.forceKill = setTimeout(() => killProcessGroup(active.child, "SIGKILL"), 2_000);
   }
   taskWaiter.notify(id);
+  queueContextFold(cancelled.cwd, cancelled.id);
   return cancelled;
 }
 
@@ -1388,6 +1409,7 @@ export async function assertTaskCompletion(id: string, assertedBy: string, reaso
   }
   const completed = stateStore().assertTaskCompletion(id, { assertedBy: by, reason: why });
   taskWaiter.notify(id);
+  queueContextFold(completed.cwd, completed.id);
   return completed;
 }
 
@@ -1420,6 +1442,7 @@ export async function markTaskCompleted(id: string, assertedBy: string, reason: 
     active.forceKill = setTimeout(() => killProcessGroup(active.child, "SIGKILL"), 2_000);
   }
   taskWaiter.notify(id);
+  queueContextFold(completed.cwd, completed.id);
   return completed;
 }
 
@@ -1449,6 +1472,10 @@ function update(task: Task, patch: Partial<Task>, expectedStates: Task["state"][
   ) {
     taskWaiter.notify(task.id);
   }
+  // Every settle funnels through here — run, fail, cancel, question — and a
+  // settled task may have written files, so its writes fold into the map. The
+  // fold is queued, never awaited: it is housekeeping, not part of the settle.
+  if (patch.state && settled(patch.state)) queueContextFold(task.cwd, task.id);
   return true;
 }
 

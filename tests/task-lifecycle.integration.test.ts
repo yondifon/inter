@@ -353,6 +353,10 @@ describe("task lifecycle integration", () => {
     const events = stateStore().listTaskEvents(failed.id);
     expect(events.filter(({ type }) => type === "worker_spawned")).toHaveLength(2);
     expect(events.filter(({ type }) => type === "session_reused")).toHaveLength(1);
+    expect(events.find(({ type }) => type === "resumed")?.payload).toMatchObject({
+      previousState: "failed",
+      instruction: "Finish the remaining work.",
+    });
   });
 
   // The whole point of a handoff, end to end: a run dies on one account's rate

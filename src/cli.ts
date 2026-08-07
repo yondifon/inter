@@ -1,8 +1,10 @@
 #!/usr/bin/env bun
+import { resolve } from "node:path";
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { z } from "zod/v4";
-import { loadConfig, saveConfig } from "./config";
+import { loadConfig, loadStoredConfig, maskSecretEnv, resolveProfileChain, saveConfig } from "./config";
+import { loadTomlLayers } from "./inter-toml";
 import {
   appendTaskEvent,
   assertTaskCompletion,
@@ -51,6 +53,8 @@ import { deleteMemory, getMemory, listMemories, setMemory } from "./memories";
 import { publicTaskSummary, taskView, waitEventsView, waitTaskView, settled, TASK_FIELD_KEYS, type TaskField } from "./public-task";
 import { mcpWaitBlockMs } from "./mcp-wait";
 import { loadRoutingPolicy } from "./routing-policy";
+import { loadWorkerRules } from "./worker-config";
+import { mapLookup, projectSkeleton } from "./context-map";
 import { runWatch, watchCommand } from "./watch";
 import { runInflight } from "./inflight";
 import { runCleanup, scheduledCleanupDays, startScheduledCleanup } from "./cleanup";
@@ -259,6 +263,33 @@ const serveOptions = {
         return Response.json({ error: String(error) }, { status: 400 });
       }
     }
+    // The worker's map lookup, reached with curl from its shell tool. The task
+    // id names the cwd and the read scope: a query must not answer with files
+    // the sandbox would refuse to read. Unknown or archived tasks 404, and so
+    // does a project whose `[map].lookup` is off — the worker's instruction is
+    // to read the file when curl fails, never to depend on the map.
+    if (url.pathname === "/api/map" && request.method === "GET") {
+      const taskId = url.searchParams.get("task");
+      if (!taskId) return Response.json({ error: "task is required" }, { status: 400 });
+      const task = getTask(taskId);
+      if (!task || task.archivedAt) return Response.json({ error: "unknown task" }, { status: 404 });
+      const paths = url.searchParams.getAll("path");
+      const symbols = url.searchParams.getAll("symbol");
+      if (paths.length === 0 && symbols.length === 0) {
+        return Response.json({ error: "path or symbol is required" }, { status: 400 });
+      }
+      const tier = url.searchParams.get("tier") === "full" ? "full" : "skeleton";
+      const result = await mapLookup(task.cwd, { paths, symbols, tier }, task.scope.read);
+      if (!result) return Response.json({ error: "map lookup is disabled" }, { status: 404 });
+      const asJson = request.headers.get("accept")?.includes("application/json");
+      return asJson
+        ? Response.json({
+          markdown: result.markdown,
+          files: result.files,
+          omitted: { outsideScope: result.outsideScope, gone: result.gone },
+        })
+        : new Response(result.markdown, { headers: { "content-type": "text/plain; charset=utf-8" } });
+    }
     // Quota lives on its own route: it shells out to provider CLIs and must not
     // slow the state poll that drives the whole UI.
     if (url.pathname === "/api/usage" && request.method === "GET") {
@@ -292,7 +323,7 @@ const serveOptions = {
       const taskId = decodeURIComponent(eventTaskId);
       const task = getTask(taskId);
       if (!task) return Response.json({ error: "unknown task" }, { status: 404 });
-      const profile = (await loadConfig()).profiles.find(({ id }) => id === task.profileId);
+      const profile = (await loadConfig(task.cwd)).profiles.find(({ id }) => id === task.profileId);
       if (!profile) return Response.json({ error: "unknown task profile" }, { status: 404 });
       const after = Math.max(0, Number(url.searchParams.get("after") ?? 0) || 0);
       const waitMs = Math.min(30_000, Math.max(0, Number(url.searchParams.get("waitMs") ?? 0) || 0));
@@ -355,7 +386,9 @@ const serveOptions = {
       const body = await readJson(request);
       if (body === undefined) return invalidJsonBody();
       try {
-        const config = await loadConfig();
+        // Writes persist the store layer only; profiles a config file declares
+        // are not the app's to rename or shadow.
+        const config = await loadStoredConfig();
         const profile = normalizeProfile(body);
         if (config.profiles.some((item) => item.id === profile.id)) {
           profile.id = `${profile.id}-${crypto.randomUUID().slice(0, 6)}`;
@@ -371,7 +404,7 @@ const serveOptions = {
       }
     }
     if (url.pathname.startsWith("/api/profiles/") && request.method === "PUT") {
-      const config = await loadConfig();
+      const config = await loadStoredConfig();
       const id = decodeURIComponent(url.pathname.slice("/api/profiles/".length));
       const profile = config.profiles.find((item) => item.id === id);
       if (!profile) return Response.json({ error: "unknown profile" }, { status: 404 });
@@ -399,7 +432,7 @@ const serveOptions = {
       return Response.json(publicProfile(profile));
     }
     if (url.pathname.startsWith("/api/profiles/") && request.method === "DELETE") {
-      const config = await loadConfig();
+      const config = await loadStoredConfig();
       const id = decodeURIComponent(url.pathname.slice("/api/profiles/".length));
       const index = config.profiles.findIndex((item) => item.id === id);
       if (index < 0) return Response.json({ error: "unknown profile" }, { status: 404 });
@@ -513,8 +546,13 @@ const serveOptions = {
  * not the broker — and every suite that imports this module — costs no port,
  * no socket, and no store.
  */
-export function startBroker() {
-  Bun.serve(serveOptions);
+export function startBroker(options: { port?: number } = {}) {
+  // Port and hostname read at serve time, not at import: the module-level
+  // const would freeze whoever imported this module first, so a second broker
+  // started in the same process — a test suite, or an embedded caller — would
+  // bind the first one's port and die on EADDRINUSE. An explicit port wins
+  // over the env var, which is process-global and cannot serve two brokers.
+  Bun.serve({ ...serveOptions, port: options.port ?? port, hostname: "127.0.0.1" });
 
   // The port bind is the single-instance lock; the socket unlink after it can
   // never steal a live broker's socket (D-007). The socket is an accelerator —
@@ -644,6 +682,30 @@ async function createMcpServer(): Promise<McpServer> {
     }
     return result({ removed: deleteMemory(cwd, key, expectedVersion) });
   });
+  server.registerTool("map", {
+    description: "Ask for a project's map — where its source files and top-level symbols live — without searching the tree. The map is built by Inter from earlier tasks and re-verified against disk the moment you ask; it is an index, not a specification, and it can be behind the code, so open a file before you act on an entry. Pass `path` an exact file or a directory ending in `/` to see what lives under it, `symbol` a name or a prefix ending in `*` to find where a symbol is defined, or neither to get the project's skeleton. Batch several paths and symbols into one call — one call with three paths beats three calls. The answer is the same markdown every worker receives, fresh as of the ask. Refuses when the project has turned map lookup off.",
+    inputSchema: z.object({
+      cwd: z.string().min(1).describe("Absolute path of the project whose map is asked for."),
+      path: z.array(z.string()).optional()
+        .describe("An exact file, or a directory ending in `/`. Repeatable — several paths in one call."),
+      symbol: z.array(z.string()).optional()
+        .describe("An exact symbol name, or a prefix ending in `*`. Repeatable."),
+      tier: z.enum(["full", "skeleton"]).optional()
+        .describe("full shows symbols; skeleton shows paths and line counts. Directory prefixes default to skeleton."),
+    }),
+  }, async ({ cwd, path, symbol, tier }) => {
+    const paths = path ?? [];
+    const symbols = symbol ?? [];
+    if (paths.length === 0 && symbols.length === 0) {
+      // No starting point: the whole project's shape, like the shipped block.
+      const skeleton = await projectSkeleton(cwd);
+      if (skeleton === undefined) throw new Error(`map lookup is disabled for ${cwd}`);
+      return result(skeleton);
+    }
+    const found = await mapLookup(cwd, { paths, symbols, tier }, ["**"]);
+    if (found === undefined) throw new Error(`map lookup is disabled for ${cwd}`);
+    return result(found.markdown);
+  });
   server.registerTool("reply", {
     description: "Answer a question from a task in needs_input state. Pass only its Inter task ID; Inter maps it to the private provider session and returns the same task ID. Optional scope is granted with the answer, replacing the task's scope and becoming the cwd's grant. By default a small acknowledgement; pass `fields` to get more.",
     inputSchema: z.object({
@@ -728,20 +790,23 @@ async function createMcpServer(): Promise<McpServer> {
       include: z.array(z.enum(["models", "status", "usage"])).optional()
         .describe(
           "Extra sections to fetch. models lists model ids; status reports whether a profile answers; " +
-          "usage reports session and weekly quota. Each costs a provider call, so ask only for what you will use.",
+          "usage reports the account's session and weekly quota — one model can still be rate-limited " +
+          "while the account has room. Each costs a provider call, so ask only for what you will use.",
         ),
       refresh: z.boolean().optional()
         .describe("Bypass the five-minute cache for the requested sections."),
+      cwd: z.string().optional()
+        .describe("Project directory to scope profiles and the included sections to; omit to read user-level profiles."),
     }),
-  }, async ({ profile, provider, include, refresh }) => {
-    const query = { profile, ...(provider ? { provider } : {}), refresh };
+  }, async ({ profile, provider, include, refresh, cwd }) => {
+    const query = { profile, ...(provider ? { provider } : {}), refresh, ...(cwd ? { cwd } : {}) };
     const wanted = new Set(include ?? []);
     const [models, status, usage] = await Promise.all([
       wanted.has("models") ? listModels(query) : undefined,
       wanted.has("status") ? listProfileStatuses(query) : undefined,
       wanted.has("usage") ? listProfileUsage(query) : undefined,
     ]);
-    const profiles = publicProfiles((await loadConfig()).profiles)
+    const profiles = publicProfiles((await loadConfig(query.cwd)).profiles)
       .filter((item) => (!profile || item.id === profile) && (!provider || item.provider === provider));
     return result({
       profiles,
@@ -935,7 +1000,7 @@ async function policyWarnings(cwd: string, task: Task): Promise<string[]> {
   if (!policy) return [];
   const allowed = Object.values(policy.routes).flatMap((route) => route?.allow ?? []);
   if (allowed.length === 0) return [];
-  const config = await loadConfig();
+  const config = await loadConfig(cwd);
   const provider = config.profiles.find(({ id }) => id === task.profileId)?.provider;
   if (allowed.some((entry) => entry.provider === provider && entry.model === task.model)) return [];
   return [
@@ -986,10 +1051,7 @@ function publicProfiles(profiles: Profile[]) {
 function publicProfile(profile: Profile): Profile {
   return {
     ...profile,
-    env: Object.fromEntries(Object.entries(profile.env).map(([key, value]) => [
-      key,
-      /(?:KEY|TOKEN|SECRET|PASS)/i.test(key) ? "••••••••" : value,
-    ])),
+    env: maskSecretEnv(profile.env),
   };
 }
 
@@ -1007,11 +1069,64 @@ function archiveFilter(value: string | null): "active" | "only" | "include" {
  * port, which is the comparison `make install` makes before calling an install
  * done. `--stdio` is a flag MCP client configs pass, not a command.
  */
+/**
+ * The effective config for a cwd and where each piece came from: which file
+ * declared each profile, which route, and which worker table. Env values are
+ * masked like every other surface.
+ */
+async function runConfig(argv: readonly string[]): Promise<number> {
+  const cwd = resolve(argv[0] ?? process.cwd());
+  try {
+    const chain = await resolveProfileChain(cwd);
+    const layers = await loadTomlLayers(cwd);
+    const policy = await loadRoutingPolicy(cwd);
+    const worker = await loadWorkerRules(cwd);
+    const routeSources = new Map<string, string>();
+    for (const layer of [layers.project, layers.user]) {
+      if (!layer) continue;
+      const routes = layer.root.routes;
+      if (typeof routes !== "object" || routes === null || Array.isArray(routes)) continue;
+      for (const key of Object.keys(routes)) {
+        if (!routeSources.has(key)) routeSources.set(key, layer.path);
+      }
+    }
+    const workerSource = layers.project?.root.worker !== undefined
+      ? layers.project.path
+      : layers.user?.root.worker !== undefined
+      ? layers.user.path
+      : undefined;
+    console.log(JSON.stringify({
+      cwd,
+      layers: {
+        ...(layers.project ? { project: layers.project.path } : {}),
+        ...(layers.user ? { user: layers.user.path } : {}),
+      },
+      profiles: chain.profiles.map((profile) => {
+        const source = chain.sources.get(profile.id)!;
+        return { ...publicProfile(profile), source: source.source, sources: source.sources };
+      }),
+      ...(chain.excluded.length > 0
+        ? { excluded: chain.excluded.map(({ id, by }) => ({ id, disabledBy: by })) }
+        : {}),
+      routes: Object.fromEntries(Object.entries(policy?.routes ?? {}).map(([taskClass, route]) => [
+        taskClass,
+        { ...route, source: routeSources.get(taskClass) ?? policy?.path },
+      ])),
+      worker: { ...worker, ...(workerSource ? { source: workerSource } : {}) },
+    }, null, 2));
+    return 0;
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    return 2;
+  }
+}
+
 async function runCli(argv: readonly string[]): Promise<number | undefined> {
   const command = argv[0];
   if (command === "watch") return runWatch(argv.slice(1));
   if (command === "inflight") return runInflight();
   if (command === "cleanup") return runCleanup(argv.slice(1));
+  if (command === "config") return runConfig(argv.slice(1));
   if (command === "version") {
     console.log(JSON.stringify(healthReport));
     return 0;

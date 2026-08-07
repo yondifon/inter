@@ -26,7 +26,7 @@ export interface ProfileStatusQuery extends ModelQuery {
 }
 
 interface ProfileStatusDependencies {
-  loadProfiles(): Promise<Profile[]>;
+  loadProfiles(cwd?: string): Promise<Profile[]>;
   listModels(query: ModelQuery): Promise<ModelInfo[]>;
   listProfileFailures(): ProfileFailure[];
   listProfileSuccesses(): ProfileSuccess[];
@@ -34,7 +34,7 @@ interface ProfileStatusDependencies {
 }
 
 const dependencies: ProfileStatusDependencies = {
-  loadProfiles: async () => (await loadConfig()).profiles,
+  loadProfiles: async (cwd) => (await loadConfig(cwd)).profiles,
   listModels,
   listProfileFailures: () => stateStore().listProfileFailures(),
   listProfileSuccesses: () => stateStore().listProfileSuccesses(),
@@ -46,11 +46,12 @@ export async function listProfileStatuses(
   deps: ProfileStatusDependencies = dependencies,
 ): Promise<ProfileStatus[]> {
   const [profiles, models] = await Promise.all([
-    deps.loadProfiles(),
+    deps.loadProfiles(query.cwd),
     deps.listModels({
       ...(query.profile ? { profile: query.profile } : {}),
       ...(query.provider ? { provider: query.provider } : {}),
       ...(query.refresh !== undefined ? { refresh: query.refresh } : {}),
+      ...(query.cwd ? { cwd: query.cwd } : {}),
     }),
   ]);
   const filteredModels = query.model
@@ -84,8 +85,8 @@ export function normalizeProfileStatuses(
   return models.flatMap((model) => {
     const profile = profileById.get(model.profileId);
     if (!profile) return [];
-    const failure = failureByProfile.get(profile.id);
     const success = successByProfile.get(profile.id);
+    const failure = applicableFailure(failureByProfile.get(profile.id), model.id, success);
     return [{
       profile: profile.id,
       provider: profile.provider,
@@ -95,6 +96,30 @@ export function normalizeProfileStatuses(
   }).sort((a, b) =>
     a.profile.localeCompare(b.profile) || a.model.localeCompare(b.model)
   );
+}
+
+/**
+ * Which recorded failure still describes this model. Two things disqualify one.
+ *
+ * A run that succeeded after the failure was recorded is later evidence about
+ * the same account, so the failure no longer describes it: the settle path
+ * clears the row on a normal completion, but a task completed any other way —
+ * asserted, force-settled, completed while the broker was down — leaves it
+ * behind, and without this the profile reads as broken forever.
+ *
+ * A rate limit belongs to the model that hit it. Providers meter per model, so
+ * one exhausted model says nothing about the account's other models; auth and
+ * billing are credentials, and network is the host, so both stay account-wide.
+ */
+function applicableFailure(
+  failure: ProfileFailure | undefined,
+  model: string,
+  success: ProfileSuccess | undefined,
+): ProfileFailure | undefined {
+  if (!failure) return undefined;
+  if (success && Date.parse(success.succeededAt) > Date.parse(failure.failedAt)) return undefined;
+  if (failure.code !== "rate_limit" || !failure.model) return failure;
+  return failure.model === model ? failure : undefined;
 }
 
 function availability(
