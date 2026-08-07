@@ -207,10 +207,7 @@ struct ContentView: View {
         // Both sidebar actions settle the task, so each confirms first.
         .confirmationDialog(
             "Mark this task as completed?",
-            isPresented: Binding(
-                get: { taskPendingComplete != nil },
-                set: { if !$0 { taskPendingComplete = nil } }
-            ),
+            isPresented: taskPendingCompleteIsPresented,
             titleVisibility: .visible,
             presenting: taskPendingComplete
         ) { id in
@@ -223,10 +220,7 @@ struct ContentView: View {
         }
         .confirmationDialog(
             "Cancel this task?",
-            isPresented: Binding(
-                get: { taskPendingCancel != nil },
-                set: { if !$0 { taskPendingCancel = nil } }
-            ),
+            isPresented: taskPendingCancelIsPresented,
             titleVisibility: .visible,
             presenting: taskPendingCancel
         ) { id in
@@ -261,6 +255,24 @@ struct ContentView: View {
     private var visibleTasks: [TaskListItem] { store.tasks }
 
     private var archiveFilter: TaskArchiveFilter { TaskArchiveFilter(rawValue: archiveFilterRaw) ?? .active }
+
+    /// Named and typed so the compiler doesn't have to infer an inline
+    /// `Binding(get:set:)` closure pair alongside the rest of the view body —
+    /// that combination alone made this expression cross the type-checker's
+    /// time budget on some machines.
+    private var taskPendingCompleteIsPresented: Binding<Bool> {
+        Binding<Bool>(
+            get: { taskPendingComplete != nil },
+            set: { (newValue: Bool) in if !newValue { taskPendingComplete = nil } }
+        )
+    }
+
+    private var taskPendingCancelIsPresented: Binding<Bool> {
+        Binding<Bool>(
+            get: { taskPendingCancel != nil },
+            set: { (newValue: Bool) in if !newValue { taskPendingCancel = nil } }
+        )
+    }
 
     private var projects: [TaskProject] { TaskOrganizer.projects(in: visibleTasks) }
 

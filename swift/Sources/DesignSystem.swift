@@ -515,7 +515,7 @@ enum TaskState: String {
     }
 }
 
-enum StateDot {
+enum StateDot: Equatable {
     case filled, ring, pulse
 }
 
