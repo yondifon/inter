@@ -67,6 +67,35 @@ describe("TypeScript extraction", () => {
   });
 });
 
+describe("const object literals with nested arrows", () => {
+  const source = [
+    "const serveOptions = {",
+    "  port,",
+    "  hostname: '127.0.0.1',",
+    "  async fetch(request) {",
+    "    const url = new URL(request.url);",
+    "    // a comment with { a brace }",
+    "    const label = 'text with } and { braces';",
+    "    if (url.pathname === '/x') {",
+    "      return items.map((i) => { return i; }).filter((i) => i > 0);",
+    "    }",
+    "    return new Response(label);",
+    "  },",
+    "};",
+    "export function after() { return 1 }",
+  ].join("\n");
+
+  test("does not leak the object body into params or returns", () => {
+    const { symbols, unparsed } = extractSymbols(source, "ts");
+    expect(unparsed).toBe(false);
+    const serveOptions = symbols.find(({ name }) => name === "serveOptions")!;
+    expect(serveOptions.kind).toBe("const");
+    expect(serveOptions.params).toBeUndefined();
+    expect(serveOptions.returns).toBeUndefined();
+    expect(symbols.map(({ name }) => name)).toEqual(["serveOptions", "after"]);
+  });
+});
+
 describe("Swift extraction", () => {
   const source = [
     "import SwiftUI",

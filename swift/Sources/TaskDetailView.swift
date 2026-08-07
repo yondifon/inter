@@ -38,6 +38,11 @@ struct TaskDetail: View {
     @State private var events: [TaskEventSnapshot] = []
     /// The retelling of `events`, composed off the MainActor and published back.
     @State private var story = ActivityStory.Composition(blocks: [], technical: [])
+    /// Every file the run changed, gathered alongside the retelling.
+    @State private var changes = RunChangeSet.empty
+    /// The changed-files panel starts closed — the trace is what the pane is
+    /// opened for, and review comes after it.
+    @State private var showingChanges = false
     @State private var eventCursor = 0
     @State private var loadedInitialEvents = false
     @State private var loading = true
@@ -85,6 +90,85 @@ struct TaskDetail: View {
     }
 
     var body: some View {
+        HStack(spacing: 0) {
+            taskColumn
+            if showingChanges {
+                Divider()
+                RunChangesPanel(
+                    changes: changes,
+                    loading: loading || awaitingFirstComposition,
+                    live: !TaskState(liveState).isTerminal,
+                    hasEarlier: hasEarlier,
+                    loadingEarlier: loadingEarlier,
+                    onLoadEarlier: { Task { await loadEarlierEvents() } },
+                    onClose: { withAnimation(.easeOut(duration: 0.2)) { showingChanges = false } }
+                )
+                .frame(width: RunChangesPanel.width * uiScale)
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
+        }
+        .background(Surface.content)
+        .environment(\.taskCwd, resolvedCwd)
+        .task(id: taskId) {
+            await refreshDetailIfStale()
+            resetEventState()
+            while !Task.isCancelled {
+                await loadEvents()
+                await refreshDetailIfStale()
+                if TaskState(liveState).isTerminal {
+                    // A settled run is not polled for events; park on the store
+                    // instead. Resume and answering a question both leave a
+                    // terminal state, and nothing but this loop fetches events,
+                    // so it must outlive the settlement rather than break on it.
+                    // A failed fetch just before settling had no next poll to
+                    // recover it, so the trace it left is final — drop the flag.
+                    loadFailed = false
+                    while !Task.isCancelled, TaskState(liveState).isTerminal {
+                        try? await Task.sleep(for: .seconds(1))
+                        await refreshDetailIfStale()
+                    }
+                    continue
+                }
+                // The server long-poll holds while the run can still produce
+                // events on its own — queued and running — and answers at once
+                // when it is settled or waiting on a human, so the sleep is
+                // unconditional: without it the loop re-uses the same pattern.
+                if loadFailed { try? await Task.sleep(for: .seconds(1)) }
+                else { try? await Task.sleep(for: .milliseconds(500)) }
+            }
+        }
+        // Cancel kills the worker process tree, so it always asks first (EC-004).
+        .confirmationDialog("Cancel this task?", isPresented: $confirmingCancel) {
+            Button("Cancel Task", role: .destructive) {
+                Task { await performCancel() }
+            }
+            Button("Keep Running", role: .cancel) {}
+        } message: {
+            Text("This stops the worker’s process tree. The task can be resumed later.")
+        }
+        // Option-click on Resume opens the instruction sheet; a plain click fires
+        // the task right away (EC-003).
+        .sheet(isPresented: $showingResumeSheet) {
+            ContinueSheet(followUp: false) { instruction in
+                Task { await performResume(instruction: instruction) }
+            }
+        }
+        // A follow-up has no fast path: without an instruction there is nothing
+        // to ask for, so the button always opens the sheet.
+        .sheet(isPresented: $showingFollowUpSheet) {
+            ContinueSheet(followUp: true) { instruction in
+                Task { await performResume(instruction: instruction) }
+            }
+        }
+        .alert("Couldn’t update the task.", isPresented: $showingActionError) {
+            Button("OK", role: .cancel) {}
+        }
+    }
+
+    /// The pane's own column: header, tabs, and the section under them. The
+    /// changed-files panel sits beside it rather than inside, so opening it
+    /// narrows the trace instead of scrolling with it.
+    private var taskColumn: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 12) {
                 header
@@ -152,61 +236,7 @@ struct TaskDetail: View {
                 }
             }
         }
-        .background(Surface.content)
-        .task(id: taskId) {
-            await refreshDetailIfStale()
-            resetEventState()
-            while !Task.isCancelled {
-                await loadEvents()
-                await refreshDetailIfStale()
-                if TaskState(liveState).isTerminal {
-                    // A settled run is not polled for events; park on the store
-                    // instead. Resume and answering a question both leave a
-                    // terminal state, and nothing but this loop fetches events,
-                    // so it must outlive the settlement rather than break on it.
-                    // A failed fetch just before settling had no next poll to
-                    // recover it, so the trace it left is final — drop the flag.
-                    loadFailed = false
-                    while !Task.isCancelled, TaskState(liveState).isTerminal {
-                        try? await Task.sleep(for: .seconds(1))
-                        await refreshDetailIfStale()
-                    }
-                    continue
-                }
-                // The server long-poll holds while the run can still produce
-                // events on its own — queued and running — and answers at once
-                // when it is settled or waiting on a human, so the sleep is
-                // unconditional: without it the loop re-uses the same pattern.
-                if loadFailed { try? await Task.sleep(for: .seconds(1)) }
-                else { try? await Task.sleep(for: .milliseconds(500)) }
-            }
-        }
-        // Cancel kills the worker process tree, so it always asks first (EC-004).
-        .confirmationDialog("Cancel this task?", isPresented: $confirmingCancel) {
-            Button("Cancel Task", role: .destructive) {
-                Task { await performCancel() }
-            }
-            Button("Keep Running", role: .cancel) {}
-        } message: {
-            Text("This stops the worker’s process tree. The task can be resumed later.")
-        }
-        // Option-click on Resume opens the instruction sheet; a plain click fires
-        // the task right away (EC-003).
-        .sheet(isPresented: $showingResumeSheet) {
-            ContinueSheet(followUp: false) { instruction in
-                Task { await performResume(instruction: instruction) }
-            }
-        }
-        // A follow-up has no fast path: without an instruction there is nothing
-        // to ask for, so the button always opens the sheet.
-        .sheet(isPresented: $showingFollowUpSheet) {
-            ContinueSheet(followUp: true) { instruction in
-                Task { await performResume(instruction: instruction) }
-            }
-        }
-        .alert("Couldn’t update the task.", isPresented: $showingActionError) {
-            Button("OK", role: .cancel) {}
-        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     @ViewBuilder private var sectionContent: some View {
@@ -302,6 +332,14 @@ struct TaskDetail: View {
                         .font(.system(size: 12 * uiScale))
                     }
                 }
+                IconButton(
+                    symbol: "sidebar.right",
+                    label: showingChanges ? "Hide changed files" : "Show changed files",
+                    tint: showingChanges ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary)
+                ) {
+                    withAnimation(.easeOut(duration: 0.2)) { showingChanges.toggle() }
+                }
+                .font(.system(size: 12 * uiScale))
                 IconButton(symbol: "ellipsis", label: "Run details", rotation: .degrees(90)) {
                     showingRunFacts.toggle()
                 }
@@ -586,7 +624,8 @@ struct TaskDetail: View {
         var seen = Set<String>()
         var ordered: [String] = []
         for event in events {
-            guard event.presentation?.type == "file", let path = event.presentation?.path else { continue }
+            guard event.presentation?.type == "file", let raw = event.presentation?.path else { continue }
+            let path = DisplayPath.relative(raw, to: resolvedCwd)
             if seen.insert(path).inserted { ordered.append(path) }
         }
         return ordered
@@ -762,6 +801,7 @@ struct TaskDetail: View {
     private func resetEventState() {
         events = []
         story = ActivityStory.Composition(blocks: [], technical: [])
+        changes = .empty
         eventCursor = 0
         loadedInitialEvents = false
         loading = true
@@ -785,24 +825,31 @@ struct TaskDetail: View {
         }
         composeInFlight = true
         let snapshot = events
+        let cwd = resolvedCwd
         // The pane keeps its identity when the sidebar switches tasks, so a
         // compose that finishes after the switch must not paint the previous
         // task's blocks over the new task's trace.
         let generation = composeGeneration
         Task.detached(priority: .userInitiated) {
             let result = ActivityStory.compose(snapshot)
-            await self.applyComposition(result, generation: generation)
+            let collected = RunChanges.collect(snapshot, cwd: cwd)
+            await self.applyComposition(result, changes: collected, generation: generation)
         }
     }
 
     @MainActor
-    private func applyComposition(_ comp: ActivityStory.Composition, generation: Int) {
+    private func applyComposition(
+        _ comp: ActivityStory.Composition,
+        changes collected: RunChangeSet,
+        generation: Int
+    ) {
         guard generation == composeGeneration else {
             composeInFlight = false
             pendingCompose = false
             return
         }
         story = comp
+        changes = collected
         composeInFlight = false
         if pendingCompose {
             pendingCompose = false
@@ -1148,6 +1195,7 @@ private struct ActivityWorkRow: View {
     /// Present tense while the run is still moving; past once it settles.
     var live = false
     @State private var showingRawDetails = false
+    @Environment(\.taskCwd) private var taskCwd
 
     /// The verb that opens the row, when the title is a known tool.
     private var verb: String? { ToolIcon.verb(for: event, live: live) }
@@ -1268,7 +1316,9 @@ private struct ActivityWorkRow: View {
                 // A path is identified by its ends, so it loses its middle. A
                 // command is read left to right — cutting its middle strands the
                 // reader between an env-var prefix and half a pipeline.
-                if let subject = presentation.type == "file" ? presentation.path : presentation.command {
+                if let subject = presentation.type == "file"
+                    ? presentation.path.map({ DisplayPath.relative($0, to: taskCwd) })
+                    : presentation.command {
                     Text(subject).scaledFont(.caption, design: .monospaced).foregroundStyle(subjectTint)
                         .lineLimit(1)
                         .truncationMode(presentation.type == "file" ? .middle : .tail)
@@ -1515,13 +1565,15 @@ struct TaskEventPresentationView: View {
     var plan: TodoPlan? = nil
 
     @Environment(\.uiScale) private var uiScale
+    @Environment(\.taskCwd) private var taskCwd
 
     @ViewBuilder var body: some View {
         switch presentation.type {
         case "file":
             HStack(spacing: 8) {
                 if let path = presentation.path {
-                    Text(path).scaledFont(.caption, design: .monospaced).foregroundStyle(.secondary)
+                    Text(DisplayPath.relative(path, to: taskCwd))
+                        .scaledFont(.caption, design: .monospaced).foregroundStyle(.secondary)
                         .lineLimit(1).truncationMode(.middle)
                 }
                 ForEach([presentation.change, presentation.outcome].compactMap { $0 }, id: \.self) { chip in

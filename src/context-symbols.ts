@@ -35,6 +35,8 @@ const SWIFT_SKIPPED_STARTS = /^(?:import|typealias|protocol|var|let|init|deinit|
 /** More than four parameters collapses to the first three, per the format rule. */
 const MAX_PARAMS = 4;
 const COLLAPSED_PARAMS = 3;
+/** Every rendered params/returns string is one line and stays under this, whatever the source shape. */
+const MAX_SIGNATURE_CHARS = 160;
 
 interface ScanState {
   depth: number;
@@ -114,7 +116,7 @@ function tsDeclaration(lines: string[], start: number, exports: Set<string>): Ex
     }
     if (kind === "const") {
       const text = declarationText(lines, start, false);
-      const arrow = text.includes("=>");
+      const arrow = startsAsArrow(constInitializer(text, name));
       if (arrow && lineSpan(text) < 3) return undefined;
       return {
         line: start + 1,
@@ -127,6 +129,31 @@ function tsDeclaration(lines: string[], start: number, exports: Set<string>): Ex
     return { line: start + 1, kind, name, exported: hadExport || exports.has(name) };
   }
   return undefined;
+}
+
+/** The text right after a const's `=`, so arrow detection looks only at the initializer's own head. */
+function constInitializer(text: string, name: string): string | undefined {
+  const nameIndex = text.indexOf(name);
+  if (nameIndex < 0) return undefined;
+  const eqIndex = text.indexOf("=", nameIndex + name.length);
+  return eqIndex < 0 ? undefined : text.slice(eqIndex + 1);
+}
+
+/**
+ * True only when the initializer itself opens with an arrow-function head —
+ * `(params) =>` or `ident =>`. A nested arrow deeper inside an object or
+ * array literal (e.g. `{ fetch: (req) => ... }`) does not count.
+ */
+function startsAsArrow(initializer: string | undefined): boolean {
+  if (initializer === undefined) return false;
+  const trimmed = initializer.replace(/^\s+/, "");
+  if (trimmed.startsWith("(")) {
+    const paramsText = betweenMatching(trimmed, 0, "(", ")");
+    if (paramsText === undefined) return false;
+    return /^\s*(?::[^=]*)?=>/.test(trimmed.slice(paramsText.length + 2));
+  }
+  const identifier = trimmed.match(/^[A-Za-z_$][\w$]*/);
+  return identifier ? /^\s*=>/.test(trimmed.slice(identifier[0].length)) : false;
 }
 
 /** Strips modifier prefixes one at a time: `export default async function` passes each in turn. */
@@ -219,9 +246,15 @@ function signatureFrom(text: string, lang: MappedLang): { params?: string; retur
     if (arrow >= 0) returns = rest.slice(arrow + 2).split("{")[0]!.trim();
   }
   return {
-    ...(params ? { params } : {}),
-    ...(returns && returns.length > 0 ? { returns } : {}),
+    ...(params ? { params: boundedInline(params) } : {}),
+    ...(returns && returns.length > 0 ? { returns: boundedInline(returns) } : {}),
   };
+}
+
+/** Collapses to one line and caps length, so a rendered signature never blows up the map. */
+function boundedInline(text: string): string {
+  const collapsed = text.replace(/\s+/g, " ").trim();
+  return collapsed.length > MAX_SIGNATURE_CHARS ? `${collapsed.slice(0, MAX_SIGNATURE_CHARS - 1)}…` : collapsed;
 }
 
 function betweenMatching(text: string, open: number, openChar: string, closeChar: string): string | undefined {

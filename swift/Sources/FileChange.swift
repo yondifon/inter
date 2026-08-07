@@ -6,7 +6,7 @@ import SwiftUI
 /// OpenCode `part.state.input` — so the arguments are found by searching for the
 /// shape instead of following a fixed path. Pure, so the diff rules are testable
 /// without a view.
-struct FileChange: Equatable {
+struct FileChange: Equatable, Sendable {
     let path: String?
     /// One block per replacement; a multi-edit call carries several.
     let blocks: [[DiffLine]]
@@ -19,8 +19,8 @@ struct FileChange: Equatable {
     }
 }
 
-struct DiffLine: Equatable {
-    enum Kind: Equatable { case context, added, removed, skipped }
+struct DiffLine: Equatable, Sendable {
+    enum Kind: Equatable, Sendable { case context, added, removed, skipped }
 
     let kind: Kind
     let text: String

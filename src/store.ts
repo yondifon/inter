@@ -189,6 +189,8 @@ export interface SpendTotals {
   tokens: number;
   /** Start of the window this was summed over. */
   since: string;
+  /** How long the window is, so a reader can say what period the sum covers. */
+  windowMs: number;
   /** Settled tasks in the window whose provider reported no price, so the total is a floor. */
   unpricedTasks: number;
 }
@@ -1247,6 +1249,7 @@ export class StateStore {
       costUsd: row.cost_usd ?? 0,
       tokens: row.tokens ?? 0,
       since,
+      windowMs,
       unpricedTasks: row.unpriced,
     };
   }

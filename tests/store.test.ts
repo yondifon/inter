@@ -521,6 +521,64 @@ describe("SQLite state store", () => {
       expect(store.spendTotals()).toMatchObject({ costUsd: 0, tokens: 0 });
       store.close();
     });
+
+    test("drops a settled task's cost when the window rolls past it, with no data changing", () => {
+      const { db } = paths();
+      const store = new StateStore({ path: db, seedProfiles: [profile] });
+      const done = task("completed");
+      store.createTask(done);
+      store.recordTaskCost(done.id, 5, 3, 1000, 500);
+
+      // The task finished 23 hours ago: inside the window.
+      const raw = new Database(db);
+      const backdate = (hours: number) =>
+        raw.query("UPDATE tasks SET updated_at = ? WHERE id = ?")
+          .run(new Date(Date.now() - hours * 60 * 60 * 1000).toISOString(), done.id);
+      backdate(23);
+      const before = store.spendTotals();
+      expect(before.costUsd).toBe(5);
+      expect(before.tokens).toBe(1500);
+
+      // Two hours later nothing about the row changed; only the boundary
+      // moved, so the same cost is now outside it — the shrink the footer
+      // used to exhibit without saying it was a window.
+      backdate(25);
+      const after = store.spendTotals();
+      expect(after.costUsd).toBe(0);
+      expect(after.tokens).toBe(0);
+      raw.close();
+      store.close();
+    });
+
+    test("a task that genuinely cost zero is not counted as unpriced", () => {
+      const { db } = paths();
+      const store = new StateStore({ path: db, seedProfiles: [profile] });
+      const free = task("completed");
+      const unknown = task("completed");
+      store.createTask(free);
+      store.createTask(unknown);
+      // opencode and pi report a real zero; NULL means "the provider never
+      // said" and is what the floor marker counts.
+      store.recordTaskCost(free.id, 0, 2, 500, 300);
+      store.recordTaskCost(unknown.id, undefined, 2);
+
+      const totals = store.spendTotals();
+      expect(totals.costUsd).toBe(0);
+      expect(totals.unpricedTasks).toBe(1);
+      store.close();
+    });
+
+    test("says how long a window it summed over", () => {
+      const { db } = paths();
+      const store = new StateStore({ path: db, seedProfiles: [profile] });
+      const done = task("completed");
+      store.createTask(done);
+      store.recordTaskCost(done.id, 0.25, 1, 10, 10);
+
+      expect(store.spendTotals().windowMs).toBe(24 * 60 * 60 * 1000);
+      expect(store.spendTotals(60 * 60 * 1000).windowMs).toBe(60 * 60 * 1000);
+      store.close();
+    });
   });
 
   test("stores the prompt the worker actually received", () => {

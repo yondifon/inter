@@ -292,28 +292,57 @@ struct SpendTotals: Codable, Equatable, Sendable {
     var costUsd: Double
     var tokens: Int
     var since: String
+    /// How long the window summed over is. Absent on a broker predating the
+    /// field, so the summary can label the period without hardcoding it.
+    var windowMs: Int?
     /// Finished tasks whose provider never reported a price, which makes the
     /// total a floor. Absent on a broker predating this field.
     var unpricedTasks: Int?
 
-    /// `$1.24 · 847k` for the sidebar footer. Nil when the window saw no
-    /// activity at all — an ambient "$0.00 · 0" next to the broker dot would
-    /// read as broken, not calm.
+    /// `$1.24 · last 24h · 847k` for the sidebar footer. The period sits
+    /// between cost and tokens so tail truncation at a narrow width drops the
+    /// token count first and never the label that says what the figure covers.
+    /// Nil when the window saw no activity at all — an ambient "$0.00 · 0"
+    /// next to the broker dot would read as broken, not calm.
     var summary: String? {
         guard costUsd > 0 || tokens > 0 else { return nil }
         let cost = ActivityFormat.cost(costUsd)
         let floor = (unpricedTasks ?? 0) > 0 ? "\(cost)+" : cost
-        return "\(floor) · \(ActivityFormat.count(tokens))"
+        var parts = [floor]
+        if let period = Self.periodLabel(windowMs: windowMs, since: since) {
+            parts.append(period)
+        }
+        parts.append(ActivityFormat.count(tokens))
+        return parts.joined(separator: " · ")
     }
 
     /// What the footer says on hover. A trailing `+` is only honest if something
     /// says what it stands for.
     var detail: String? {
         guard let summary = summary else { return nil }
-        let window = "\(summary) over the last 24 hours"
-        guard let unpriced = unpricedTasks, unpriced > 0 else { return window }
+        guard let unpriced = unpricedTasks, unpriced > 0 else { return summary }
         let tasks = unpriced == 1 ? "1 task" : "\(unpriced) tasks"
-        return "\(window) · cost unknown for \(tasks)"
+        return "\(summary) · cost unknown for \(tasks)"
+    }
+
+    /// "last 24h" for a one-day window, "last 7d" from two days up — hours
+    /// below two days stay exact, days round from two. The broker names its
+    /// own window; `since` is only a fallback for a broker that predates
+    /// `windowMs`.
+    private static func periodLabel(windowMs: Int?, since: String) -> String? {
+        var millis: Double?
+        if let windowMs, windowMs > 0 {
+            millis = Double(windowMs)
+        } else if let sinceDate = EventClock.date(since) {
+            millis = Date().timeIntervalSince(sinceDate) * 1000
+        }
+        guard let millis, millis > 0 else { return nil }
+        if millis >= 2 * 86_400_000 {
+            let days = Int((millis / 86_400_000).rounded())
+            return "last \(days)d"
+        }
+        let hours = Int((millis / 3_600_000).rounded())
+        return hours >= 1 ? "last \(hours)h" : nil
     }
 }
 
