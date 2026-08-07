@@ -44,17 +44,29 @@ profile and model explicitly.
 itself runs anywhere Bun runs, but the app and per-task `sandbox-exec`
 confinement are macOS-only.
 
-```bash
-git clone <repo-url>
-cd inter
-bun install
-make install
-```
+1. **Clone the repo:**
+   ```bash
+   git clone https://github.com/yondifon/inter.git
+   cd inter
+   ```
+2. **Install dependencies:**
+   ```bash
+   bun install
+   ```
+3. **Build and install the broker and the app:**
+   ```bash
+   make install
+   ```
+   This builds the broker binary and the Swift app, copies both into
+   `/Applications/Inter.app`, links `inter` onto your PATH, and launches the
+   app.
+4. **Confirm it is running.** `make install` already checks this and prints
+   `install: broker verified`; to check again later:
+   ```bash
+   curl http://127.0.0.1:7331/health
+   ```
 
-`make install` builds the Swift app bundle, compiles the broker binary, copies
-both to `/Applications/Inter.app`, links `inter` onto your PATH, and verifies
-the install by comparing `/health` with what the binary reports. The app
-launches automatically.
+### After install
 
 **MCP client config:** The app's **Install MCP** button writes a global MCP
 entry for every installed client — Claude Code, Codex, OpenCode, and
@@ -252,6 +264,8 @@ file's list is what a dispatch into that project sees.
 | [docs/complete.md](docs/complete.md) | Asserting completion when the worker never attested it |
 | [docs/handoff.md](docs/handoff.md) | Moving a dead task across profiles |
 | [docs/pi.md](docs/pi.md) | Pi provider reference — dispatch, resume, sandbox, and verification |
+| [docs/scope.md](docs/scope.md) | Data scope rules — bare dir vs. `/**` vs. `**`, grants, and EPERM gotchas |
+| [docs/gotchas.md](docs/gotchas.md) | Failure modes worth knowing before you hit them, and their fixes |
 
 Development notes live in [docs/internal/](docs/internal/).
 

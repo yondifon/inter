@@ -29,6 +29,16 @@ enum ActivityStory {
         return composeWithHandoffs(events, boundaries: boundaries)
     }
 
+    /// The worker's closing output for a settled run — the last message the
+    /// agent produced, as opposed to the last event of any kind (usually a
+    /// usage receipt or a lifecycle row that follows it). Nil for a run that
+    /// never produced one: cancelled before any output, or a provider whose
+    /// only message events were minor protocol echoes folded into the
+    /// technical list rather than shown.
+    static func responseEvent(in rawEvents: [TaskEventSnapshot]) -> TaskEventSnapshot? {
+        rawEvents.last { $0.kind == "message" && $0.minor != true }
+    }
+
     /// The current compose loop, unchanged. Extracted so every run — the
     /// original and each handoff leg — goes through the same shaping rules.
     private static func composeFlat(_ events: [TaskEventSnapshot]) -> Composition {

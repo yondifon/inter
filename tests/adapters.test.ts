@@ -25,8 +25,33 @@ describe("CLI adapters", () => {
   test("builds isolated Claude print command", () => {
     expect(commandFor(base, "review", "/repo")).toEqual([
       "claude", "-p", "--output-format", "stream-json", "--verbose", "--model", "sonnet",
-      "--permission-mode", "acceptEdits", "--allowedTools", "Bash", "review",
+      "--permission-mode", "acceptEdits", "--allowedTools", "Bash",
+      "--add-dir", `${process.env.HOME}/.claude/skills`, "review",
     ]);
+  });
+
+  test("trusts the profile's own skills directory so reference reads don't prompt", () => {
+    const command = commandFor(base, "review", "/repo");
+    expect(command[command.indexOf("--add-dir") + 1]).toBe(`${process.env.HOME}/.claude/skills`);
+  });
+
+  test("follows a profile's own CLAUDE_CONFIG_DIR to its skills directory", () => {
+    const worker = { ...base, env: { CLAUDE_CONFIG_DIR: "$HOME/.claude-me" } };
+    const command = commandFor(worker, "review", "/repo");
+    expect(command[command.indexOf("--add-dir") + 1]).toBe(`${process.env.HOME}/.claude-me/skills`);
+  });
+
+  test("trusts the resumed session's skills directory too", () => {
+    const worker = { ...base, env: { CLAUDE_CONFIG_DIR: "$HOME/.claude-work" } };
+    const command = resumeCommandFor(worker, "continue", "/repo", "sess-1");
+    expect(command[command.indexOf("--add-dir") + 1]).toBe(`${process.env.HOME}/.claude-work/skills`);
+  });
+
+  test("does not invent an add-dir style trust flag for Codex", () => {
+    // Codex bypasses its own approvals and sandbox entirely (see the
+    // --dangerously-bypass-approvals-and-sandbox assertions above), so it has
+    // no equivalent directory-trust gate to work around.
+    expect(commandFor({ ...base, provider: "codex" }, "review", "/workspace")).not.toContain("--add-dir");
   });
 
   test("supports custom Antigravity command templates", () => {

@@ -415,6 +415,43 @@ describe("SQLite state store", () => {
     store.close();
   });
 
+  test("composes the parent filter with the state filter", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const parent = task("completed");
+    store.createTask(parent);
+    const done = { ...task("completed"), parentTaskId: parent.id };
+    const running = { ...task("running"), parentTaskId: parent.id };
+    store.createTask(done);
+    store.createTask(running);
+
+    expect(new Set(store.listTaskSummaries({ parent: parent.id, state: "completed" }).map(({ id }) => id)))
+      .toEqual(new Set([parent.id, done.id]));
+    expect(new Set(store.listTaskSummaries({ parent: parent.id, state: "running" }).map(({ id }) => id)))
+      .toEqual(new Set([running.id]));
+    store.close();
+  });
+
+  test("composes the parent filter with the archived filter", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const parent = task("completed");
+    store.createTask(parent);
+    const kept = { ...task("completed"), parentTaskId: parent.id };
+    const hidden = { ...task("completed"), parentTaskId: parent.id };
+    store.createTask(kept);
+    store.createTask(hidden);
+    store.setTaskArchived(hidden.id, true);
+
+    expect(new Set(store.listTaskSummaries({ parent: parent.id }).map(({ id }) => id)))
+      .toEqual(new Set([parent.id, kept.id]));
+    expect(new Set(store.listTaskSummaries({ parent: parent.id, archived: "include" }).map(({ id }) => id)))
+      .toEqual(new Set([parent.id, kept.id, hidden.id]));
+    expect(new Set(store.listTaskSummaries({ parent: parent.id, archived: "only" }).map(({ id }) => id)))
+      .toEqual(new Set([hidden.id]));
+    store.close();
+  });
+
   test("accumulates reported spend across runs of one task", () => {
     const { db } = paths();
     const store = new StateStore({ path: db, seedProfiles: [profile] });
@@ -486,8 +523,16 @@ describe("SQLite state store", () => {
     store.recordProfileFailure(profile.id, "rate_limit", "429", undefined, "fable");
     expect(store.listProfileFailures()[0]).toMatchObject({ code: "rate_limit", model: "fable" });
 
+    // An account-wide failure (no model) is its own row: it must not overwrite
+    // a still-live rate limit on a specific model of the same profile.
     store.recordProfileFailure(profile.id, "auth", "invalid key");
-    expect(store.listProfileFailures()[0]).not.toHaveProperty("model");
+    const failures = store.listProfileFailures();
+    expect(failures).toHaveLength(2);
+    expect(failures).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "rate_limit", model: "fable" }),
+      expect.objectContaining({ code: "auth" }),
+    ]));
+    expect(failures.find((f) => f.code === "auth")).not.toHaveProperty("model");
     store.close();
   });
 
@@ -793,6 +838,21 @@ describe("SQLite state store", () => {
     reopened.captureTaskSessionId(saved.id, "claude", "sess-456");
     expect(reopened.getTask(saved.id)?.sessionId).toBe("sess-456");
     reopened.close();
+  });
+
+  test("clearCapturedSession drops the session so a fresh run can record its own", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const saved = task();
+    store.createTask(saved);
+    store.captureTaskSessionId(saved.id, "claude", "sess-dead");
+    expect(store.getTask(saved.id)?.sessionId).toBe("sess-dead");
+
+    store.clearCapturedSession(saved.id);
+    expect(store.getTask(saved.id)?.sessionId).toBeUndefined();
+    expect(store.captureTaskSessionId(saved.id, "claude", "sess-fresh")).toBe(true);
+    expect(store.getTask(saved.id)?.sessionId).toBe("sess-fresh");
+    store.close();
   });
 
   test("backfills earliest native session ids from historical provider events", () => {
@@ -1121,6 +1181,43 @@ describe("SQLite state store", () => {
     store.close();
   });
 
+  test("keeps a rate limit on one model live while another model of the same profile clears", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    store.recordProfileFailure(profile.id, "rate_limit", "sonnet exhausted", undefined, "sonnet");
+    store.recordProfileFailure(profile.id, "rate_limit", "opus exhausted", undefined, "opus");
+    // Before this fix, a single profile_id primary key meant the opus row
+    // above would have overwritten the sonnet one instead of coexisting.
+    expect(store.listProfileFailures()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ profileId: profile.id, model: "sonnet", message: "sonnet exhausted" }),
+        expect.objectContaining({ profileId: profile.id, model: "opus", message: "opus exhausted" }),
+      ]),
+    );
+    expect(store.listProfileFailures()).toHaveLength(2);
+
+    // Success on sonnet clears only sonnet's row.
+    store.clearProfileFailure(profile.id, "sonnet");
+    expect(store.listProfileFailures()).toEqual([
+      expect.objectContaining({ profileId: profile.id, model: "opus" }),
+    ]);
+    store.close();
+  });
+
+  test("clearing a model also drops the account-wide failure, not just that model's own", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    store.recordProfileFailure(profile.id, "auth", "invalid api key");
+    store.recordProfileFailure(profile.id, "rate_limit", "opus exhausted", undefined, "opus");
+    store.clearProfileFailure(profile.id, "sonnet");
+    // sonnet never had its own row, but the account-wide auth failure is
+    // proven wrong by any successful run, so it clears; opus stays live.
+    expect(store.listProfileFailures()).toEqual([
+      expect.objectContaining({ profileId: profile.id, model: "opus" }),
+    ]);
+    store.close();
+  });
+
   test("persists rate-limit retry times and successful generation evidence", () => {
     const { db } = paths();
     const store = new StateStore({ path: db, seedProfiles: [profile] });
@@ -1316,6 +1413,9 @@ describe("SQLite state store", () => {
       { version: 13, name: "task token usage" },
       { version: 14, name: "project context maps" },
       { version: 15, name: "task holds" },
+      { version: 16, name: "task follow-up queue" },
+      { version: 17, name: "task actual reasoning effort" },
+      { version: 18, name: "profile failures keyed per model" },
     ]);
     const taskColumns = new Set(migrated.query<{ name: string }, []>(
       "PRAGMA table_info(tasks)",

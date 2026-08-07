@@ -1,8 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { closeStateStore, stateStore } from "../src/store";
+import { LATEST_SCHEMA_VERSION } from "../src/store/schema";
 import { DEFAULT_WATCH_TIMEOUT_MS, parseWatchArgs, runWatch, watchCommand } from "../src/watch";
 import { startEventSocket } from "../src/event-socket";
 import { MCP_CONTRACT_VERSION } from "../src/version";
@@ -771,6 +773,44 @@ describe("observe store errors", () => {
       // Reopen the real store so other test blocks aren't affected.
       closeStateStore();
       stateStore(); // re-init with the real path
+    }
+  });
+
+  test("a schema newer than the binary names both versions and the rebuild fix, on stderr", async () => {
+    const savedDb = process.env.INTER_DB;
+    const savedSock = process.env.INTER_SOCK;
+    try {
+      delete process.env.INTER_SOCK;
+      const futureDb = join(root, "future-schema.db");
+      process.env.INTER_DB = futureDb;
+      closeStateStore();
+      stateStore(); // creates and migrates futureDb at the current schema
+      closeStateStore();
+
+      const raw = new Database(futureDb, { readwrite: true });
+      raw.query("INSERT INTO schema_migrations(version, name) VALUES ($v, 'schema from the future')")
+        .run({ $v: LATEST_SCHEMA_VERSION + 1 });
+      raw.close();
+
+      const out: string[] = [];
+      const err: string[] = [];
+      const code = await runWatch(
+        ["some-id", "--timeout", "200"],
+        (line) => out.push(line),
+        (line) => err.push(line),
+      );
+
+      expect(code).toBe(2);
+      expect(out).toEqual([]);
+      const message = err.join(" ");
+      expect(message).toContain(`v${LATEST_SCHEMA_VERSION + 1}`);
+      expect(message).toContain(`v${LATEST_SCHEMA_VERSION}`);
+      expect(message).toContain("make install");
+    } finally {
+      process.env.INTER_DB = savedDb;
+      process.env.INTER_SOCK = savedSock;
+      closeStateStore();
+      stateStore();
     }
   });
 });

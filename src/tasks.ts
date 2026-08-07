@@ -2,10 +2,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, relative, resolve } from "node:path";
-import { abortedTurn, canResumeSession, commandFor, finalText, resumeCommandFor, sessionIdFrom, writeTargetsFrom } from "./adapters";
+import { abortedTurn, canResumeSession, commandFor, finalText, resumeCommandFor, sessionEffortFrom, sessionIdFrom, writeTargetsFrom } from "./adapters";
 import { loadConfig, profileEnv } from "./config";
 import { taskEventView, type TaskEventView } from "./events";
 import {
+  classifyFailure,
   continuationPrompt,
   interpretWorkerOutcome,
   needsInputQuestion,
@@ -18,7 +19,7 @@ import { loadWorkerRules, loadMapConfig, DEFAULT_MAP_CONFIG } from "./worker-con
 import { workerPath } from "./worker-path";
 import { captureWorkerIdentity } from "./worker-identity";
 import { deniedScopePaths, promptReadPaths } from "./prompt-paths";
-import { stateStore, type StateStore, type TaskListQuery } from "./store";
+import { stateStore, type StateStore, type TaskEvent, type TaskListQuery } from "./store";
 import { promptWithMemories } from "./memories";
 import { contextMapSection, ensureContextMap, queueContextFold } from "./context-map";
 import { HOLD_EXPIRY_MS, resolveStartAt } from "./holds";
@@ -40,6 +41,14 @@ const PI_DELTA_TYPES = new Set([
   "toolcall_start", "toolcall_delta", "toolcall_end",
 ]);
 const MAX_ANTIGRAVITY_BOOTSTRAP_RETRIES = 2;
+// A timed-out worker is stopped by stepping down the signal ladder: SIGINT
+// lets the provider CLI flush its session file before it dies, SIGTERM
+// escalates after the grace, SIGKILL is the last resort. A hard kill mid-write
+// corrupts a provider session and strands the next resume. Explicit cancels do
+// not wait on this — the caller asked for a stop, so it is immediate.
+const SHUTDOWN_INT_GRACE_MS = 1_500;
+const SHUTDOWN_TERM_GRACE_MS = 1_500;
+const FORCE_KILL_GRACE_MS = 2_000;
 const taskWaiter = new TaskWaiter(
   (id) => stateStore().getTask(id),
   (ids) => stateStore().latestTaskEventId(ids, true),
@@ -84,6 +93,13 @@ export interface ResumeOptions {
    * sweep releases it when the condition is true.
    */
   startAt?: string;
+  /**
+   * `"add"` stores the instruction on a task that is still working instead of
+   * refusing it; the broker feeds it back into the same session once the run
+   * lands clean. `"clear"` removes everything still waiting. On a settled task
+   * `"add"` is nothing to act on and the resume runs as it always has.
+   */
+  queue?: "add" | "clear";
 }
 
 export interface ReplyOptions {
@@ -644,26 +660,29 @@ async function runTask(
   try {
     scratchDir = mkdtempSync(resolve(tmpdir(), "inter-worker-"));
     const hookUrl = `${Bun.env.INTER_BROKER_URL ?? `http://127.0.0.1:${Bun.env.INTER_PORT ?? 7331}`}/api/hooks/${task.id}`;
-    const sharedPrompt = contextMapSection(
-      promptWithMemories(
-        promptOverride ?? task.prompt,
-        stateStore().listMemories(task.cwd),
+    // The map is an accelerator; a project that wrote a broken `[map]` table
+    // ships today's behaviour rather than a failed run.
+    const mapConfig = await loadMapConfig(task.cwd).catch(() => DEFAULT_MAP_CONFIG);
+    const rules = await loadWorkerRules(task.cwd);
+    const buildPrompt = (source: string) => workerPrompt(
+      contextMapSection(
+        promptWithMemories(source, stateStore().listMemories(task.cwd)),
+        task,
+        mapConfig,
       ),
-      task,
-      // The map is an accelerator; a project that wrote a broken `[map]` table
-      // ships today's behaviour rather than a failed run.
-      await loadMapConfig(task.cwd).catch(() => DEFAULT_MAP_CONFIG),
-    );
-    const prompt = workerPrompt(
-      sharedPrompt,
       task.allowQuestions,
       task.scope,
-      await loadWorkerRules(task.cwd),
+      rules,
     );
     // The caller's prompt is only part of what leaves the machine; store the
     // real text so "what was sent to this provider" is answerable later.
-    stateStore().recordShippedPrompt(task.id, prompt);
-    task.shippedPrompt = prompt;
+    const shipPrompt = (source: string) => {
+      const prompt = buildPrompt(source);
+      stateStore().recordShippedPrompt(task.id, prompt);
+      task.shippedPrompt = prompt;
+      return prompt;
+    };
+    let prompt = shipPrompt(promptOverride ?? task.prompt);
     const env = {
       ...Bun.env,
       // The CLI runs on the same PATH the broker used to find it, so its own
@@ -705,7 +724,6 @@ async function runTask(
     let bootstrapRetries = 0;
     let resumeSessionConfirmed = false;
     let resumeSessionMismatch: string | undefined;
-    let sessionUnreachable = false;
     while (true) {
       const command = resumeWith
         ? resumeCommandFor(profile, prompt, task.cwd, resumeWith, task.model, hookUrl, task.effort)
@@ -824,6 +842,15 @@ async function runTask(
                   actualSession: sessionId,
                 });
                 killProcessGroup(child, "SIGTERM");
+                // A provider that forked is holding the wrong session; bound the
+                // stop so one that ignores SIGTERM cannot strand the run.
+                const activeRun = activeWorkers.get(task.id);
+                if (activeRun) {
+                  activeRun.forceKill = setTimeout(
+                    () => killProcessGroup(child, "SIGKILL"),
+                    FORCE_KILL_GRACE_MS,
+                  );
+                }
               } else if (sessionId === resumeWith && !resumeSessionConfirmed) {
                 resumeSessionConfirmed = true;
                 appendTaskEvent(task.id, "session_reused", task.state, {
@@ -872,18 +899,42 @@ async function runTask(
         if (active.cancelled || stateStore().getTask(task.id)?.state === "cancelled") return;
         continue;
       }
-      // Never turn a failed resume into a fresh session. A fresh worker would
-      // receive the answer but lose the provider's accumulated context.
+      // A resume the provider refused outright — nonzero exit, not a byte of
+      // streamed work — is a session it cannot reopen. Account-level failures
+      // (rate limit, auth, billing, network) would fail a fresh session the same
+      // way and keep their own classification; only a generic refusal is the
+      // shape a hard kill leaves behind. Start a fresh session under the same
+      // task id, seeded with the original prompt and the prior run's context
+      // rebuilt from Inter's own rows.
       if (
         resumeWith && exitCode !== 0 && attemptEvents === 0 &&
-        !active.cancelled && stateStore().getTask(task.id)?.state !== "cancelled"
+        !active.cancelled && stateStore().getTask(task.id)?.state !== "cancelled" &&
+        classifyFailure(`${stderr}\n${stdout}`) === "worker_error"
       ) {
-        sessionUnreachable = true;
+        const priorEvents = stateStore().listTaskEvents(task.id);
         appendTaskEvent(task.id, "resume_failed", task.state, {
           resumedSession: resumeWith,
           exitCode,
           error: stderr.trim().slice(0, 500),
         });
+        const ending = priorRunEnding(priorEvents);
+        const brief = handoffBrief({ ...task, ...ending }, priorEvents, profile.provider, {
+          sameAccount: true,
+          instruction: ending.instruction,
+        });
+        appendTaskEvent(task.id, "resume_fallback", task.state, {
+          resumedSession: resumeWith,
+          tier: brief.tier,
+          chars: brief.chars,
+        });
+        promptOverride = brief.prompt;
+        prompt = shipPrompt(promptOverride);
+        // The stored session is the dead one; a fresh run must capture its own
+        // or every later resume retries the session that just refused to open.
+        stateStore().clearCapturedSession(task.id);
+        task.sessionId = undefined;
+        resumeWith = undefined;
+        continue;
       }
       break;
     }
@@ -894,17 +945,6 @@ async function runTask(
         state: "failed",
         error: message,
         completion: { blocked: true, code: "worker_error", reason: message },
-      }, ["running"]);
-      return;
-    }
-    // The provider took the session id and produced nothing at all: the context
-    // this run was continuing is gone, and only a fresh delegation gets it back.
-    // The provider's own wording stays on the `resume_failed` event.
-    if (sessionUnreachable) {
-      update(task, {
-        state: "failed",
-        error: SESSION_UNREACHABLE,
-        completion: { blocked: true, code: "worker_error", reason: SESSION_UNREACHABLE },
       }, ["running"]);
       return;
     }
@@ -937,10 +977,11 @@ async function runTask(
       output: outcome.output,
       ...(outcome.question ? { question: outcome.question } : {}),
       ...(outcome.error ? { error: outcome.error } : {}),
-      completion: withScopeSuggestion(task, outcome.completion),
+      completion: withUnverifiedEvidence(task, withScopeSuggestion(task, outcome.completion)),
     }, ["running"]);
     if (!persisted) return;
     recordProfileTaskOutcome(stateStore(), task.profileId, outcome, task.model);
+    recordActualEffort(task, profile);
   } catch (error) {
     // A throw from the stream handler abandons a worker mid-flight: its pipe
     // reader is gone, so it would block on a full buffer forever. The cancel
@@ -1003,6 +1044,16 @@ export function antigravityBootstrapRetryReason(
   return undefined;
 }
 
+// `unverified` and `failed` look identical in a task list — both are blocked
+// with a reason string — but an unverified run may have finished the work and
+// only skipped the sign-off. Naming the write scope turns "go read the log" into
+// "go look here" for the coordinator deciding whether to trust it or redo it.
+export function withUnverifiedEvidence(task: Task, completion: Task["completion"]): Task["completion"] {
+  if (!completion || completion.code !== "unverified") return completion;
+  const where = task.scope.write.includes("**") ? task.cwd : task.scope.write.join(", ") || task.cwd;
+  return { ...completion, reason: `${completion.reason}; check ${where} for finished work before redoing it` };
+}
+
 // A permission_denied task knows exactly which paths killed it: the events
 // recorded them. Hand the caller a scope that would have survived so resume
 // is an approval, not a log-reading exercise.
@@ -1040,6 +1091,25 @@ function lastWorkerErrorDetail(
   return { last };
 }
 
+/**
+ * Records the reasoning level the provider session actually ran at, read back
+ * from the session store now the run is over, and flags a mismatch against the
+ * level that was requested. Absent when the provider does not record a level:
+ * that is unknown, never a guess at the requested value.
+ */
+export function recordActualEffort(task: Task, profile: Profile): void {
+  if (!task.sessionId) return;
+  const actual = sessionEffortFrom(profile.provider, task.sessionId, profile);
+  if (actual === undefined) return;
+  stateStore().recordTaskEffortActual(task.id, actual);
+  if (task.effort && task.effort !== actual) {
+    appendTaskEvent(task.id, "effort_mismatch", task.state, {
+      requested: task.effort,
+      actual,
+    });
+  }
+}
+
 export function recordProfileTaskOutcome(
   store: Pick<StateStore, "clearProfileFailure" | "recordProfileFailure">,
   profileId: string,
@@ -1047,7 +1117,7 @@ export function recordProfileTaskOutcome(
   model?: string,
 ): void {
   if (outcome.state === "completed") {
-    store.clearProfileFailure(profileId);
+    store.clearProfileFailure(profileId, model);
     return;
   }
   if (outcome.state !== "failed") return;
@@ -1127,12 +1197,43 @@ function tail(value: string, limit: number): string {
 const RESUMABLE_STATES: Task["state"][] = ["failed", "cancelled", "blocked", "pending"];
 
 /**
- * What a caller can act on when the provider will not reopen a session. The
- * provider's own wording names its storage — a missing file, an unknown id —
- * which tells the reader nothing about what to do next.
+ * What the run being continued ended in, read off the events because `resume`
+ * has already cleared it from the row: the state it was resumed from, the
+ * settled event's failure fields, and the caller's stored instruction. The
+ * fresh-session fallback ships all of it to the next worker, because a session
+ * reboot must not lose the reason the resume exists or what it is continuing.
  */
-const SESSION_UNREACHABLE =
-  "the provider could not reopen this task's session — it has expired or been evicted, so the context it held is gone; delegate a fresh task carrying the context it needs";
+export function priorRunEnding(events: TaskEvent[]): {
+  state?: Task["state"];
+  error?: string;
+  question?: string;
+  completion?: Task["completion"];
+  instruction?: string;
+} {
+  let ending: { state?: Task["state"]; error?: string; question?: string; completion?: Task["completion"] } = {};
+  let instruction: string | undefined;
+  for (const event of events) {
+    if (event.type === "resumed") {
+      if (typeof event.payload.previousState === "string") {
+        ending.state = event.payload.previousState as Task["state"];
+      }
+      if (typeof event.payload.instruction === "string") {
+        instruction = event.payload.instruction;
+      }
+    } else if (
+      event.type === "failed" || event.type === "cancelled" ||
+      event.type === "blocked" || event.type === "needs_input"
+    ) {
+      if (typeof event.payload.error === "string") ending.error = event.payload.error;
+      if (typeof event.payload.question === "string") ending.question = event.payload.question;
+      const completion = event.payload.completion;
+      if (completion && typeof completion === "object" && !Array.isArray(completion)) {
+        ending.completion = completion as Task["completion"];
+      }
+    }
+  }
+  return { ...ending, ...(instruction ? { instruction } : {}) };
+}
 
 function requireTask(id: string): Task {
   const task = stateStore().getTask(id);
@@ -1220,11 +1321,27 @@ export async function reply(
   return task;
 }
 
+/**
+ * States where a follow-up waits instead of running: a worker is on this task
+ * right now, or is about to be. `needs_input` is deliberately absent — that run
+ * is waiting on a person, and `reply` is the way back into it.
+ */
+const WORKING_STATES: Task["state"][] = ["queued", "pending", "running", "answered"];
+
 export async function resumeTask(
   id: string,
   instruction?: string,
   options: ResumeOptions = {},
 ): Promise<Task> {
+  if (options.queue === "clear") {
+    const task = requireTask(id);
+    stateStore().clearFollowUps(id, task.state, "removed on request");
+    return requireTask(id);
+  }
+  if (options.queue === "add") {
+    const task = requireTask(id);
+    if (WORKING_STATES.includes(task.state)) return queueFollowUp(task, instruction, options);
+  }
   const old = requireContinuableTask(id, "resumed", instruction);
   const profile = await requireSessionProfile(
     old,
@@ -1261,6 +1378,68 @@ export async function resumeTask(
   taskWaiter.notify(id);
   launchTask(task, profile, old.sessionId, prompt);
   return task;
+}
+
+/**
+ * Stores a follow-up on a task a worker is still on. Everything else `resume`
+ * accepts describes a run — when it starts, what it may touch, how long it gets
+ * — and a queued item is only an instruction, so passing one of those together
+ * with the queue is a caller who means two different things at once.
+ */
+function queueFollowUp(task: Task, instruction: string | undefined, options: ResumeOptions): Task {
+  const given = instruction?.trim();
+  if (!given) {
+    throw new Error(
+      `a queued follow-up needs an instruction: ${task.id} — say what the worker should do once its current run lands`,
+    );
+  }
+  const conflicting = (["startAt", "scope", "timeoutMs", "allowQuestions"] as const)
+    .filter((key) => options[key] !== undefined);
+  if (conflicting.length > 0) {
+    throw new Error(
+      `a queued follow-up takes only an instruction: ${task.id} — remove ${conflicting.join(", ")}; those settings belong on the resume that starts a run`,
+    );
+  }
+  stateStore().queueFollowUp(task.id, task.state, given);
+  taskWaiter.notify(task.id);
+  return requireTask(task.id);
+}
+
+/**
+ * Feeds the next waiting follow-up back into the session a run just finished
+ * in. Only a clean landing advances the queue: a run that failed, blocked, or
+ * stopped to ask something leaves its items in place, so a hold that later
+ * revives the task picks the queue back up, and nothing is ever sent into a
+ * session that is already in trouble.
+ */
+export async function feedFollowUpQueue(task: Task): Promise<void> {
+  const store = stateStore();
+  if (task.state === "cancelled") {
+    store.clearFollowUps(task.id, task.state, "the task was cancelled");
+    return;
+  }
+  if (task.state !== "completed") {
+    const waiting = store.countFollowUps(task.id);
+    if (waiting > 0) appendTaskEvent(task.id, "follow_ups_paused", task.state, { waiting });
+    return;
+  }
+  const instruction = store.takeNextFollowUp(task.id);
+  if (!instruction) return;
+  appendTaskEvent(task.id, "follow_up_started", task.state, {
+    instruction,
+    waiting: store.countFollowUps(task.id),
+  });
+  try {
+    await resumeTask(task.id, instruction);
+  } catch (error) {
+    // The item is already claimed, so it rides the event rather than vanishing:
+    // whoever queued it can read what was meant to run and send it again.
+    appendTaskEvent(task.id, "follow_ups_paused", task.state, {
+      instruction,
+      waiting: store.countFollowUps(task.id),
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 /**
@@ -1395,8 +1574,12 @@ export async function cancelTask(id: string, reason = "cancelled by caller", tim
   if (active) {
     active.cancelled = true;
     active.task.state = cancelled.state;
-    killProcessGroup(active.child, "SIGTERM");
-    active.forceKill = setTimeout(() => killProcessGroup(active.child, "SIGKILL"), 2_000);
+    if (timedOut) {
+      stopWorker(active);
+    } else {
+      killProcessGroup(active.child, "SIGTERM");
+      active.forceKill = setTimeout(() => killProcessGroup(active.child, "SIGKILL"), FORCE_KILL_GRACE_MS);
+    }
   }
   taskWaiter.notify(id);
   queueContextFold(cancelled.cwd, cancelled.id);
@@ -1486,7 +1669,7 @@ export async function markTaskCompleted(id: string, assertedBy: string, reason: 
     active.cancelled = true;
     active.task.state = completed.state;
     killProcessGroup(active.child, "SIGTERM");
-    active.forceKill = setTimeout(() => killProcessGroup(active.child, "SIGKILL"), 2_000);
+    active.forceKill = setTimeout(() => killProcessGroup(active.child, "SIGKILL"), FORCE_KILL_GRACE_MS);
   }
   taskWaiter.notify(id);
   queueContextFold(completed.cwd, completed.id);
@@ -1522,7 +1705,14 @@ function update(task: Task, patch: Partial<Task>, expectedStates: Task["state"][
   // Every settle funnels through here — run, fail, cancel, question — and a
   // settled task may have written files, so its writes fold into the map. The
   // fold is queued, never awaited: it is housekeeping, not part of the settle.
-  if (patch.state && settled(patch.state)) queueContextFold(task.cwd, task.id);
+  if (patch.state && settled(patch.state)) {
+    queueContextFold(task.cwd, task.id);
+    // Same rule for the follow-up queue: the settle is what decides whether the
+    // next instruction goes in, and it must not wait on the run that follows. A
+    // copy, because a fed follow-up moves the live row out of the state that
+    // decided it.
+    void feedFollowUpQueue({ ...task });
+  }
   return true;
 }
 
@@ -1534,4 +1724,21 @@ function killProcessGroup(child: WorkerProcess, signal: NodeJS.Signals): void {
       child.kill(signal);
     } catch {}
   }
+}
+
+/**
+ * The graceful stop: SIGINT so the provider CLI can flush its session, SIGTERM
+ * if it ignores that, SIGKILL if it ignores that. The pending timer always
+ * lives in `forceKill`, so the run's finally can cancel the ladder the moment
+ * the child is gone.
+ */
+function stopWorker(active: ActiveWorker): void {
+  killProcessGroup(active.child, "SIGINT");
+  active.forceKill = setTimeout(() => {
+    killProcessGroup(active.child, "SIGTERM");
+    active.forceKill = setTimeout(
+      () => killProcessGroup(active.child, "SIGKILL"),
+      SHUTDOWN_TERM_GRACE_MS,
+    );
+  }, SHUTDOWN_INT_GRACE_MS);
 }

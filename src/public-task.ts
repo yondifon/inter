@@ -1,7 +1,7 @@
 import type { Task, TaskAttempt, TaskState, TaskSummary } from "./types";
 
 export const TASK_FIELD_GROUPS = {
-  routing: ["profileId", "model", "effort"],
+  routing: ["profileId", "model", "effort", "effortActual"],
   context: ["cwd", "createdAt", "updatedAt", "title", "tldr", "parentTaskId"],
   scope: ["scope", "grantId", "allowQuestions", "timeoutMs"],
   prompt: ["prompt"],
@@ -47,7 +47,7 @@ function publicAttempt(attempt: TaskAttempt): Omit<TaskAttempt, "sessionId"> {
  */
 export type TaskFieldView =
   & Partial<Omit<Task, "sessionId" | "id" | "state">>
-  & { id: string; state: TaskState; attemptCount?: number };
+  & { id: string; state: TaskState; attemptCount?: number; queuedFollowUps?: number };
 
 /**
  * Return what a caller asked for, and nothing else. The floor is id, state,
@@ -66,12 +66,16 @@ export function taskView(task: Task, fields: readonly TaskField[]): TaskFieldVie
     // attemptCount is always on — it is a number, and it tells the caller there
     // is an attempts group worth asking for.
     ...(task.attempts?.length ? { attemptCount: task.attempts.length } : {}),
+    // Also always on: one number, and the caller that just queued a follow-up
+    // has no other way to learn how many are ahead of it.
+    ...(task.queuedFollowUps ? { queuedFollowUps: task.queuedFollowUps } : {}),
     ...(task.archivedAt ? { archivedAt: task.archivedAt } : {}),
 
     // routing
     ...(want.has("profileId") ? { profileId: task.profileId } : {}),
     ...(want.has("model") ? { model: task.model } : {}),
     ...(want.has("effort") && task.effort ? { effort: task.effort } : {}),
+    ...(want.has("effortActual") && task.effortActual ? { effortActual: task.effortActual } : {}),
 
     // context
     ...(want.has("cwd") ? { cwd: task.cwd } : {}),

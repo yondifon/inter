@@ -30,14 +30,26 @@ export interface ProfileUsage {
   plan?: string;
   observedAt?: string;
   reason?: string;
-  lastRateLimit?: {
+  /** The account-wide failure on file — auth, billing, or network — if any. */
+  accountFailure?: {
     message: string;
     failedAt: string;
     consecutiveFailures: number;
     retryAt?: string;
-    /** The model that was metered, when the run recorded one. */
-    model?: string;
   };
+  /**
+   * Every rate limit currently on file for this profile, one per model. A
+   * provider that meters models separately can have several live at once —
+   * Sonnet exhausted and Opus fine on the same account — so this is a list,
+   * never a single "the" rate limit.
+   */
+  rateLimitsByModel?: Array<{
+    model: string;
+    message: string;
+    failedAt: string;
+    consecutiveFailures: number;
+    retryAt?: string;
+  }>;
   observedRateLimits?: Array<{
     upstream: string;
     model: string;
@@ -108,17 +120,33 @@ export function withUpstreamRateLimits(
 }
 
 export function withObservedRateLimit(usage: ProfileUsage, failures: ProfileFailure[]): ProfileUsage {
-  const failure = failures.find(({ profileId, code }) => profileId === usage.profile && code === "rate_limit");
-  if (!failure) return usage;
+  const own = failures.filter(({ profileId }) => profileId === usage.profile);
+  const account = own.find(({ code }) => code !== "rate_limit");
+  const rateLimits = own.filter(({ code }) => code === "rate_limit");
+  if (!account && rateLimits.length === 0) return usage;
   return {
     ...usage,
-    lastRateLimit: {
-      message: failure.message,
-      failedAt: failure.failedAt,
-      consecutiveFailures: failure.consecutiveFailures,
-      ...(failure.retryAt ? { retryAt: failure.retryAt } : {}),
-      ...(failure.model ? { model: failure.model } : {}),
-    },
+    ...(account
+      ? {
+        accountFailure: {
+          message: account.message,
+          failedAt: account.failedAt,
+          consecutiveFailures: account.consecutiveFailures,
+          ...(account.retryAt ? { retryAt: account.retryAt } : {}),
+        },
+      }
+      : {}),
+    ...(rateLimits.length > 0
+      ? {
+        rateLimitsByModel: rateLimits.map((failure) => ({
+          model: failure.model ?? "unknown",
+          message: failure.message,
+          failedAt: failure.failedAt,
+          consecutiveFailures: failure.consecutiveFailures,
+          ...(failure.retryAt ? { retryAt: failure.retryAt } : {}),
+        })),
+      }
+      : {}),
   };
 }
 

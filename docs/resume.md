@@ -72,18 +72,22 @@ visible result.
 ## When the session is gone
 
 A provider can drop a session — expired, evicted, too large. Inter detects the
-shape of that failure (the resumed worker exits nonzero having emitted no events
-at all), records the provider's own text on a `resume_failed` event, and fails
-the task with what the caller can act on instead:
+shape of that failure (the resumed worker exits nonzero having emitted no
+events at all) and does not treat it as a dead end: it starts a fresh provider
+session **under the same task id**, seeded with a brief built from Inter's own
+stored record of the run that just failed to reopen — the original prompt
+verbatim, plus a summary of why the prior run ended and what it left behind.
+The `resume` call itself does not surface this; it returns once the new run is
+under way, the same as any other resume.
 
-```
-the provider could not reopen this task's session — it has expired or been
-evicted, so the context it held is gone; delegate a fresh task carrying the
-context it needs
-```
+The task's event trace carries both steps: `resume_failed` records the
+provider's refusal, and `resume_fallback` records the fresh session that
+replaced it. Nothing about the caller's `instruction` is lost — it rides into
+the new brief along with the rest of the prior run's context.
 
-Inter never silently restarts a failed resume as a fresh session. A fresh worker
-would receive the instruction and none of the context it assumes.
+This is the same brief-building [`handoff`](handoff.md) uses to move a task to
+a different account, reused here to rebuild a session on the *same* account
+when the session itself, not the account, is what broke.
 
 ## In the app
 

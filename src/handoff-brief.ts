@@ -30,12 +30,26 @@ interface TranscriptLine {
   text: string;
 }
 
+export interface HandoffBriefOptions {
+  /** The caller's explicit instruction to the next worker, replacing the generic continuation line. */
+  instruction?: string;
+  /** A fresh session on the same account, instead of a handoff to a new one. */
+  sameAccount?: boolean;
+}
+
 /**
  * Rebuilds a dead run's context from Inter's own rows so another provider
- * account can pick the task up. Deterministic — no model in the loop — because
- * this is a transform over stored events, not a judgment call.
+ * account can pick the task up — or, with `sameAccount`, so a fresh session on
+ * the same account can when the old one is unusable. Deterministic — no model in
+ * the loop — because this is a transform over stored events, not a judgment
+ * call.
  */
-export function handoffBrief(task: Task, events: TaskEvent[], provider: Provider): HandoffBrief {
+export function handoffBrief(
+  task: Task,
+  events: TaskEvent[],
+  provider: Provider,
+  options: HandoffBriefOptions = {},
+): HandoffBrief {
   const lines = transcript(events, provider);
   const verbatim = render(lines);
   const useVerbatim = verbatim.length <= VERBATIM_CAP;
@@ -47,8 +61,12 @@ export function handoffBrief(task: Task, events: TaskEvent[], provider: Provider
     "",
     task.prompt,
     "",
-    `# Handoff: run ${run} of this task, on a new account`,
-    `A previous worker on profile \`${task.profileId}\` already worked on this task and could not finish. Its provider session cannot be opened from here, so its work is reproduced below from Inter's own record of the run.`,
+    options.sameAccount
+      ? `# Fresh session: run ${run} of this task`
+      : `# Handoff: run ${run} of this task, on a new account`,
+    options.sameAccount
+      ? `A previous run of this task on profile \`${task.profileId}\` could not be continued: its provider session is unusable (a hard stop left its history unable to reopen), so its work is reproduced below from Inter's own record of the run. A fresh session starts now.`
+      : `A previous worker on profile \`${task.profileId}\` already worked on this task and could not finish. Its provider session cannot be opened from here, so its work is reproduced below from Inter's own record of the run.`,
     "",
     "## Why the previous run ended",
     ...endingLines(task),
@@ -60,7 +78,7 @@ export function handoffBrief(task: Task, events: TaskEvent[], provider: Provider
     carried.text || "_The previous run produced no readable trace._",
     "",
     "# Your instruction",
-    "Continue this task from where the previous run stopped. Do not repeat work the trace above shows as already finished, and do not re-read files whose contents it already reports unless you need to verify them. Anything the previous run left unwritten is still yours to produce.",
+    options.instruction?.trim() || "Continue this task from where the previous run stopped. Do not repeat work the trace above shows as already finished, and do not re-read files whose contents it already reports unless you need to verify them. Anything the previous run left unwritten is still yours to produce.",
   ].join("\n");
   return {
     prompt,

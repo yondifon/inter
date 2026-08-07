@@ -4,12 +4,18 @@ import XCTest
 final class SyntaxHighlightTests: XCTestCase {
     func testNamesLanguageFromFenceAndPath() {
         XCTAssertEqual(CodeLanguage(fence: "ts"), .cFamily)
+        XCTAssertEqual(CodeLanguage(fence: "swift"), .cFamily)
         XCTAssertEqual(CodeLanguage(fence: "bash title=run"), .hashFamily)
+        XCTAssertEqual(CodeLanguage(fence: "toml"), .hashFamily)
+        XCTAssertEqual(CodeLanguage(fence: "md"), .markdown)
         XCTAssertEqual(CodeLanguage(fence: nil), .none)
         XCTAssertEqual(CodeLanguage(fence: "mermaid"), .none)
         XCTAssertEqual(CodeLanguage(path: "src/cli.ts"), .cFamily)
+        XCTAssertEqual(CodeLanguage(path: "swift/Sources/DesignSystem.swift"), .cFamily)
         XCTAssertEqual(CodeLanguage(path: "/repo/Makefile"), .hashFamily)
+        XCTAssertEqual(CodeLanguage(path: "Cargo.toml"), .hashFamily)
         XCTAssertEqual(CodeLanguage(path: "inter.config.json"), .json)
+        XCTAssertEqual(CodeLanguage(path: "docs/README.md"), .markdown)
         XCTAssertEqual(CodeLanguage(path: "README"), .none)
     }
 
@@ -54,5 +60,67 @@ final class SyntaxHighlightTests: XCTestCase {
             SyntaxHighlighter.spans("plain # text", language: .none),
             [CodeSpan(kind: .plain, text: "plain # text")]
         )
+    }
+
+    func testHighlightsJSONLiteralsAndStrings() {
+        let source = #"{"ok": true, "count": 3, "name": "inter"}"#
+        let spans = SyntaxHighlighter.spans(source, language: .json)
+
+        XCTAssertEqual(spans.map(\.text).joined(), source)
+        XCTAssertTrue(spans.contains(CodeSpan(kind: .keyword, text: "true")))
+        XCTAssertTrue(spans.contains(CodeSpan(kind: .number, text: "3")))
+        XCTAssertTrue(spans.contains(CodeSpan(kind: .string, text: #""inter""#)))
+    }
+
+    func testHighlightsTOMLCommentsStringsAndBooleans() {
+        let source = """
+        # config
+        name = "inter"
+        debug = true
+        """
+        let spans = SyntaxHighlighter.spans(source, language: CodeLanguage(fence: "toml"))
+
+        XCTAssertEqual(spans.map(\.text).joined(), source)
+        XCTAssertEqual(spans.first, CodeSpan(kind: .comment, text: "# config"))
+        XCTAssertTrue(spans.contains(CodeSpan(kind: .string, text: #""inter""#)))
+        XCTAssertTrue(spans.contains(CodeSpan(kind: .keyword, text: "true")))
+    }
+
+    func testHighlightsMarkdownHeadingsAndInlineCodeButNotDigitsInProse() {
+        let source = """
+        # Title
+        Released in 2024, see `inter.config.json` for details.
+        """
+        let spans = SyntaxHighlighter.spans(source, language: .markdown)
+
+        XCTAssertEqual(spans.map(\.text).joined(), source)
+        XCTAssertEqual(spans.first, CodeSpan(kind: .keyword, text: "# Title"))
+        XCTAssertTrue(spans.contains(CodeSpan(kind: .string, text: "`inter.config.json`")))
+        XCTAssertFalse(spans.contains { $0.kind == .number })
+    }
+
+    func testMarkdownHeadingNeedsASpaceAfterAtMostSixHashes() {
+        let spans = SyntaxHighlighter.spans("#nope\n####### also not a heading", language: .markdown)
+
+        XCTAssertEqual(spans.map(\.text).joined(), "#nope\n####### also not a heading")
+        XCTAssertFalse(spans.contains { $0.kind == .keyword })
+    }
+
+    func testUnterminatedBlockCommentReachesEndOfFileWithoutLosingText() {
+        let source = """
+        let a = 1
+        /* never closes
+        let b = 2
+        """
+        let spans = SyntaxHighlighter.spans(source, language: .cFamily)
+
+        XCTAssertEqual(spans.map(\.text).joined(), source)
+        XCTAssertEqual(spans.last?.kind, .comment)
+        XCTAssertTrue(spans.contains(CodeSpan(kind: .keyword, text: "let")))
+    }
+
+    func testEmptyInputProducesNoSpans() {
+        XCTAssertEqual(SyntaxHighlighter.spans("", language: .cFamily), [])
+        XCTAssertEqual(SyntaxHighlighter.spans("", language: .none), [])
     }
 }

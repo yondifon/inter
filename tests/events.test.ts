@@ -2,6 +2,21 @@ import { describe, expect, test } from "bun:test";
 import { taskEventView } from "../src/events";
 
 describe("task event views", () => {
+  test("renders an effort mismatch as a warning lifecycle event", () => {
+    const view = taskEventView({
+      id: 1,
+      taskId: "task",
+      type: "effort_mismatch",
+      state: "completed",
+      payload: { requested: "max", actual: "high" },
+      createdAt: "now",
+    }, "opencode");
+    expect(view.kind).toBe("lifecycle");
+    expect(view.title).toBe("Effort mismatch");
+    expect(view.detail).toBe("requested max · ran at high");
+    expect(view.presentation).toEqual({ type: "signal", level: "warning", text: "requested max · ran at high" });
+  });
+
   test("turns OpenCode tool JSON into a concise file event", () => {
     const view = taskEventView({
       id: 3,
@@ -384,6 +399,42 @@ describe("task event views", () => {
     expect(view.presentation?.level).toBe("info");
     expect(view.presentation?.text).toContain("five hour · allowed · resets in");
     expect(view.presentation?.text).toContain("overage off");
+  });
+
+  test("reads a rate limit warning in plain words, not the provider's status vocabulary", () => {
+    const view = taskEventView({
+      id: 26,
+      taskId: "task",
+      type: "agent.rate_limit_event",
+      state: "running",
+      payload: {
+        type: "rate_limit_event",
+        rate_limit_info: {
+          status: "allowed_warning", rateLimitType: "five_hour",
+          resetsAt: Math.round(Date.now() / 1_000) + 120,
+        },
+      },
+      createdAt: "now",
+    }, "claude");
+    expect(view.presentation?.level).toBe("warning");
+    expect(view.presentation?.text).toContain("near limit");
+    expect(view.presentation?.text).not.toContain("allowed_warning");
+  });
+
+  test("reads a rejected rate limit in plain words", () => {
+    const view = taskEventView({
+      id: 26,
+      taskId: "task",
+      type: "agent.rate_limit_event",
+      state: "running",
+      payload: {
+        type: "rate_limit_event",
+        rate_limit_info: { status: "rejected", rateLimitType: "five_hour" },
+      },
+      createdAt: "now",
+    }, "claude");
+    expect(view.presentation?.text).toContain("limit reached");
+    expect(view.presentation?.text).not.toBe("rejected");
   });
 
   test("marks Claude tool results as technical echoes", () => {

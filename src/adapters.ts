@@ -1,4 +1,21 @@
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
+import { Database } from "bun:sqlite";
 import type { Profile, Provider } from "./types";
+
+// Claude Code's own workspace-boundary check gates any read outside cwd
+// behind an approval prompt, independent of --permission-mode — without
+// --add-dir, a skill's own reference files sit outside that trusted set and
+// every read on them prompts, which a headless run can never answer.
+function claudeSkillsDir(profile: Profile): string {
+  const configDir = profile.env.CLAUDE_CONFIG_DIR;
+  const home = homedir();
+  const base = configDir
+    ? resolve(configDir.replace(/^\$HOME(?=\/|$)/, home).replace(/^~(?=\/|$)/, home))
+    : resolve(home, ".claude");
+  return resolve(base, "skills");
+}
 
 export function commandFor(
   profile: Profile,
@@ -22,6 +39,7 @@ export function commandFor(
         "claude", "-p", "--output-format", "stream-json", "--verbose", "--model", model,
         ...(effort ? ["--effort", effort] : []),
         "--permission-mode", "acceptEdits", "--allowedTools", "Bash",
+        "--add-dir", claudeSkillsDir(profile),
         ...(hookUrl ? ["--settings", claudeHookSettings(hookUrl)] : []),
         prompt,
       ];
@@ -96,6 +114,7 @@ export function resumeCommandFor(
           "claude", "-p", "--output-format", "stream-json", "--verbose", "--model", model,
           ...(effort ? ["--effort", effort] : []),
           "--permission-mode", "acceptEdits", "--allowedTools", "Bash", "--resume", sessionId,
+          "--add-dir", claudeSkillsDir(profile),
           ...(hookUrl ? ["--settings", claudeHookSettings(hookUrl)] : []),
           prompt,
         ];
@@ -152,6 +171,104 @@ export function sessionIdFrom(provider: Provider, event: Record<string, unknown>
   if (typeof value !== "string") return undefined;
   const sessionId = value.trim();
   return sessionId.length > 0 ? sessionId : undefined;
+}
+
+/**
+ * The reasoning level a run actually used, read back from the provider's own
+ * session store. The requested effort is a claim; the session store is the
+ * record. Returns undefined when the provider does not persist a reasoning
+ * level (or the session id is missing) — never a guess at the requested value.
+ */
+export function sessionEffortFrom(
+  provider: Provider,
+  sessionId: string,
+  profile?: Profile,
+): string | undefined {
+  switch (provider) {
+    case "opencode":
+      return opencodeSessionEffort(sessionId);
+    case "pi":
+      return piSessionEffort(sessionId, profile);
+    default:
+      return undefined;
+  }
+}
+
+// opencode records the session's model as a JSON blob in its `session` table,
+// and the effective reasoning level lives in that blob's `variant` field — the
+// same value Inter hands over via `--variant`. Both DB generations it has used
+// carry the same table shape, so either one answers.
+function opencodeSessionEffort(sessionId: string): string | undefined {
+  const dataDir = opencodeDataDir();
+  if (!dataDir) return undefined;
+  const candidates = [
+    process.env.OPENCODE_DB,
+    "opencode.db",
+    "opencode-next.db",
+  ].filter((name): name is string => Boolean(name) && name !== ":memory:");
+  for (const name of candidates) {
+    const path = join(dataDir, name);
+    if (!existsSync(path)) continue;
+    try {
+      const db = new Database(path, { create: false, strict: true });
+      db.exec("PRAGMA query_only = ON");
+      const row = db.query<{ model: string | null }, [string]>(
+        "SELECT model FROM session WHERE id = ?",
+      ).get(sessionId);
+      db.close();
+      if (!row?.model) continue;
+      const variant = (JSON.parse(row.model) as { variant?: unknown }).variant;
+      if (typeof variant === "string" && variant) return variant;
+    } catch {}
+  }
+  return undefined;
+}
+
+function opencodeDataDir(): string | undefined {
+  const xdg = process.env.XDG_DATA_HOME;
+  const base = xdg ? resolve(xdg) : join(homedir(), ".local", "share");
+  const dir = join(base, "opencode");
+  return existsSync(dir) ? dir : undefined;
+}
+
+// pi writes one JSON entry per session event to
+// `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<id>.jsonl`; the effective
+// thinking level is recorded as a `thinking_level_change` entry, so the last
+// one in the file is what the run actually used. The sessions tree can be
+// relocated through the profile env vars Inter already forwards.
+function piSessionEffort(sessionId: string, profile?: Profile): string | undefined {
+  const sessionsRoot = piSessionsRoot(profile);
+  if (!sessionsRoot) return undefined;
+  let effort: string | undefined;
+  for (const file of readdirSync(sessionsRoot, { recursive: true })) {
+    if (typeof file !== "string" || !file.endsWith(`_${sessionId}.jsonl`)) continue;
+    try {
+      const text = readFileSync(join(sessionsRoot, file), "utf8");
+      for (const line of text.split("\n")) {
+        if (!line.trim()) continue;
+        let entry: { type?: unknown; thinkingLevel?: unknown };
+        try {
+          entry = JSON.parse(line) as typeof entry;
+        } catch {
+          continue;
+        }
+        if (entry.type === "thinking_level_change" && typeof entry.thinkingLevel === "string") {
+          effort = entry.thinkingLevel;
+        }
+      }
+    } catch {}
+  }
+  return effort;
+}
+
+function piSessionsRoot(profile?: Profile): string | undefined {
+  const env = profile?.env ?? {};
+  const sessionDir = env.PI_CODING_AGENT_SESSION_DIR ?? process.env.PI_CODING_AGENT_SESSION_DIR;
+  if (sessionDir) return resolve(sessionDir);
+  const agentDir = env.PI_CODING_AGENT_DIR ?? process.env.PI_CODING_AGENT_DIR
+    ?? join(homedir(), ".pi", "agent");
+  const dir = join(resolve(agentDir), "sessions");
+  return existsSync(dir) ? dir : undefined;
 }
 
 const WRITE_TOOLS = new Set(["write", "write_file", "edit", "multiedit", "create_file", "notebookedit"]);

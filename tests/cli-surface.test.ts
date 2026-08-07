@@ -364,6 +364,9 @@ describe("the build's own answer to /health", () => {
     // comparison `make install` actually needs. "dev" under `bun run`; the
     // Makefile bakes a real sha+time stamp via --define.
     expect(body.build).toBe("dev");
+    // Under `bun run` the running code is the source, so there is no older
+    // build to be stale against.
+    expect(body.stale).toBe(false);
   });
 
   // `make install` decides the running broker is the build it just made by

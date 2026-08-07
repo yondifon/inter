@@ -260,7 +260,8 @@ function runtimeReadPaths(profile: Profile, command: string[], scratchDir: strin
   }
   const dataPaths = profileDataPaths(profile);
   for (const path of dataPaths) paths.push(path);
-  paths.push(...symlinkTargetReadPaths(dataPaths, userHome));
+  const skillRoots = profile.provider === "codex" ? [...dataPaths, resolve(userHome, ".agents")] : dataPaths;
+  paths.push(...symlinkTargetReadPaths(skillRoots, userHome));
   return unique(paths.flatMap((path) => [path, realpathIfPresent(path)]));
 }
 
@@ -303,10 +304,14 @@ function shebangInterpreter(executable: string): string | undefined {
 // symlink into ~/.dotfiles, and seatbelt checks the link's target, not the
 // link. Grant read on immediate symlink targets that stay inside the user's
 // own home or temp — anything further is the CLI's data, not user bootstrap.
-function symlinkTargetReadPaths(dataPaths: string[], userHome: string): string[] {
+// Marketplace and plugin skills are commonly installed the same way, one
+// level deeper — `<config root>/skills/<name>` symlinked into a plugin cache
+// — so each root's `skills` directory gets the same one-level scan.
+function symlinkTargetReadPaths(configRoots: string[], userHome: string): string[] {
   const targets: string[] = [];
   const tempRoot = realpathIfPresent(tmpdir());
-  for (const dir of dataPaths) {
+  const scanDirs = unique(configRoots.flatMap((dir) => [dir, join(dir, "skills")]));
+  for (const dir of scanDirs) {
     let entries: string[] = [];
     try {
       entries = readdirSync(dir);

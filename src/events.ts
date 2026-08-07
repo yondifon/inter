@@ -78,9 +78,22 @@ export function taskEventView(event: TaskEvent, provider: Profile["provider"]): 
             ? truncate((firstString(event.payload.question) ?? "").replace(/\s+/g, " "), 160)
             : event.type === "answered"
               ? truncate((firstString(event.payload.answer) ?? "").replace(/\s+/g, " "), 160)
-              : event.type === "resumed"
+              : event.type === "resumed" || event.type === "follow_up_queued" ||
+                  event.type === "follow_up_started"
                 ? firstString(event.payload.instruction)
-                : firstString(event.payload.provider, event.payload.model));
+                : event.type === "follow_ups_paused"
+                  ? `${Number(event.payload.waiting ?? 0)} waiting until the task finishes cleanly`
+                  : event.type === "follow_ups_dropped"
+                    ? joinDetail(
+                      plural(Number(event.payload.dropped ?? 0), "follow-up"),
+                      string(event.payload.reason),
+                    )
+                    : event.type === "effort_mismatch"
+                      ? joinDetail(
+                        string(event.payload.requested) ? `requested ${event.payload.requested}` : undefined,
+                        string(event.payload.actual) ? `ran at ${event.payload.actual}` : undefined,
+                      )
+                      : firstString(event.payload.provider, event.payload.model));
     return {
       ...base,
       kind: event.type === "failed" || event.type === "scope_refusal" ? "error" : "lifecycle",
@@ -88,6 +101,9 @@ export function taskEventView(event: TaskEvent, provider: Profile["provider"]): 
       title: lifecycleTitle(event.type),
       ...(event.payload.error ? { detail: String(event.payload.error) } : detail ? { detail } : {}),
       ...(dropped ? { presentation: { type: "signal" as const, level: "warning" as const, text: dropped } } : {}),
+      ...(event.type === "effort_mismatch"
+        ? { presentation: { type: "signal" as const, level: "warning" as const, text: detail } }
+        : {}),
       ...(rawText ? { rawText } : {}),
       ...(event.type === "heartbeat" && event.payload.stalled !== true ? { minor: true } : {}),
     };
@@ -452,7 +468,7 @@ function knownAgentEvent(
     const remainingMs = resetsAt ? resetsAt * 1_000 - Date.now() : 0;
     const text = joinDetail(
       string(info.rateLimitType)?.replaceAll("_", " "),
-      status,
+      status ? rateLimitStatusLabel(status) : undefined,
       remainingMs > 0 ? `resets in ${formatDuration(remainingMs)}` : undefined,
       info.isUsingOverage === false && string(info.overageStatus) === "rejected" ? "overage off" : undefined,
     ) ?? "Rate limit";
@@ -874,6 +890,11 @@ function lifecycleTitle(type: string): string {
     hold_released_late: "Started late",
     hold_expired: "Hold expired",
     hold_dropped: "Hold removed",
+    effort_mismatch: "Effort mismatch",
+    follow_up_queued: "Follow-up queued",
+    follow_up_started: "Follow-up started",
+    follow_ups_paused: "Follow-ups not sent",
+    follow_ups_dropped: "Follow-ups removed",
     handoff_brief: "Handoff brief built",
     scope_refusal: "Write refused by scope" } as Record<string, string>)[type] ?? humanize(type);
 }
@@ -1347,6 +1368,13 @@ function firstRawString(...values: unknown[]): string | undefined {
 
 function truncate(value: string, limit: number): string {
   return value.length <= limit ? value : `${value.slice(0, limit - 1)}…`;
+}
+
+/// The provider's own vocabulary for how a rate-limit check came out — plain
+/// words for the two states worth a reader's attention, everything else read
+/// as-is rather than guessing at a provider status this hasn't seen yet.
+function rateLimitStatusLabel(status: string): string {
+  return { allowed_warning: "near limit", rejected: "limit reached" }[status] ?? status;
 }
 
 function humanize(value: string): string {

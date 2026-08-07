@@ -135,6 +135,7 @@ describe("taskView", () => {
     grantId: "grant-1",
     timeoutMs: 60_000,
     effort: "xhigh",
+    effortActual: "high",
     tldr: "Add dark mode",
     title: "Dark mode",
     completion: { blocked: false, code: "completed" },
@@ -177,6 +178,7 @@ describe("taskView", () => {
     expect(view).toHaveProperty("profileId", full.profileId);
     expect(view).toHaveProperty("model", full.model);
     expect(view).toHaveProperty("effort", full.effort);
+    expect(view).toHaveProperty("effortActual", full.effortActual);
     expect(view).not.toHaveProperty("cwd");
     expect(view).not.toHaveProperty("createdAt");
     expect(view).not.toHaveProperty("title");

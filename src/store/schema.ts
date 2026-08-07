@@ -35,6 +35,9 @@ const MIGRATIONS = [
   [13, "task token usage"],
   [14, "project context maps"],
   [15, "task holds"],
+  [16, "task follow-up queue"],
+  [17, "task actual reasoning effort"],
+  [18, "profile failures keyed per model"],
 ] as const;
 
 /**
@@ -110,13 +113,17 @@ export function migrateDatabase(db: Database): { needsSessionBackfill: boolean }
     );
     CREATE INDEX IF NOT EXISTS task_events_task_id ON task_events(task_id, id);
     CREATE TABLE IF NOT EXISTS profile_failures (
-      profile_id TEXT PRIMARY KEY REFERENCES profiles(id),
+      profile_id TEXT NOT NULL REFERENCES profiles(id),
       code TEXT NOT NULL CHECK(code IN ('auth','billing','rate_limit','network')),
       message TEXT NOT NULL,
       failed_at TEXT NOT NULL,
       consecutive_failures INTEGER NOT NULL,
       retry_at TEXT,
-      model TEXT
+      -- '' is the account-wide row (auth, billing, network); a named model is
+      -- its own rate-limit row, since a provider metering models separately can
+      -- have several live at once and one row could only ever hold the latest.
+      model TEXT NOT NULL DEFAULT '',
+      PRIMARY KEY(profile_id, model)
     );
     CREATE TABLE IF NOT EXISTS memories (
       cwd TEXT NOT NULL,
@@ -180,6 +187,13 @@ export function migrateDatabase(db: Database): { needsSessionBackfill: boolean }
       updated_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS task_holds_due ON task_holds(next_check_at);
+    CREATE TABLE IF NOT EXISTS task_follow_ups (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+      instruction TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS task_follow_ups_task ON task_follow_ups(task_id, id);
     INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (1, 'profiles tasks and events');
   `);
   const columns = new Set(db.query<{ name: string }, []>(
@@ -215,6 +229,11 @@ export function migrateDatabase(db: Database): { needsSessionBackfill: boolean }
     // was complete and the decision history absent, so nothing could tell a good
     // routing call from a lucky caller guess after the fact.
     ["selection_json", "TEXT"],
+    // The reasoning level the run actually used, read back from the provider's
+    // session store after the run. NULL until a provider has a session to read;
+    // distinct from the requested `effort` so a worker that ran at another level
+    // is visible instead of reported at the level it was asked for.
+    ["effort_actual", "TEXT"],
   ] as const) {
     if (!taskColumns.has(column)) {
       db.exec(`ALTER TABLE tasks ADD COLUMN ${column} ${type}`);
@@ -254,6 +273,7 @@ export function migrateDatabase(db: Database): { needsSessionBackfill: boolean }
   }
   widenProviderCheck(db);
   widenProfileFailureCodeCheck(db);
+  widenProfileFailurePrimaryKey(db);
   widenTaskStateCheck(db);
   const backfilled = db.query<{ version: number }, []>(
     "SELECT version FROM schema_migrations WHERE version = 5",
@@ -348,6 +368,37 @@ function widenProfileFailureCodeCheck(db: Database): void {
     FROM profile_failures;
     DROP TABLE profile_failures;
     ALTER TABLE profile_failures_v2 RENAME TO profile_failures;
+  `);
+}
+
+// A single-column PRIMARY KEY(profile_id) could hold only the most recent
+// failure per profile: a rate limit on one model overwrote a still-live limit
+// on another, since ON CONFLICT(profile_id) has no way to tell them apart.
+// The rebuild widens the key to (profile_id, model) so each model's own limit
+// survives the next one's arrival.
+function widenProfileFailurePrimaryKey(db: Database): void {
+  const existing = db.query<{ sql: string }, []>(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'profile_failures'",
+  ).get();
+  if (!existing || existing.sql.includes("PRIMARY KEY(profile_id, model)")) return;
+  rebuildTable(db, `
+    CREATE TABLE profile_failures_v3 (
+      profile_id TEXT NOT NULL REFERENCES profiles(id),
+      code TEXT NOT NULL CHECK(code IN ('auth','billing','rate_limit','network')),
+      message TEXT NOT NULL,
+      failed_at TEXT NOT NULL,
+      consecutive_failures INTEGER NOT NULL,
+      retry_at TEXT,
+      model TEXT NOT NULL DEFAULT '',
+      PRIMARY KEY(profile_id, model)
+    );
+    INSERT OR REPLACE INTO profile_failures_v3(
+      profile_id, code, message, failed_at, consecutive_failures, retry_at, model
+    )
+    SELECT profile_id, code, message, failed_at, consecutive_failures, retry_at, COALESCE(model, '')
+    FROM profile_failures;
+    DROP TABLE profile_failures;
+    ALTER TABLE profile_failures_v3 RENAME TO profile_failures;
   `);
 }
 

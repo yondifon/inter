@@ -25,11 +25,12 @@ export const RESUME_DESCRIPTION = [
   "Two uses. Retry a failed, cancelled, or blocked run — instruction optional, and the run picks up where it stopped.",
   "Or follow up on a completed one: pass instruction saying what to do next and the worker gets it in the session it already finished in, still holding the files it read and the reasoning behind what it built. That is the cheap way to iterate — a fresh delegation re-reads everything and loses why the work is the way it is.",
   "A completed task without instruction is rejected: there is nothing to retry, so the instruction is the whole job.",
+  "A third use, while a worker is still on the task: pass queue: \"add\" with the instruction and it waits its turn, then Inter sends it into that same session itself the moment the run finishes clean. That is how to stack up several rounds of work without watching for each one to land.",
   "The finished run is not overwritten. It becomes an attempt carrying its own output, completion and session, so inspect with fields: [\"attempts\"] still shows what the earlier run produced.",
   "Pass only the Inter task ID; Inter maps it to the private root provider session.",
   "Optional scope and allowQuestions replace those task settings before continuation; get explicit approval before expanding scope.",
   "Use reply instead when the task needs input, and handoff when the account itself failed and cannot answer — a rate-limited task carries completion.resetsAt, the time this session becomes resumable again.",
-  "A provider that can no longer open the session fails the task saying the context is gone; delegate a fresh task at that point.",
+  "A session the provider can no longer reopen — its history was left unusable by an interrupted run — is not a dead end: resume starts a fresh session under the same task id, seeded with the original prompt and a summary of the prior run.",
   "By default a small acknowledgement; pass `fields` to get more.",
 ].join(" ");
 

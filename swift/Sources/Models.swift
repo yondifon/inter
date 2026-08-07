@@ -126,6 +126,10 @@ struct TaskSnapshot: Codable, Identifiable, Hashable, Sendable {
     var costUsd: Double?
     var turns: Int?
     var archivedAt: String?
+    /// Instructions stacked up behind the current run, sent into the same session
+    /// one at a time as it finishes each. Absent when nothing is waiting, and on
+    /// the list rows, which never carry the count.
+    var queuedFollowUps: Int? = nil
     /// What this run may read and write. Absent on tasks predating the field.
     var scope: TaskScope?
     /// How the run ended, when it did not land clean. Absent while a task is

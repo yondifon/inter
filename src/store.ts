@@ -76,6 +76,7 @@ interface TaskRow {
   allow_questions: number;
   timeout_ms: number | null;
   effort: string | null;
+  effort_actual: string | null;
   tldr: string | null;
   title: string | null;
   session_id: string | null;
@@ -86,11 +87,13 @@ interface TaskRow {
   archived_at: string | null;
   created_at: string;
   updated_at: string;
+  /** Only the single-task read counts these; the list poll leaves the column off. */
+  follow_ups?: number;
 }
 
 const TASK_COLUMNS = `id, profile_id, model, prompt, shipped_prompt, cwd, state, output, error,
              question, parent_task_id, scope_json, grant_id, allow_questions, timeout_ms,
-             effort, tldr, title, session_id, completion_json, attempts_json, cost_usd, turns, archived_at,
+             effort, effort_actual, tldr, title, session_id, completion_json, attempts_json, cost_usd, turns, archived_at,
              created_at, updated_at`;
 
 // Heartbeats fire every 10s regardless of worker activity, so counting them as
@@ -352,7 +355,7 @@ export class StateStore {
     if (applied > LATEST_SCHEMA_VERSION) {
       throw new Error(
         `cannot observe ${this.path}: database schema v${applied} is newer than this binary knows ` +
-        `(v${LATEST_SCHEMA_VERSION}); upgrade inter`,
+        `(v${LATEST_SCHEMA_VERSION}); run \`make install\` to rebuild it`,
       );
     }
     if (applied < LATEST_SCHEMA_VERSION) {
@@ -753,6 +756,59 @@ export class StateStore {
   }
 
   /**
+   * Appends a follow-up instruction to a task that is still working. The row
+   * is the durable half of the feature: a broker restart loses the worker, not
+   * the queue. Ordering is the autoincrement id, so FIFO needs no clock and two
+   * items added in the same millisecond still keep the order they arrived in.
+   */
+  queueFollowUp(taskId: string, state: TaskState, instruction: string): void {
+    this.transaction(() => {
+      this.database.query(
+        "INSERT INTO task_follow_ups(task_id, instruction, created_at) VALUES (?, ?, ?)",
+      ).run(taskId, instruction, new Date().toISOString());
+      this.addTaskEvent(taskId, "follow_up_queued", state, {
+        instruction,
+        waiting: this.countFollowUps(taskId),
+      });
+    });
+  }
+
+  countFollowUps(taskId: string): number {
+    return this.database.query<{ waiting: number }, [string]>(
+      "SELECT COUNT(*) AS waiting FROM task_follow_ups WHERE task_id = ?",
+    ).get(taskId)?.waiting ?? 0;
+  }
+
+  /**
+   * Removes and returns the oldest waiting instruction. The delete is the
+   * atomic claim, exactly as it is for a hold: two settles racing over one task
+   * cannot both feed the same item back into the session.
+   */
+  takeNextFollowUp(taskId: string): string | undefined {
+    let claimed: string | undefined;
+    this.transaction(() => {
+      const row = this.database.query<{ id: number; instruction: string }, [string]>(
+        "SELECT id, instruction FROM task_follow_ups WHERE task_id = ? ORDER BY id LIMIT 1",
+      ).get(taskId);
+      if (!row) return;
+      const changed = this.database.query("DELETE FROM task_follow_ups WHERE id = ?").run(row.id);
+      if (changed.changes !== 1) return;
+      claimed = row.instruction;
+    });
+    return claimed;
+  }
+
+  /** Empties the queue. Silent on an already-empty one, so no row says nothing happened. */
+  clearFollowUps(taskId: string, state: TaskState, reason: string): void {
+    this.transaction(() => {
+      const dropped = this.countFollowUps(taskId);
+      if (dropped === 0) return;
+      this.database.query("DELETE FROM task_follow_ups WHERE task_id = ?").run(taskId);
+      this.addTaskEvent(taskId, "follow_ups_dropped", state, { dropped, reason });
+    });
+  }
+
+  /**
    * Lands a held task `blocked` when its hold gave up — expiry or the probe
    * cap. `blocked` rather than `cancelled` so a task that silently never ran
    * stays in front of a human instead of joining the quiet ledger.
@@ -832,6 +888,15 @@ export class StateStore {
     `).run(costUsd ?? null, turns ?? null, tokensIn ?? null, tokensOut ?? null, id);
   }
 
+  /**
+   * Records the reasoning level the provider session actually ran at, read
+   * back after the run. The requested level lives in `effort`; this is what
+   * really happened, so a worker that ran at another level is visible.
+   */
+  recordTaskEffortActual(id: string, actual: string): void {
+    this.database.query("UPDATE tasks SET effort_actual = ? WHERE id = ?").run(actual, id);
+  }
+
   captureTaskSessionId(id: string, provider: Profile["provider"], sessionId: string): boolean {
     const value = sessionId.trim();
     if (!value) return false;
@@ -851,6 +916,15 @@ export class StateStore {
       captured = true;
     });
     return captured;
+  }
+
+  /**
+   * Drop the captured session so a fresh run can record a new one. The
+   * resume-fallback path does this when the stored session is unusable: leaving
+   * it would make every later resume retry the dead session.
+   */
+  clearCapturedSession(id: string): void {
+    this.database.query("UPDATE tasks SET session_id = NULL WHERE id = ?").run(id);
   }
 
   /**
@@ -945,6 +1019,13 @@ export class StateStore {
       `).run(state, reason, JSON.stringify(completion), now, id);
       if (changed.changes !== 1) return;
       this.database.query("DELETE FROM task_holds WHERE task_id = ?").run(id);
+      // A cancelled task has nothing left to follow up on, so its waiting
+      // instructions go the way its hold does rather than outliving it.
+      const dropped = this.countFollowUps(id);
+      if (dropped > 0) {
+        this.database.query("DELETE FROM task_follow_ups WHERE task_id = ?").run(id);
+        this.addTaskEvent(id, "follow_ups_dropped", state, { dropped, reason });
+      }
       this.addTaskEvent(id, state, state, { error: reason, completion });
       cancelled = true;
     });
@@ -1264,8 +1345,12 @@ export class StateStore {
   }
 
   getTask(id: string): Task | undefined {
+    // The follow-up count rides this read and not TASK_COLUMNS: the app polls
+    // the list route every two seconds and would pay the subquery per row for
+    // a number only the opened task shows.
     const row = this.database.query<TaskRow, [string]>(`
-      SELECT ${TASK_COLUMNS}
+      SELECT ${TASK_COLUMNS},
+             (SELECT COUNT(*) FROM task_follow_ups WHERE task_id = tasks.id) AS follow_ups
       FROM tasks WHERE id = ?
     `).get(id);
     return row ? taskFromRow(row) : undefined;
@@ -1618,18 +1703,24 @@ export class StateStore {
         profile_id, code, message, failed_at, consecutive_failures, retry_at, model
       )
       VALUES (?, ?, ?, ?, 1, ?, ?)
-      ON CONFLICT(profile_id) DO UPDATE SET
+      ON CONFLICT(profile_id, model) DO UPDATE SET
         code = excluded.code,
         message = excluded.message,
         failed_at = excluded.failed_at,
         consecutive_failures = profile_failures.consecutive_failures + 1,
-        retry_at = excluded.retry_at,
-        model = excluded.model
-    `).run(profileId, code, message.slice(0, 1_000), failedAt, resolvedRetryAt, model ?? null);
+        retry_at = excluded.retry_at
+    `).run(profileId, code, message.slice(0, 1_000), failedAt, resolvedRetryAt, model ?? "");
   }
 
-  clearProfileFailure(profileId: string): void {
-    this.database.query("DELETE FROM profile_failures WHERE profile_id = ?").run(profileId);
+  /**
+   * A success on one model only proves that model's own row and the
+   * account-wide row (auth, billing, network — recorded with no model) are
+   * clear; a still-live rate limit on a different model of the same profile
+   * must survive it.
+   */
+  clearProfileFailure(profileId: string, model?: string): void {
+    this.database.query("DELETE FROM profile_failures WHERE profile_id = ? AND model IN (?, '')")
+      .run(profileId, model ?? "");
   }
 
   listProfileFailures(): ProfileFailure[] {
@@ -1993,6 +2084,7 @@ function taskFromRow(row: TaskRow): Task {
     allowQuestions: row.allow_questions === 1,
     ...(row.timeout_ms ? { timeoutMs: row.timeout_ms } : {}),
     ...(row.effort ? { effort: row.effort } : {}),
+    ...(row.effort_actual ? { effortActual: row.effort_actual } : {}),
     ...(row.tldr ? { tldr: row.tldr } : {}),
     ...(row.title ? { title: row.title } : {}),
     ...(row.session_id ? { sessionId: row.session_id } : {}),
@@ -2005,6 +2097,7 @@ function taskFromRow(row: TaskRow): Task {
     ...(row.cost_usd === null ? {} : { costUsd: row.cost_usd }),
     ...(row.turns === null ? {} : { turns: row.turns }),
     ...(row.archived_at ? { archivedAt: row.archived_at } : {}),
+    ...(row.follow_ups ? { queuedFollowUps: row.follow_ups } : {}),
   };
 }
 

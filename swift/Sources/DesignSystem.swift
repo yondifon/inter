@@ -178,6 +178,35 @@ enum DiffTint {
     static let removed = Color.red
 }
 
+/// Syntax colour: four tints, none of them the diff's red or green — a string
+/// tinted red inside a removed line would read as part of the removal rather
+/// than as a string. Kept to a small palette on purpose; a colour per token
+/// class competes with the diff's own signal instead of sitting under it.
+enum SyntaxTint {
+    static let keyword = tone(light: 0x8A3F_FCFF, dark: 0xC9A0_FFFF)
+    static let string = tone(light: 0xA162_0AFF, dark: 0xE0A4_58FF)
+    static let number = tone(light: 0x0F76_6EFF, dark: 0x5FCF_C6FF)
+    static let comment = tone(light: 0x6B72_80FF, dark: 0x8B94_9EFF)
+
+    private static func tone(light: UInt32, dark: UInt32) -> Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            return NSColor(rgba: isDark ? dark : light)
+        })
+    }
+}
+
+private extension NSColor {
+    convenience init(rgba: UInt32) {
+        self.init(
+            srgbRed: CGFloat((rgba >> 24) & 0xFF) / 255,
+            green: CGFloat((rgba >> 16) & 0xFF) / 255,
+            blue: CGFloat((rgba >> 8) & 0xFF) / 255,
+            alpha: CGFloat(rgba & 0xFF) / 255
+        )
+    }
+}
+
 /// The trace's one stroke: a 2pt rule that stands in for a container. Signals,
 /// quotes, and handoffs draw one of these on the page's edge instead of a
 /// filled surface — the color is all that varies.
@@ -418,29 +447,32 @@ enum TaskState: String {
     }
 
     /// Muted by default. A list of completed tasks should read as a quiet ledger,
-    /// so only states that want a human get saturated color.
+    /// so only states that want a human get saturated color. `answered` keeps
+    /// `needsInput`'s blue — it's the same question, just no longer waiting on
+    /// anyone — and drops to a ring since it stopped asking.
     var tint: Color {
         switch self {
         case .completed: Color(nsColor: .systemGreen).opacity(0.7)
         case .failed: Color(nsColor: .systemRed).opacity(0.9)
-        case .blocked: Color(nsColor: .systemOrange)
-        case .cancelled: .secondary
-        case .needsInput: .blue
+        case .blocked: Color(nsColor: .systemRed)
+        case .needsInput, .answered: .blue
         // Real work with a real future, not a hole in the list — so not the
         // tertiary grey queued uses.
-        case .running, .answered, .pending: .secondary
+        case .running, .pending, .cancelled: .secondary
         case .queued, .unknown: Color(nsColor: .tertiaryLabelColor)
         }
     }
 
-    /// Fill backs up the color so state survives color-blind vision: a run that
-    /// landed is a solid dot, one that has not is a ring, and live work pulses.
+    /// Fill backs up the color so state survives color-blind vision: `failed`
+    /// (solid) and `completed` (ring) must read apart by shape alone, since
+    /// their colors differ only in hue. Live work pulses; everything else is
+    /// either solid or outlined, and no two states share both a color and a
+    /// fill — that pairing, not the fill alone, is what keeps every dot unique.
     var dot: StateDot {
         switch self {
         case .running: .pulse
-        case .completed, .blocked, .needsInput: .filled
-        // A ring, not a pulse: nothing is running while a task waits.
-        case .failed, .queued, .pending, .answered, .cancelled, .unknown: .ring
+        case .failed, .needsInput, .cancelled, .unknown: .filled
+        case .blocked, .completed, .queued, .pending, .answered: .ring
         }
     }
 

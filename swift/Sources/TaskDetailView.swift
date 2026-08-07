@@ -61,6 +61,14 @@ struct TaskDetail: View {
     /// run that lands while it is being read would otherwise yank the trace back
     /// to the top under the reader.
     @State private var followsTail: Bool
+    /// Whether this open should land on the run's closing response. Fixed from
+    /// the state the task had when the pane opened — same reasoning as
+    /// `followsTail`: a task that settles while already open must not yank the
+    /// reader to a response they weren't reading toward.
+    @State private var wantsInitialFocus: Bool
+    /// Set once the initial scroll-to-response has been attempted, so a later
+    /// recompose (a technical-events toggle, a late event) never fires it twice.
+    @State private var hasAppliedInitialFocus = false
     /// Tail-paging — oldest event id loaded and whether the server has more.
     @State private var oldestId: Int = 0
     @State private var hasEarlier = false
@@ -86,6 +94,14 @@ struct TaskDetail: View {
         // A finished run is read from the beginning; only a live one is read from
         // the end, where the next event will land.
         _followsTail = State(initialValue: !TaskState(listItem.state).isTerminal)
+        _wantsInitialFocus = State(initialValue: TaskDetail.isSettled(TaskState(listItem.state)))
+    }
+
+    /// Settled, with a response worth landing on — as opposed to `isTerminal`,
+    /// which also covers `needsInput`/`answered`: a run mid-turn waiting on a
+    /// human has nothing closing to focus yet.
+    private static func isSettled(_ state: TaskState) -> Bool {
+        [.completed, .failed, .blocked, .cancelled].contains(state)
     }
 
     var body: some View {
@@ -233,9 +249,39 @@ struct TaskDetail: View {
                     ScrollJumpControl(proxy: proxy)
                         .padding(.bottom, 16 * uiScale)
                 }
+                // The response row itself needs the scroll — it may sit deep in
+                // a chapter, well short of the tail `defaultScrollAnchor` lands
+                // on. Fires once composition first has something to land on;
+                // `hasAppliedInitialFocus` keeps a later recompose from
+                // re-scrolling out from under a reader who has moved on.
+                .onChange(of: story.blocks) { _, _ in focusResponseIfNeeded(proxy: proxy) }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// The event this open should treat as the focused response — stable for
+    /// the pane's whole lifetime once found, unlike the one-shot scroll below.
+    /// Deliberately not gated on `hasAppliedInitialFocus`: that flag exists to
+    /// fire the imperative scroll exactly once, but the row's expanded state
+    /// and highlight are declarative and must keep pointing at the same event
+    /// after the scroll fires, not flip back to unfocused the next render.
+    private var initialFocusEventId: Int? {
+        guard wantsInitialFocus else { return nil }
+        return ActivityStory.responseEvent(in: events)?.id
+    }
+
+    /// Scrolls to and marks-attempted exactly once, as soon as composition has
+    /// produced something to scroll to. A run with no message event to focus
+    /// still counts as attempted — it falls back to the ordinary open behaviour
+    /// rather than retrying on every future compose.
+    private func focusResponseIfNeeded(proxy: ScrollViewProxy) {
+        guard wantsInitialFocus, !hasAppliedInitialFocus, !loading, !composeInFlight else { return }
+        hasAppliedInitialFocus = true
+        guard let id = ActivityStory.responseEvent(in: events)?.id else { return }
+        withAnimation(.easeOut(duration: 0.2)) {
+            proxy.scrollTo(id, anchor: .center)
+        }
     }
 
     @ViewBuilder private var sectionContent: some View {
@@ -361,6 +407,14 @@ struct TaskDetail: View {
                 TaskMetaChip(text: resolvedDisplayPath, label: "Folder", full: resolvedCwd, maxChars: 28) {
                     Image(systemName: "folder").font(.system(size: 6 * uiScale, weight: .medium))
                 }
+                // Work already sent that this run has not reached yet. It changes
+                // what the reader is looking at — the task is not over when this
+                // run lands — so it belongs beside the run's identity.
+                if let waiting = task?.queuedFollowUps, waiting > 0 {
+                    TaskMetaChip(text: waitingFollowUpsLabel(waiting), label: "Follow-ups waiting") {
+                        Image(systemName: "list.bullet").font(.system(size: 6 * uiScale, weight: .medium))
+                    }
+                }
             }
         }
     }
@@ -393,6 +447,10 @@ struct TaskDetail: View {
     private func copyToPasteboard(_ text: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    private func waitingFollowUpsLabel(_ count: Int) -> String {
+        count == 1 ? "1 follow-up waiting" : "\(count) follow-ups waiting"
     }
 
     /// A profile with its own `command` is opaque to us, so no resume line is
@@ -521,7 +579,7 @@ struct TaskDetail: View {
             }
             LazyVStack(alignment: .leading, spacing: 16) {
                 ForEach(displayedBlocks) { block in
-                    ActivityBlockView(block: block, live: !TaskState(liveState).isTerminal)
+                    ActivityBlockView(block: block, live: !TaskState(liveState).isTerminal, focusEventId: initialFocusEventId)
                 }
                 if showingTechnicalEvents, !story.technical.isEmpty {
                     ActivityChapterCard(rows: story.technical.map(ChapterRow.work), muted: true, live: false)
@@ -1123,11 +1181,15 @@ private struct ActivityBlockView: View {
     /// Present-tense verbs while the current run is still moving; earlier
     /// handoff legs and the technical list are always past tense.
     var live = false
+    /// The run's response event, on the one open where it should be the
+    /// focus. Only a chapter can hold it — the response is a worker message,
+    /// never a signal, receipt, or handoff row.
+    var focusEventId: Int? = nil
 
     var body: some View {
         switch block {
         case .chapter(_, let rows):
-            ActivityChapterCard(rows: rows, muted: false, live: live)
+            ActivityChapterCard(rows: rows, muted: false, live: live, focusEventId: focusEventId)
         case .reasoning(let pulse):
             ActivityReasoningRow(pulse: pulse)
         case .signal(let event):
@@ -1148,13 +1210,15 @@ struct ActivityChapterCard: View {
     let rows: [ChapterRow]
     var muted = false
     var live = false
+    var focusEventId: Int? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             ForEach(rows) { row in
                 switch row {
                 case .work(let event):
-                    ActivityWorkRow(event: event, muted: muted, live: live)
+                    ActivityWorkRow(event: event, muted: muted, live: live, initiallyExpanded: event.id == focusEventId)
+                        .id(event.id)
                 case .reasoning(let pulse):
                     ActivityReasoningRow(pulse: pulse)
                 }
@@ -1170,67 +1234,141 @@ private struct ActivityWorkRow: View {
     var muted = false
     /// Present tense while the run is still moving; past once it settles.
     var live = false
-    @State private var showingRawDetails = false
+    @State private var showingRawDetails: Bool
+    /// Whether this row opened already expanded because it is the run's
+    /// focused response — set once, at construction, from the parent's
+    /// choice of which row to land on. The highlight below reads off this
+    /// together with the row's own (user-toggleable) `showingRawDetails`, so
+    /// collapsing the row once is enough to drop the highlight for good —
+    /// nothing here re-asserts it after that.
+    private let isFocusTarget: Bool
     @Environment(\.taskCwd) private var taskCwd
+
+    init(event: TaskEventSnapshot, muted: Bool = false, live: Bool = false, initiallyExpanded: Bool = false) {
+        self.event = event
+        self.muted = muted
+        self.live = live
+        isFocusTarget = initiallyExpanded
+        _showingRawDetails = State(initialValue: initiallyExpanded)
+    }
 
     /// The verb that opens the row, when the title is a known tool.
     private var verb: String? { ToolIcon.verb(for: event, live: live) }
 
+    /// Lifecycle and error rows narrate the app to itself — a hold clearing,
+    /// a worker starting — rather than content the worker produced. They
+    /// collapse to one line instead of a title over a detail line.
+    private var isNotice: Bool { event.kind == "lifecycle" || event.kind == "error" }
+
+    /// A notice with nothing to add past its own name — "Resumed", "Started",
+    /// "Session Reused" — has no second half to put on the line. Shown at
+    /// full row weight it competes with the content around it for no reason;
+    /// this is the step past one line, down to a bare word a reader can skip.
+    private var isBareNotice: Bool { isNotice && (event.detail?.isEmpty ?? true) }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .center, spacing: 8) {
-                if isQuote {
-                    quoteContent
-                } else {
-                    // The verb is a label and the subject — a path, a
-                    // command — is the content a reader scans for, so the
-                    // two never look alike: the verb sits a rung below body
-                    // text at medium weight and secondary color, the subject
-                    // regular primary in mono. Failure still needs to read
-                    // at a glance, so both the verb and an unrecognized
-                    // title stay the same red.
-                    if let verb = verb {
-                        Text(verb)
-                            .scaledFont(.callout, weight: .regular)
-                            .foregroundStyle(event.phase == "failed" ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
-                            .lineLimit(1)
-                            .layoutPriority(1)
+        if isBareNotice {
+            marker
+        } else {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .center, spacing: 8) {
+                    if isQuote {
+                        quoteContent
+                    } else if isNotice {
+                        noticeContent
                     } else {
-                        // An unrecognized title keeps itself as the row name
-                        // — never an invented verb, and never a glyph in its
-                        // place: an MCP call title is the only thing that
-                        // says which tool ran.
-                        Text(event.title)
-                            .scaledFont(.callout, weight: .medium, design: .monospaced)
-                            .foregroundStyle(event.phase == "failed" ? AnyShapeStyle(.red) : AnyShapeStyle(.primary))
-                            .layoutPriority(1)
+                        // The verb is a label and the subject — a path, a
+                        // command — is the content a reader scans for, so the
+                        // two never look alike: the verb sits a rung below body
+                        // text at medium weight and secondary color, the subject
+                        // regular primary in mono. Failure still needs to read
+                        // at a glance, so both the verb and an unrecognized
+                        // title stay the same red.
+                        if let verb = verb {
+                            Text(verb)
+                                .scaledFont(.callout, weight: .regular)
+                                .foregroundStyle(event.phase == "failed" ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
+                                .lineLimit(1)
+                                .layoutPriority(1)
+                        } else {
+                            // An unrecognized title keeps itself as the row name
+                            // — never an invented verb, and never a glyph in its
+                            // place: an MCP call title is the only thing that
+                            // says which tool ran.
+                            Text(event.title)
+                                .scaledFont(.callout, weight: .medium, design: .monospaced)
+                                .foregroundStyle(event.phase == "failed" ? AnyShapeStyle(.red) : AnyShapeStyle(.primary))
+                                .layoutPriority(1)
+                        }
+                        inlineContent(subjectTint: verb == nil ? Color.secondary : Color.primary)
                     }
-                    inlineContent(subjectTint: verb == nil ? Color.secondary : Color.primary)
-                }
-                if EventExpansion.shouldOfferExpansion(event) {
-                    IconButton(
-                        symbol: showingRawDetails ? "chevron.down" : "chevron.right",
-                        label: EventExpansion.label(for: event, expanded: showingRawDetails),
-                        tint: AnyShapeStyle(.tertiary)
-                    ) {
-                        withAnimation(.easeOut(duration: 0.15)) { showingRawDetails.toggle() }
+                    if EventExpansion.shouldOfferExpansion(event) {
+                        IconButton(
+                            symbol: showingRawDetails ? "chevron.down" : "chevron.right",
+                            label: EventExpansion.label(for: event, expanded: showingRawDetails),
+                            tint: AnyShapeStyle(.tertiary)
+                        ) {
+                            withAnimation(.easeOut(duration: 0.15)) { showingRawDetails.toggle() }
+                        }
+                        .scaledFont(.caption2, weight: .semibold)
                     }
-                    .scaledFont(.caption2, weight: .semibold)
+                    Spacer(minLength: 12)
+                    Text(EventClock.time(event.createdAt))
+                        .scaledFont(.caption2, design: .monospaced)
+                        .foregroundStyle(.tertiary)
+                        .help(DetailClock.dateTime(event.createdAt))
                 }
-                Spacer(minLength: 12)
-                Text(EventClock.time(event.createdAt))
-                    .scaledFont(.caption2, design: .monospaced)
-                    .foregroundStyle(.tertiary)
-                    .help(DetailClock.dateTime(event.createdAt))
+                if let presentation = blockPresentation, !isNotice {
+                    TaskEventPresentationView(presentation: presentation, plan: todoPlan)
+                }
+                if showingRawDetails {
+                    EventExpansionView(event: event).padding(.top, 3).transition(.opacity)
+                }
             }
-            if let presentation = blockPresentation {
-                TaskEventPresentationView(presentation: presentation, plan: todoPlan)
-            }
-            if showingRawDetails {
-                EventExpansionView(event: event).padding(.top, 3).transition(.opacity)
+            .padding(.vertical, 5)
+            .padding(.horizontal, isFocused ? 8 : 0)
+            .background(isFocused ? Surface.selection : Color.clear, in: RoundedRectangle(cornerRadius: Radius.small))
+        }
+    }
+
+    /// The word alone, closer to a separator than a row: no accent, no
+    /// chevron, no timestamp — those all belong to a row worth stopping on,
+    /// and a bare notice never offers an expansion (`EventExpansion` has no
+    /// second reading for a lifecycle event with no detail and no payload
+    /// worth opening), so there is nothing behind it to reach for anyway.
+    private var marker: some View {
+        Text(event.title)
+            .scaledFont(.caption2)
+            .foregroundStyle(.tertiary)
+            .lineLimit(1)
+            .padding(.vertical, 2)
+    }
+
+    /// Title and detail on one line, a step quieter than a worker message or
+    /// a file row on the type ladder — this is the app talking about itself,
+    /// not something the worker did. One size for the whole line; hierarchy
+    /// comes from the title's weight and, on failure, its color — not from
+    /// running a bigger font next to a smaller one. This row is a record of
+    /// what happened, not a signal demanding attention, so the detail stays
+    /// secondary even when the title reads red; `ActivitySignalCard` is
+    /// where a genuine error tints its own detail. The title never
+    /// truncates; a long detail loses its tail first.
+    @ViewBuilder private var noticeContent: some View {
+        HStack(spacing: 4) {
+            Text(event.title)
+                .scaledFont(.caption2, weight: .semibold)
+                .foregroundStyle(event.phase == "failed" ? AnyShapeStyle(.red) : AnyShapeStyle(.primary))
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+            if let detail = event.detail, !detail.isEmpty {
+                Text("· \(detail)")
+                    .scaledFont(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
         }
-        .padding(.vertical, 5)
+        .textSelection(.enabled)
     }
 
     /// Agent prose reads as a quotation, not as a titled row.
@@ -1249,6 +1387,13 @@ private struct ActivityWorkRow: View {
                 .textSelection(.enabled)
         }
     }
+
+    /// The run's response, read the way the reader already reads "the
+    /// current row" elsewhere in the app (`Surface.selection`) — tied to
+    /// `showingRawDetails` rather than `isFocusTarget` alone, so collapsing
+    /// the row drops the highlight along with it, the same action that stops
+    /// the trace fighting the operator's own scroll.
+    private var isFocused: Bool { isFocusTarget && showingRawDetails }
 
     /// Compact one-line details stay on the title line; anything taller drops
     /// below it. Usage and signal shapes render in their own cards, so a stray
@@ -1383,10 +1528,14 @@ private struct ActivityReasoningRow: View {
 }
 
 /// Retries, rate limits, stalls, questions, and broker failures read as a
-/// tinted 2pt rule on the page's edge plus the line itself — color stays a
-/// hairline here, never a filled strip. A glyph beside the rule would say the
-/// same thing a third time: the rule's tint already marks severity, and the
-/// title already names what happened.
+/// tinted 2pt rule on the page's edge plus the line itself, title and detail
+/// merged onto one line a step quieter than a worker row — this is the app
+/// narrating itself, not work the reader needs to read closely. A glyph
+/// beside the rule would say the same thing a third time: the rule's tint
+/// already marks severity, and the title already names what happened. An
+/// error additionally tints its own line red rather than leaving that to the
+/// hairline alone, since a failure is the one severity worth reading at a
+/// glance without following the rule to the title.
 private struct ActivitySignalCard: View {
     let event: TaskEventSnapshot
 
@@ -1394,13 +1543,21 @@ private struct ActivitySignalCard: View {
         HStack(alignment: .center, spacing: 9) {
             AccentRule(color: tint)
                 .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(event.title).scaledFont(.callout, weight: .medium)
-                if let text = event.presentation?.text ?? event.detail {
-                    Text(text).scaledFont(.caption).foregroundStyle(.secondary)
-                        .textSelection(.enabled)
+            HStack(spacing: 4) {
+                Text(event.title)
+                    .scaledFont(.caption2, weight: .semibold)
+                    .foregroundStyle(severity == "error" ? AnyShapeStyle(tint) : AnyShapeStyle(.primary))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                if let text = event.presentation?.text ?? event.detail, !text.isEmpty {
+                    Text("· \(text)")
+                        .scaledFont(.caption2)
+                        .foregroundStyle(severity == "error" ? AnyShapeStyle(tint.opacity(0.75)) : AnyShapeStyle(.secondary))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                 }
             }
+            .textSelection(.enabled)
             Spacer(minLength: 12)
             Text(EventClock.time(event.createdAt))
                 .scaledFont(.caption2, design: .monospaced)

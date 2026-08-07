@@ -126,15 +126,65 @@ describe("codex rate limit parsing", () => {
     };
     expect(withObservedRateLimit(usage, [failure])).toEqual({
       ...usage,
-      lastRateLimit: {
+      rateLimitsByModel: [{
+        model: "unknown",
+        message: failure.message,
+        failedAt: failure.failedAt,
+        consecutiveFailures: 2,
+        retryAt: failure.retryAt,
+      }],
+    });
+    expect(withObservedRateLimit(usage, [{ ...failure, code: "auth" as const }])).toEqual({
+      ...usage,
+      accountFailure: {
         message: failure.message,
         failedAt: failure.failedAt,
         consecutiveFailures: 2,
         retryAt: failure.retryAt,
       },
     });
-    expect(withObservedRateLimit(usage, [{ ...failure, code: "auth" as const }])).toEqual(usage);
     expect(withObservedRateLimit(usage, [{ ...failure, profileId: "codex" }])).toEqual(usage);
+  });
+
+  test("keeps a rate limit on one model and a credential failure on the account as separate reports", () => {
+    const usage: ProfileUsage = {
+      profile: "default",
+      provider: "claude",
+      supported: true,
+      source: "claude-cli",
+      windows: [],
+    };
+    const result = withObservedRateLimit(usage, [
+      {
+        profileId: "default",
+        code: "rate_limit" as const,
+        message: "sonnet exhausted",
+        failedAt: "2026-08-06T20:00:00.000Z",
+        consecutiveFailures: 1,
+        model: "sonnet",
+      },
+      {
+        profileId: "default",
+        code: "rate_limit" as const,
+        message: "opus exhausted",
+        failedAt: "2026-08-06T20:05:00.000Z",
+        consecutiveFailures: 1,
+        model: "opus",
+      },
+      {
+        profileId: "default",
+        code: "auth" as const,
+        message: "invalid api key",
+        failedAt: "2026-08-06T20:10:00.000Z",
+        consecutiveFailures: 1,
+      },
+    ]);
+    expect(result.accountFailure).toMatchObject({ message: "invalid api key" });
+    expect(result.rateLimitsByModel).toEqual(expect.arrayContaining([
+      expect.objectContaining({ model: "sonnet", message: "sonnet exhausted" }),
+      expect.objectContaining({ model: "opus", message: "opus exhausted" }),
+    ]));
+    expect(result.rateLimitsByModel).toHaveLength(2);
   });
 
   test("names the model the rate limit was metered against", () => {
@@ -153,7 +203,7 @@ describe("codex rate limit parsing", () => {
       consecutiveFailures: 1,
       model: "fable",
     }]);
-    expect(limited.lastRateLimit).toMatchObject({ model: "fable" });
+    expect(limited.rateLimitsByModel).toEqual([expect.objectContaining({ model: "fable" })]);
     // The account window stays what it is: a rate-limited model does not make
     // the account read as spent.
     expect(worstWindowUsedPercent(limited)).toBe(15);

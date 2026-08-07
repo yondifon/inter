@@ -13,8 +13,11 @@ import {
   compactPayload,
   delegate,
   getTask,
+  listTaskSummaries,
   needsInputQuestion,
+  priorRunEnding,
   recordProfileTaskOutcome,
+  withUnverifiedEvidence,
 } from "../src/tasks";
 import { closeStateStore, stateStore } from "../src/store";
 import type { Profile, Task } from "../src/types";
@@ -227,6 +230,46 @@ describe("delegate workspace roots", () => {
     expect(withoutTitle.title).toBeUndefined();
     await settled(withoutTitle.id);
   });
+
+  test("links a delegated task into its parent's fan-out batch", async () => {
+    const root = mkdtempSync(join(tmpdir(), "inter-fanout-"));
+    scratch.push(root);
+    process.env.INTER_DB = join(root, "inter.db");
+    process.env.INTER_ROOTS = root;
+    stateStore().saveProfiles([noopProfile]);
+
+    const parent = await delegate(noopProfile.id, "first", root);
+    const child = await delegate(noopProfile.id, "second", root, undefined, parent.id);
+    const sibling = await delegate(noopProfile.id, "third", root, undefined, parent.id);
+    const unrelated = await delegate(noopProfile.id, "fourth", root);
+
+    expect(child.parentTaskId).toBe(parent.id);
+    expect(sibling.parentTaskId).toBe(parent.id);
+    expect(parent.parentTaskId).toBeUndefined();
+    expect(unrelated.parentTaskId).toBeUndefined();
+    expect(getTask(child.id)?.parentTaskId).toBe(parent.id);
+
+    const batch = listTaskSummaries({ parent: parent.id }).map(({ id }) => id).sort();
+    expect(batch).toEqual([parent.id, child.id, sibling.id].sort());
+    expect(batch).not.toContain(unrelated.id);
+
+    await settled(parent.id);
+    await settled(child.id);
+    await settled(sibling.id);
+    await settled(unrelated.id);
+  });
+
+  test("rejects a parent id that names no task", async () => {
+    const root = mkdtempSync(join(tmpdir(), "inter-fanout-"));
+    scratch.push(root);
+    process.env.INTER_DB = join(root, "inter.db");
+    process.env.INTER_ROOTS = root;
+    stateStore().saveProfiles([noopProfile]);
+
+    await expect(delegate(noopProfile.id, "orphan", root, undefined, "no-such-task"))
+      .rejects.toThrow("unknown parent task: no-such-task");
+    expect(stateStore().listTasks(200, "include")).toHaveLength(0);
+  });
 });
 
 describe("needsInputQuestion", () => {
@@ -405,15 +448,18 @@ describe("profile outcome recording", () => {
   test("clears observed failures only after successful generation", () => {
     const calls: string[] = [];
     const store = {
-      clearProfileFailure: (profileId: string) => calls.push(`clear:${profileId}`),
+      clearProfileFailure: (profileId: string, model?: string) => calls.push(`clear:${profileId}:${model}`),
       recordProfileFailure: () => calls.push("record"),
     };
     recordProfileTaskOutcome(
       store,
       "claude-work",
       interpretWorkerOutcome(0, "Done.\nINTER_RESULT: completed", ""),
+      "sonnet",
     );
-    expect(calls).toEqual(["clear:claude-work"]);
+    // The clear names the model that just succeeded, not the whole account —
+    // a still-live rate limit on a different model of this profile must survive it.
+    expect(calls).toEqual(["clear:claude-work:sonnet"]);
   });
 
   test("records auth, billing, and rate-limit failures", () => {
@@ -506,6 +552,84 @@ describe("Antigravity bootstrap retry", () => {
       1,
       networkFailure.replace('"conversation_id":""', '"missing_conversation_id":""'),
     )).toBeUndefined();
+  });
+});
+
+describe("priorRunEnding", () => {
+  const event = (type: string, payload: Record<string, unknown>) => ({
+    id: 1,
+    taskId: "task-1",
+    type,
+    state: "queued" as const,
+    payload,
+    createdAt: new Date().toISOString(),
+  });
+
+  test("rebuilds the prior run's ending and the caller's instruction from events", () => {
+    const ending = priorRunEnding([
+      event("failed", {
+        error: "task exceeded timeoutMs 50",
+        completion: { blocked: true, code: "timeout", reason: "task exceeded timeoutMs 50" },
+      }),
+      event("resumed", { previousState: "failed", instruction: "Finish the remaining work." }),
+    ]);
+    expect(ending).toEqual({
+      state: "failed",
+      error: "task exceeded timeoutMs 50",
+      completion: { blocked: true, code: "timeout", reason: "task exceeded timeoutMs 50" },
+      instruction: "Finish the remaining work.",
+    });
+  });
+
+  test("returns nothing for a run with no settled or resumed events", () => {
+    expect(priorRunEnding([
+      event("worker_spawned", { provider: "claude", pid: 1 }),
+    ])).toEqual({});
+  });
+
+  test("lets the last settled event win", () => {
+    const ending = priorRunEnding([
+      event("failed", { error: "first", completion: { blocked: true, code: "worker_error", reason: "first" } }),
+      event("resumed", { previousState: "failed", instruction: "again" }),
+      event("failed", { error: "second", completion: { blocked: true, code: "timeout", reason: "second" } }),
+    ]);
+    expect(ending.state).toBe("failed");
+    expect(ending.error).toBe("second");
+    expect(ending.completion).toMatchObject({ code: "timeout" });
+    expect(ending.instruction).toBe("again");
+  });
+});
+
+describe("withUnverifiedEvidence", () => {
+  const task = (write: string[]) => ({ cwd: "/work/repo", scope: { read: [], write } }) as unknown as Task;
+
+  test("names the write scope so unverified reads differently from failed", () => {
+    const completion = withUnverifiedEvidence(task(["src/**", "tests/**"]), {
+      blocked: true,
+      code: "unverified",
+      reason: "worker exited without an Inter completion marker",
+    });
+    expect(completion?.reason).toBe(
+      "worker exited without an Inter completion marker; check src/**, tests/** for finished work before redoing it",
+    );
+  });
+
+  test("falls back to the task's cwd when the write scope is the whole tree", () => {
+    const completion = withUnverifiedEvidence(task(["**"]), {
+      blocked: true,
+      code: "unverified",
+      reason: "worker exited without an Inter completion marker",
+    });
+    expect(completion?.reason).toContain("check /work/repo for finished work");
+  });
+
+  test("leaves every other completion code untouched", () => {
+    const completion = withUnverifiedEvidence(task(["src/**"]), {
+      blocked: true,
+      code: "worker_error",
+      reason: "the tool crashed",
+    });
+    expect(completion?.reason).toBe("the tool crashed");
   });
 });
 

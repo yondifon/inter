@@ -209,6 +209,29 @@ describe("task scope", () => {
     }
   });
 
+  test("reads a symlinked skill directory inside a profile's config root, never writes it", () => {
+    const cwd = workspace();
+    // Marketplace and plugin skills are commonly installed as a symlink one
+    // level into `skills/`, not at the config root itself — the case the
+    // dotfile AGENTS.md scan above does not reach.
+    const configDir = mkdtempSync(join(tmpdir(), "inter-cfg-"));
+    const pluginCache = mkdtempSync(join(tmpdir(), "inter-plugin-"));
+    roots.push(configDir, pluginCache);
+    mkdirSync(join(configDir, "skills"));
+    mkdirSync(join(pluginCache, "ux"));
+    writeFileSync(join(pluginCache, "ux", "SKILL.md"), "skill");
+    symlinkSync(join(pluginCache, "ux"), join(configDir, "skills", "ux"));
+
+    const worker = { ...profile, env: { CLAUDE_CONFIG_DIR: configDir } };
+    const policy = sandboxProfile(cwd, { read: ["**"], write: ["src/**"] }, worker, ["/bin/sh"]);
+    const target = realpathSync(join(pluginCache, "ux"));
+    expect(policy).toContain(`(allow file-read* (subpath "${target}"))`);
+    expect(policy).not.toContain(`(allow file-write* (literal "${target}"))`);
+    expect(policy).not.toContain(`(allow file-write* (subpath "${target}"))`);
+    // The task's own scope grants are unaffected by the config-root scan.
+    expect(policy).toContain(`(allow file-write* (subpath "${realpathSync(cwd)}/src"))`);
+  });
+
   const integrationTest = process.env.INTER_SANDBOX_INTEGRATION === "1" ? test : test.skip;
   integrationTest("macOS sandbox blocks reads and writes outside declared paths", async () => {
     const cwd = workspace();

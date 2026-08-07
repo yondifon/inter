@@ -64,12 +64,24 @@ import { runCleanup, scheduledCleanupDays, startScheduledCleanup } from "./clean
 import { helpText, isHelpRequest, unknownCommandMessage } from "./cli-help";
 import { startEventSocket } from "./event-socket";
 import { BUILD_STAMP, MCP_CONTRACT_VERSION, VERSION } from "./version";
+import { computeStaleness } from "./staleness";
 
 const port = Number(Bun.env.INTER_PORT ?? 7331);
 // The one answer to "what build are you": /health serves it from the broker on
 // the port, `version` prints it from the binary on disk, and `make install`
-// fails when those two disagree. One literal, so the two cannot drift.
-const healthReport = { status: "ok", version: VERSION, mcpContractVersion: MCP_CONTRACT_VERSION, build: BUILD_STAMP } as const;
+// fails when those two disagree. Rebuilt per call so a source tree that moved
+// past this build while it runs shows up as `stale` instead of staying silent.
+function healthReport() {
+  const staleness = computeStaleness();
+  return {
+    status: "ok",
+    version: VERSION,
+    mcpContractVersion: MCP_CONTRACT_VERSION,
+    build: BUILD_STAMP,
+    stale: staleness.stale,
+    ...(staleness.stale ? { currentSha: staleness.currentSha, hint: staleness.hint } : {}),
+  };
+}
 
 // A foreground MCP call still owns the caller's agent turn, which is why
 // `until: "attention"` matters: it returns the instant the task needs the
@@ -217,7 +229,7 @@ const serveOptions = {
     const url = new URL(request.url);
     if (url.pathname === "/mcp") return mcpHandler.fetch(request);
     if (url.pathname === "/health") {
-      return Response.json(healthReport);
+      return Response.json(healthReport());
     }
     if (url.pathname === "/api/state" && request.method === "GET") {
       const config = await loadConfig();
@@ -496,6 +508,7 @@ const serveOptions = {
         timeoutMs?: number;
         scope?: { read: string[]; write: string[] };
         allowQuestions?: boolean;
+        queue?: "add" | "clear";
       } = {};
       if (text) {
         try {
@@ -510,6 +523,7 @@ const serveOptions = {
             timeoutMs: body.timeoutMs,
             scope: body.scope,
             allowQuestions: body.allowQuestions,
+            queue: body.queue,
           }), DEFAULT_RESUME_FIELDS),
           { status: 202 },
         );
@@ -671,9 +685,9 @@ async function createMcpServer(): Promise<McpServer> {
     });
   });
   server.registerTool("health", {
-    description: "Check whether the Inter broker is running and read its broker and MCP contract versions. Use for connection or compatibility diagnosis, not worker availability.",
+    description: "Check whether the Inter broker is running and read its broker and MCP contract versions, plus whether a newer build exists in the source tree this build came from. Use for connection or compatibility diagnosis, not worker availability.",
     inputSchema: z.object({}),
-  }, async () => result({ status: "ok", version: VERSION, mcpContractVersion: MCP_CONTRACT_VERSION }));
+  }, async () => result(healthReport()));
   server.registerTool("tasks", {
     description: "Find recent delegated tasks by state, time, profile, or fan-out batch. Returns concise summaries for discovery; use inspect for one task in full, or background watch to follow active work.",
     inputSchema: tasksToolQuerySchema,
@@ -747,10 +761,21 @@ async function createMcpServer(): Promise<McpServer> {
           "instant or a duration like \"45m\" / \"4h\". The task waits as `pending`; resume it " +
           "again without startAt to start it now, or cancel to drop it.",
         ),
+      queue: z.enum(["add", "clear"]).optional()
+        .describe(
+          "\"add\" sends the instruction to a task a worker is still on: it waits its turn, and " +
+          "Inter feeds it into the same session by itself the moment that run finishes clean — no " +
+          "watching for the finish, no second call. Instruction is required, and nothing else is: " +
+          "timeoutMs, scope, allowQuestions and startAt describe a run, not an instruction. Items " +
+          "run oldest first. A run that fails, stops to ask a question, or ends blocked leaves them " +
+          "untouched rather than sending more work into a session in trouble; continue that run and " +
+          "the rest follow. Cancelling the task discards them. \"clear\" removes everything still " +
+          "waiting. On a task that already finished, \"add\" does nothing and the resume runs now.",
+        ),
       fields: taskFieldSchema,
     }),
-  }, async ({ taskId, instruction, timeoutMs, scope, allowQuestions, startAt, fields }) =>
-    result(startedTask(await resumeTask(taskId, instruction, { timeoutMs, scope, allowQuestions, startAt }), fields ?? DEFAULT_RESUME_FIELDS)));
+  }, async ({ taskId, instruction, timeoutMs, scope, allowQuestions, startAt, queue, fields }) =>
+    result(startedTask(await resumeTask(taskId, instruction, { timeoutMs, scope, allowQuestions, startAt, queue }), fields ?? DEFAULT_RESUME_FIELDS)));
   server.registerTool("handoff", {
     description: HANDOFF_DESCRIPTION,
     inputSchema: z.object({
@@ -1138,7 +1163,7 @@ async function runCli(argv: readonly string[]): Promise<number | undefined> {
   if (command === "cleanup") return runCleanup(argv.slice(1));
   if (command === "config") return runConfig(argv.slice(1));
   if (command === "version") {
-    console.log(JSON.stringify(healthReport));
+    console.log(JSON.stringify(healthReport()));
     return 0;
   }
   if (command === undefined || isHelpRequest(command)) {

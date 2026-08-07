@@ -53,10 +53,6 @@ struct ContentView: View {
     @State private var taskPendingComplete: String?
     @State private var showingTaskActionError = false
     @Environment(\.uiScale) private var uiScale
-    /// `NavigationSplitViewVisibility` has no `RawRepresentable` conformance `@AppStorage`
-    /// can bind to, so the persisted form is the plain bool below and this mirrors it.
-    @State private var columnVisibility: NavigationSplitViewVisibility
-    private static let sidebarCollapsedKey = "taskSidebarCollapsed"
     /// The GeometryReader behind the sidebar list reports the split view's first,
     /// still-settling layout pass before it reports the restored width. Persisting
     /// that early pass would overwrite a real stored width with a transient one on
@@ -64,19 +60,8 @@ struct ContentView: View {
     /// to settle.
     @State private var sidebarWidthPersistenceArmed = false
 
-    /// Reads the collapsed flag directly from defaults so the sidebar opens in its
-    /// last state on the very first frame, instead of flashing open and collapsing.
-    init(store: ProfileStore, broker: BrokerManager, updateChecker: UpdateChecker, settingsPresentation: SettingsPresentation) {
-        self.store = store
-        self.broker = broker
-        self.updateChecker = updateChecker
-        self.settingsPresentation = settingsPresentation
-        let collapsed = UserDefaults.standard.bool(forKey: Self.sidebarCollapsedKey)
-        _columnVisibility = State(initialValue: collapsed ? .detailOnly : .all)
-    }
-
     var body: some View {
-        NavigationSplitView(columnVisibility: $columnVisibility) {
+        NavigationSplitView {
             List(selection: $selection) {
                 Section {
                     if visibleTasks.isEmpty {
@@ -219,9 +204,6 @@ struct ContentView: View {
         .onChange(of: archiveFilterRaw) { _, newValue in
             Task { await store.setArchiveFilter(TaskArchiveFilter(rawValue: newValue) ?? .active) }
         }
-        .onChange(of: columnVisibility) { _, newValue in
-            UserDefaults.standard.set(newValue == .detailOnly, forKey: Self.sidebarCollapsedKey)
-        }
         // Both sidebar actions settle the task, so each confirms first.
         .confirmationDialog(
             "Mark this task as completed?",
@@ -269,6 +251,9 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 760, minHeight: 520)
+        // The sidebar lists recent tasks, so it always stays at its set width;
+        // no toolbar toggle may collapse it.
+        .toolbar(removing: .sidebarToggle)
     }
 
     /// Already filtered and paged server-side — the broker only ever sends

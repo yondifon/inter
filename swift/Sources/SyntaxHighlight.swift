@@ -1,18 +1,19 @@
-import AppKit
 import SwiftUI
 
 /// How a block of code is read. Not one case per language: the only distinctions
 /// a trace needs are where a comment starts, what quotes a string, and which
-/// words are structure — which sorts every language the app meets into three
+/// words are structure — which sorts every language the app meets into four
 /// families. Anything unrecognised stays plain, because mis-tinted prose reads
 /// worse than untinted code.
 enum CodeLanguage: Equatable {
     /// `//`, `/* */`, and braces: Swift, TypeScript, Go, Rust, Java, C.
     case cFamily
-    /// `#` to the end of the line: Python, Ruby, shell, YAML, Makefiles.
+    /// `#` to the end of the line: shell, TOML, YAML, Makefiles.
     case hashFamily
     /// Strings, numbers, and three literals. No comments.
     case json
+    /// Headings and inline code — the two marks worth a reader's eye in prose.
+    case markdown
     case none
 
     /// The word on a fence — ```` ```ts ```` — ignoring anything after it, since a
@@ -47,6 +48,7 @@ enum CodeLanguage: Equatable {
             "dockerfile", "gitignore", "env", "r", "pl", "ps1",
         ] { table[name] = .hashFamily }
         for name in ["json", "jsonc", "json5"] { table[name] = .json }
+        for name in ["md", "markdown"] { table[name] = .markdown }
         return table
     }()
 }
@@ -86,13 +88,16 @@ enum SyntaxHighlighter {
         }
 
         while index < chars.count {
-            if let end = commentEnd(chars, from: index, language: language) {
+            if language == .markdown, isLineStart(chars, index), let end = headingEnd(chars, from: index) {
+                emit(.keyword, through: end)
+            } else if let end = commentEnd(chars, from: index, language: language) {
                 emit(.comment, through: end)
             } else if let end = stringEnd(chars, from: index, language: language) {
                 emit(.string, through: end)
-            } else if chars[index].isNumber {
+            } else if language != .markdown, chars[index].isNumber {
                 // Digits inside a name are consumed by the word branch below, so
-                // a digit reached here always opens a literal.
+                // a digit reached here always opens a literal. Markdown is prose,
+                // not source — a year in a sentence is not a numeric literal.
                 emit(.number, through: numberEnd(chars, from: index))
             } else if isWordStart(chars[index]) {
                 let end = wordEnd(chars, from: index)
@@ -121,9 +126,22 @@ enum SyntaxHighlighter {
             return min(index + 2, chars.count)
         case .hashFamily:
             return chars[start] == "#" ? lineEnd(chars, from: start) : nil
-        case .json, .none:
+        case .json, .markdown, .none:
             return nil
         }
+    }
+
+    private static func isLineStart(_ chars: [Character], _ index: Int) -> Bool {
+        index == 0 || chars[index - 1] == "\n"
+    }
+
+    /// One to six `#` then a space opens an ATX heading; the whole line is the
+    /// heading, the same width a reader's eye gives it.
+    private static func headingEnd(_ chars: [Character], from start: Int) -> Int? {
+        var index = start
+        while index < chars.count, index - start < 6, chars[index] == "#" { index += 1 }
+        guard index > start, index < chars.count, chars[index] == " " else { return nil }
+        return lineEnd(chars, from: start)
     }
 
     private static func stringEnd(_ chars: [Character], from start: Int, language: CodeLanguage) -> Int? {
@@ -201,6 +219,7 @@ enum SyntaxHighlighter {
         switch language {
         case .cFamily: ["\"", "'", "`"]
         case .hashFamily: ["\"", "'"]
+        case .markdown: ["`"]
         case .json, .none: ["\""]
         }
     }
@@ -213,7 +232,7 @@ enum SyntaxHighlighter {
         case .cFamily: cFamilyKeywords
         case .hashFamily: hashFamilyKeywords
         case .json: ["true", "false", "null"]
-        case .none: []
+        case .markdown, .none: []
         }
     }
 
@@ -239,8 +258,6 @@ enum SyntaxHighlighter {
     ]
 }
 
-/// Four tints, none of them the diff's red or green: a string tinted red inside a
-/// removed line would read as part of the removal rather than as a string.
 enum CodeStyle {
     static func highlighted(_ text: String, language: CodeLanguage) -> AttributedString {
         var result = AttributedString()
@@ -257,33 +274,10 @@ enum CodeStyle {
     private static func tint(_ kind: CodeSpan.Kind) -> Color? {
         switch kind {
         case .plain: nil
-        case .comment: comment
-        case .string: string
-        case .number: number
-        case .keyword: keyword
+        case .comment: SyntaxTint.comment
+        case .string: SyntaxTint.string
+        case .number: SyntaxTint.number
+        case .keyword: SyntaxTint.keyword
         }
-    }
-
-    static let keyword = tone(light: 0x8A3F_FCFF, dark: 0xC9A0_FFFF)
-    static let string = tone(light: 0xA162_0AFF, dark: 0xE0A4_58FF)
-    static let number = tone(light: 0x0F76_6EFF, dark: 0x5FCF_C6FF)
-    static let comment = tone(light: 0x6B72_80FF, dark: 0x8B94_9EFF)
-
-    private static func tone(light: UInt32, dark: UInt32) -> Color {
-        Color(nsColor: NSColor(name: nil) { appearance in
-            let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-            return NSColor(rgba: isDark ? dark : light)
-        })
-    }
-}
-
-private extension NSColor {
-    convenience init(rgba: UInt32) {
-        self.init(
-            srgbRed: CGFloat((rgba >> 24) & 0xFF) / 255,
-            green: CGFloat((rgba >> 16) & 0xFF) / 255,
-            blue: CGFloat((rgba >> 8) & 0xFF) / 255,
-            alpha: CGFloat(rgba & 0xFF) / 255
-        )
     }
 }

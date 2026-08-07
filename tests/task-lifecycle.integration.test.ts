@@ -290,33 +290,51 @@ describe("task lifecycle integration", () => {
       .toContain("resume_session_mismatch");
   });
 
-  integrationTest("fails rather than losing context when the session cannot resume", async () => {
+  integrationTest("recovers from a session that cannot resume by starting a fresh one", async () => {
     const { cwd, profile } = setupClaudeBin([
       "#!/bin/sh",
       'case "$*" in',
       "  *--resume*) exit 7 ;;",
-      '  *"# Resolved decision"*)',
+      '  *"# Fresh session:"*)',
       `    printf '%s\\n' '{"type":"system","session_id":"sess-fresh"}'`,
       `    printf '%s\\n' '{"type":"result","result":"Recovered.\\nINTER_RESULT: completed"}'`,
       "    ;;",
       "  *)",
       `    printf '%s\\n' '{"type":"system","session_id":"sess-1"}'`,
-      `    printf '%s\\n' '{"type":"result","result":"INTER_NEEDS_INPUT: Proceed how?"}'`,
+      "    printf '%s\\n' 'worker crashed' >&2",
+      "    exit 1",
       "    ;;",
       "esac",
       "",
     ].join("\n"));
     const parent = await delegate(profile.id, "Do the work.", cwd);
     await waitForAttention(parent.id);
-    expect(getTask(parent.id)?.sessionId).toBe("sess-1");
+    expect(getTask(parent.id)).toMatchObject({ state: "failed", sessionId: "sess-1" });
 
-    const continued = await reply(parent.id, "carefully");
+    const continued = await resumeTask(parent.id, "Finish the remaining work.");
     expect(continued.id).toBe(parent.id);
     const result = await waitForAttention(parent.id);
-    expect(result.tasks[0]).toMatchObject({ state: "failed" });
+    expect(result.tasks[0]).toMatchObject({
+      state: "completed",
+      output: "Recovered.",
+      sessionId: "sess-fresh",
+    });
     const types = stateStore().listTaskEvents(parent.id).map(({ type }) => type);
-    expect(types.filter((type) => type === "worker_spawned")).toHaveLength(2);
     expect(types).toContain("resume_failed");
+    expect(types).toContain("resume_fallback");
+    // The resume was refused, then the fresh session started under the same task.
+    const spawns = stateStore().listTaskEvents(parent.id)
+      .filter(({ type }) => type === "worker_spawned");
+    expect(spawns).toHaveLength(3);
+    expect(spawns[1]?.payload.resumedSession).toBe("sess-1");
+    expect(spawns[2]?.payload.resumedSession).toBeUndefined();
+    // The fresh worker got the original prompt, the prior-run context, and the
+    // caller's own instruction.
+    const shipped = getTask(parent.id)?.shippedPrompt ?? "";
+    expect(shipped).toContain("Do the work.");
+    expect(shipped).toContain("# Fresh session: run 2 of this task");
+    expect(shipped).toContain("Finish the remaining work.");
+    expect(shipped).toContain("worker crashed");
   });
 
   integrationTest("resumes a failed task in its captured worker session", async () => {
@@ -357,6 +375,50 @@ describe("task lifecycle integration", () => {
       previousState: "failed",
       instruction: "Finish the remaining work.",
     });
+  });
+
+  // A timeout stops the worker hard. The graceful ladder gives the provider CLI
+  // a chance to flush its session, so the resume that follows reopens the same
+  // session instead of starting over.
+  integrationTest("resumes a timed-out task in the same session after the graceful stop", async () => {
+    const { cwd, profile } = setupClaudeBin([
+      "#!/bin/sh",
+      'case "$*" in',
+      "  *--resume*)",
+      `    printf '%s\\n' '{"type":"result","session_id":"sess-1","result":"Done.\\nINTER_RESULT: completed"}'`,
+      "    exit 0",
+      "    ;;",
+      "  *)",
+      `    printf '%s\\n' '{"type":"system","session_id":"sess-1"}'`,
+      "    sleep 30",
+      "    ;;",
+      "esac",
+      "",
+    ].join("\n"));
+    // The timeout must land after the worker's session event has been captured,
+    // or the resume below would have nothing to reopen.
+    const timeoutMs = 2_000;
+    const task = await delegate(profile.id, "do work", cwd, undefined, undefined, {
+      scope: { read: [], write: [] },
+      timeoutMs,
+    });
+    const timedOut = await waitForAttention(task.id);
+    expect(timedOut.tasks[0]).toMatchObject({
+      state: "failed",
+      error: `task exceeded timeoutMs ${timeoutMs}`,
+      completion: { code: "timeout" },
+      sessionId: "sess-1",
+    });
+
+    const resumed = await resumeTask(task.id, "Finish the remaining work.", { timeoutMs: 5_000 });
+    expect(resumed.id).toBe(task.id);
+    const result = await waitForAttention(task.id);
+    expect(result.tasks[0]).toMatchObject({ state: "completed", sessionId: "sess-1" });
+    const events = stateStore().listTaskEvents(task.id);
+    expect(events.filter(({ type }) => type === "worker_spawned")).toHaveLength(2);
+    expect(events.filter(({ type }) => type === "session_reused")).toHaveLength(1);
+    expect(events.some(({ type }) => type === "resume_failed")).toBe(false);
+    expect(events.some(({ type }) => type === "resume_fallback")).toBe(false);
   });
 
   // The whole point of a handoff, end to end: a run dies on one account's rate

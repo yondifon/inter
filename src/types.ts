@@ -260,6 +260,12 @@ export interface Task {
   timeoutMs?: number;
   /** Reasoning effort requested for this run; persisted so resume reuses it. */
   effort?: string;
+  /**
+   * The reasoning level the provider session actually ran at, read back from
+   * the session store after the run. Absent when the provider does not record
+   * it (or no session was captured) — never guessed from the requested effort.
+   */
+  effortActual?: string;
   /** Caller's one-line handle for this task, what a human reads instead of the prompt. */
   tldr?: string;
   /** Short label for this task, what a sidebar reads at a glance. */
@@ -270,6 +276,12 @@ export interface Task {
   costUsd?: number;
   turns?: number;
   archivedAt?: string;
+  /**
+   * Follow-up instructions waiting to be fed into this session once the current
+   * run lands clean. Counted on the single-task read only, so it is absent —
+   * never zero — everywhere the list poll builds a task.
+   */
+  queuedFollowUps?: number;
 }
 
 export interface TaskSummary {

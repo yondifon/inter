@@ -196,4 +196,25 @@ describe("handoff brief", () => {
     expect(brief.prompt).toContain("The previous run produced no readable trace.");
     expect(brief.tier).toBe("verbatim");
   });
+
+  test("frames a fresh session on the same account and carries the caller's instruction", () => {
+    const brief = handoffBrief(task(), [
+      calls("Read", { file_path: "/root/project/src/store.ts" }),
+      says("The cursor is off by one in listTaskEvents."),
+    ], "claude", { sameAccount: true, instruction: "Finish the remaining work." });
+
+    expect(brief.prompt).toContain("# Fresh session:");
+    expect(brief.prompt).not.toContain("on a new account");
+    expect(brief.prompt).not.toContain("cannot be opened from here");
+    // The caller's instruction replaces the generic continuation line.
+    expect(brief.prompt).toContain("Finish the remaining work.");
+    expect(brief.prompt).not.toContain("Continue this task from where the previous run stopped");
+  });
+
+  test("keeps the handoff framing when no options are given", () => {
+    const brief = handoffBrief(task(), [says("Finding: off by one.")], "claude");
+    expect(brief.prompt).toContain("on a new account");
+    expect(brief.prompt).toContain("cannot be opened from here");
+    expect(brief.prompt).not.toContain("# Fresh session:");
+  });
 });
