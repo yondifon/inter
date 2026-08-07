@@ -249,6 +249,44 @@ describe("SQLite state store", () => {
     store.close();
   });
 
+  test("resume carries a stated model and effort onto the row and the resumed event", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const failing = task("running");
+    store.createTask(failing);
+    failing.state = "failed";
+    failing.error = "provider timed out";
+    store.saveTask(failing);
+
+    const resumed = store.resumeTask(failing.id, { model: "haiku", effort: "max" });
+    expect(resumed.model).toBe("haiku");
+    expect(resumed.effort).toBe("max");
+    // Same profile and same provider session: only the model changes, which is
+    // the whole point — the session is the conversation, the model is per run.
+    expect(resumed.profileId).toBe(profile.id);
+    expect(resumed.sessionId).toBeUndefined();
+    const event = store.listTaskEvents(failing.id).find(({ type }) => type === "resumed");
+    expect(event?.payload).toMatchObject({ model: "haiku", effort: "max" });
+    store.close();
+  });
+
+  test("resume without model or effort keeps the values the row already has", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const failing = task("running");
+    failing.model = "sonnet";
+    failing.effort = "high";
+    store.createTask(failing);
+    failing.state = "failed";
+    failing.error = "provider timed out";
+    store.saveTask(failing);
+
+    const resumed = store.resumeTask(failing.id);
+    expect(resumed.model).toBe("sonnet");
+    expect(resumed.effort).toBe("high");
+    store.close();
+  });
+
   test("resume holds the profile and session steady where handoff moves them", () => {
     const { db } = paths();
     const spare: Profile = { ...profile, id: "claude-spare", model: "haiku" };

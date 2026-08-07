@@ -117,6 +117,59 @@ export function taskView(task: Task, fields: readonly TaskField[]): TaskFieldVie
 }
 
 /**
+ * A listed row, selected by fields the same way {@link taskView} is. The
+ * summary carries no session id, so none can leak here either.
+ */
+export type TaskSummaryView =
+  & Partial<Omit<TaskSummary, "sessionId" | "id" | "state">>
+  & { id: string; state: TaskState };
+
+/**
+ * `tasks` is a listing tool, so its default is what tells one row from the
+ * next at a glance and nothing else: who it ran on, when it last moved, and
+ * what it cost. The prompt preview, the completion, and the grant each run to
+ * hundreds of characters and belong to `inspect`, not to every row of a list —
+ * so they come only when `fields` asks. `"all"` is the full summary minus the
+ * session id, exactly what the tool returned before this lean default.
+ */
+export function taskSummaryView(summary: TaskSummary, fields?: readonly TaskField[]): TaskSummaryView {
+  const groups = fields?.includes("all") ? TASK_FIELD_KEYS : fields;
+  if (!groups) {
+    return {
+      id: summary.id,
+      state: summary.state,
+      ...(summary.title ? { title: summary.title } : {}),
+      profileId: summary.profileId,
+      model: summary.model,
+      updatedAt: summary.updatedAt,
+      ...(summary.costUsd !== undefined ? { costUsd: summary.costUsd } : {}),
+      ...(summary.archivedAt ? { archivedAt: summary.archivedAt } : {}),
+    };
+  }
+  const want = new Set(groups.flatMap((g) => (g === "all" ? [] : TASK_FIELD_GROUPS[g])));
+  return {
+    id: summary.id,
+    state: summary.state,
+    ...(summary.archivedAt ? { archivedAt: summary.archivedAt } : {}),
+    ...(want.has("profileId") ? { profileId: summary.profileId } : {}),
+    ...(want.has("model") ? { model: summary.model } : {}),
+    ...(want.has("cwd") ? { cwd: summary.cwd } : {}),
+    ...(want.has("createdAt") ? { createdAt: summary.createdAt } : {}),
+    ...(want.has("updatedAt") ? { updatedAt: summary.updatedAt } : {}),
+    ...(want.has("title") && summary.title ? { title: summary.title } : {}),
+    ...(want.has("tldr") && summary.tldr ? { tldr: summary.tldr } : {}),
+    ...(want.has("parentTaskId") && summary.parentTaskId ? { parentTaskId: summary.parentTaskId } : {}),
+    ...(want.has("grantId") && summary.grantId ? { grantId: summary.grantId } : {}),
+    // The summary's only trace of the prompt; the full text lives in `inspect`.
+    ...(want.has("prompt") ? { promptPreview: summary.promptPreview } : {}),
+    ...(want.has("completion") && summary.completion ? { completion: summary.completion } : {}),
+    ...(want.has("error") && summary.error ? { error: summary.error } : {}),
+    ...(want.has("question") && summary.question ? { question: summary.question } : {}),
+    ...(want.has("costUsd") && summary.costUsd !== undefined ? { costUsd: summary.costUsd } : {}),
+  };
+}
+
+/**
  * `wait` is the one tool a caller runs in a loop, so its default is the moving
  * half of a task and nothing else: completion tells it how the run ended, spend
  * tells it what that cost, and `updatedAt` is the clock. Everything static —

@@ -12,6 +12,7 @@ import {
   migrateDatabase,
 } from "./store/schema";
 import { parseWorkerIdentity, probeWorker, signalWorkerGroup, type WorkerIdentity } from "./worker-identity";
+import { CliRefusal } from "./cli-error";
 import type {
   Profile,
   MemoryEntry,
@@ -288,7 +289,7 @@ export class StateStore {
     // A mistyped path must not materialise an empty database for a command
     // whose whole job is to operate on an existing one.
     if (options.maintenance && !existsSync(this.path)) {
-      throw new Error(`no database at ${this.path}; run the broker once to create it, or fix INTER_DB`);
+      throw new CliRefusal(`no database at ${this.path}; run the broker once to create it, or fix INTER_DB`);
     }
     mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
     this.database = new Database(this.path, { create: true, strict: true });
@@ -334,7 +335,7 @@ export class StateStore {
    */
   private openObserve(): Database {
     if (!existsSync(this.path)) {
-      throw new Error(
+      throw new CliRefusal(
         `cannot observe ${this.path}: no database at this path; run the broker once to create it, or fix INTER_DB`,
       );
     }
@@ -345,7 +346,7 @@ export class StateStore {
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'",
     ).get();
     if (!ledger) {
-      throw new Error(
+      throw new CliRefusal(
         `cannot observe ${this.path}: not an inter database (no schema_migrations table)`,
       );
     }
@@ -353,15 +354,15 @@ export class StateStore {
       "SELECT MAX(version) AS version FROM schema_migrations",
     ).get()?.version ?? 0;
     if (applied > LATEST_SCHEMA_VERSION) {
-      throw new Error(
+      throw new CliRefusal(
         `cannot observe ${this.path}: database schema v${applied} is newer than this binary knows ` +
         `(v${LATEST_SCHEMA_VERSION}); run \`make install\` to rebuild it`,
       );
     }
     if (applied < LATEST_SCHEMA_VERSION) {
-      throw new Error(
+      throw new CliRefusal(
         `cannot observe ${this.path}: database schema v${applied} predates this binary ` +
-        `(v${LATEST_SCHEMA_VERSION}); start the broker once so it migrates the database`,
+        `(v${LATEST_SCHEMA_VERSION}); run the broker once so it migrates the database`,
       );
     }
     return db;
@@ -1228,6 +1229,8 @@ export class StateStore {
       grantId?: string;
       allowQuestions?: boolean;
       instruction?: string;
+      model?: string;
+      effort?: string;
     } = {},
   ): Task {
     const now = new Date().toISOString();
@@ -1251,7 +1254,8 @@ export class StateStore {
             completion_json = NULL, attempts_json = ?, timeout_ms = COALESCE(?, timeout_ms),
             scope_json = COALESCE(?, scope_json),
             grant_id = COALESCE(?, grant_id),
-            allow_questions = COALESCE(?, allow_questions), updated_at = ?
+            allow_questions = COALESCE(?, allow_questions),
+            model = COALESCE(?, model), effort = COALESCE(?, effort), updated_at = ?
         WHERE id = ?
           AND state IN ('failed', 'cancelled', 'blocked', 'completed', 'pending')
       `).run(
@@ -1260,6 +1264,8 @@ export class StateStore {
         updates.scope ? JSON.stringify(updates.scope) : null,
         updates.grantId ?? null,
         updates.allowQuestions === undefined ? null : updates.allowQuestions ? 1 : 0,
+        updates.model ?? null,
+        updates.effort ?? null,
         now,
         id,
       );
@@ -1270,6 +1276,8 @@ export class StateStore {
         ...(updates.timeoutMs !== undefined ? { timeoutMs: updates.timeoutMs } : {}),
         ...(updates.scope ? { scopeUpdated: true } : {}),
         ...(updates.allowQuestions !== undefined ? { allowQuestions: updates.allowQuestions } : {}),
+        ...(updates.model ? { model: updates.model } : {}),
+        ...(updates.effort ? { effort: updates.effort } : {}),
         ...(updates.instruction ? { instruction: updates.instruction } : {}),
       });
       resumed = true;

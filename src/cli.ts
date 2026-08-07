@@ -53,7 +53,7 @@ import { defaultModelFor } from "./provider-defaults";
 import { normalizeProfile } from "./profile-input";
 import { deleteMemory, getMemory, listMemories, setMemory } from "./memories";
 import { profilesForCaller, publicProfile, publicProfiles } from "./profile-view";
-import { publicTaskSummary, taskView, waitEventsView, waitTaskView, settled, TASK_FIELD_KEYS, type TaskField } from "./public-task";
+import { publicTaskSummary, taskSummaryView, taskView, waitEventsView, waitTaskView, settled, TASK_FIELD_KEYS, type TaskField } from "./public-task";
 import { mcpWaitBlockMs } from "./mcp-wait";
 import { loadRoutingPolicy } from "./routing-policy";
 import { loadWorkerRules } from "./worker-config";
@@ -62,6 +62,7 @@ import { runWatch, watchCommand } from "./watch";
 import { runInflight } from "./inflight";
 import { runCleanup, scheduledCleanupDays, startScheduledCleanup } from "./cleanup";
 import { helpText, isHelpRequest, unknownCommandMessage } from "./cli-help";
+import { CliRefusal } from "./cli-error";
 import { startEventSocket } from "./event-socket";
 import { BUILD_STAMP, MCP_CONTRACT_VERSION, VERSION } from "./version";
 import { computeStaleness } from "./staleness";
@@ -95,6 +96,13 @@ const taskStateSchema = z.enum([
   "queued", "pending", "running", "needs_input", "answered", "blocked", "completed", "failed", "cancelled",
 ]);
 
+const taskFieldSchema = z.array(z.enum(TASK_FIELD_KEYS)).optional()
+  .describe(
+    "The response shape. Defaults to a small acknowledgement; supplying any `fields` replaces " +
+    "the default, it does not add to it. `[\"all\"]` returns the full record. " +
+    "Heavy groups that cost real context: `prompt`, `shippedPrompt`, `output`, `attempts`.",
+  );
+
 // Bounds the MCP `tasks` tool's context cost independently of the /state
 // poll route, which asks the store for its own, larger limit directly.
 export const tasksToolQuerySchema = z.object({
@@ -105,14 +113,8 @@ export const tasksToolQuerySchema = z.object({
   parent: z.string().optional()
     .describe("A fan-out batch: the task with this id plus every task delegated with it as parent."),
   archived: z.enum(["active", "only", "include"]).default("active"),
+  fields: taskFieldSchema,
 });
-
-const taskFieldSchema = z.array(z.enum(TASK_FIELD_KEYS)).optional()
-  .describe(
-    "The response shape. Defaults to a small acknowledgement; supplying any `fields` replaces " +
-    "the default, it does not add to it. `[\"all\"]` returns the full record. " +
-    "Heavy groups that cost real context: `prompt`, `shippedPrompt`, `output`, `attempts`.",
-  );
 
 // The one routing input the caller knows better than Inter: how hard the work
 // is. Left out, Inter reads it as standard — the level most delegated work sits
@@ -689,9 +691,11 @@ async function createMcpServer(): Promise<McpServer> {
     inputSchema: z.object({}),
   }, async () => result(healthReport()));
   server.registerTool("tasks", {
-    description: "Find recent delegated tasks by state, time, profile, or fan-out batch. Returns concise summaries for discovery; use inspect for one task in full, or background watch to follow active work.",
+    description: "Find recent delegated tasks by state, time, profile, or fan-out batch. Each row is lean by default — id, state, title, profile, model, updatedAt, cost — so a listing stays a listing; pass `fields: [\"all\"]` for the full summary, or a group like `[\"completion\"]` for just that. Use inspect for one task in full, or background watch to follow active work.",
     inputSchema: tasksToolQuerySchema,
-  }, async (query) => result(listTaskSummaries(query).map(publicTaskSummary)));
+  }, async (query) => result(
+    listTaskSummaries(query).map((summary) => taskSummaryView(summary, query.fields)),
+  ));
   server.registerTool("memory", {
     description: "Read or update durable project facts shared across Inter callers and delegated workers. Delegation automatically includes active memories for its cwd. Store decisions, constraints, and conventions; never store secrets or transient task status. Use expectedVersion to prevent concurrent overwrites.",
     inputSchema: z.object({
@@ -753,13 +757,22 @@ async function createMcpServer(): Promise<McpServer> {
       timeoutMs: z.number().int().min(1).max(86_400_000).optional(),
       scope: scopeSchema.optional(),
       allowQuestions: z.boolean().optional(),
+      model: z.string().min(1).max(200).optional()
+        .describe(
+          "Model for the continued run on this same profile. The provider session is the " +
+          "conversation; the model is per run, so the change applies without losing what the " +
+          "worker already read and decided. Omit to keep the task's model.",
+        ),
+      effort: z.enum(["minimal", "low", "medium", "high", "xhigh", "max"]).optional()
+        .describe("Reasoning effort for the continued run. Omit to keep the task's own."),
       startAt: z.string().min(1).max(64).optional()
         .describe(
           "Hold the resume instead of running it now. Pass the literal \"rate_limit\" after a " +
           "rate-limited run to continue automatically once that account has usage again — the reset " +
           "time is the hint, the account's live status is the release rule. Also accepts an ISO " +
           "instant or a duration like \"45m\" / \"4h\". The task waits as `pending`; resume it " +
-          "again without startAt to start it now, or cancel to drop it.",
+          "again without startAt to start it now, or cancel to drop it. Refused together with " +
+          "model or effort, which a held resume cannot carry.",
         ),
       queue: z.enum(["add", "clear"]).optional()
         .describe(
@@ -774,8 +787,8 @@ async function createMcpServer(): Promise<McpServer> {
         ),
       fields: taskFieldSchema,
     }),
-  }, async ({ taskId, instruction, timeoutMs, scope, allowQuestions, startAt, queue, fields }) =>
-    result(startedTask(await resumeTask(taskId, instruction, { timeoutMs, scope, allowQuestions, startAt, queue }), fields ?? DEFAULT_RESUME_FIELDS)));
+  }, async ({ taskId, instruction, timeoutMs, scope, allowQuestions, model, effort, startAt, queue, fields }) =>
+    result(startedTask(await resumeTask(taskId, instruction, { timeoutMs, scope, allowQuestions, model, effort, startAt, queue }), fields ?? DEFAULT_RESUME_FIELDS)));
   server.registerTool("handoff", {
     description: HANDOFF_DESCRIPTION,
     inputSchema: z.object({
@@ -1178,9 +1191,35 @@ async function runCli(argv: readonly string[]): Promise<number | undefined> {
   return undefined;
 }
 
+/**
+ * The one gate between a command's expected refusals and Bun's crash
+ * presentation. A `CliRefusal` is the CLI saying no in plain words: one line
+ * on stderr and a non-zero exit. Anything else thrown at the top level is a
+ * bug and keeps its stack.
+ */
+export function reportCliError(error: unknown): number {
+  if (error instanceof CliRefusal) {
+    console.error(`error: ${error.message}`);
+    return 2;
+  }
+  throw error;
+}
+
+/**
+ * Runs one command as the process does: expected refusals become one clean
+ * stderr line, everything else propagates for Bun to print with its stack.
+ */
+export async function cliExitCode(argv: readonly string[]): Promise<number | undefined> {
+  try {
+    return await runCli(argv);
+  } catch (error) {
+    return reportCliError(error);
+  }
+}
+
 // Last in the module so every declaration a command reaches for is already
 // initialised; importing this file runs no command at all.
 if (import.meta.main) {
-  const code = await runCli(process.argv.slice(2));
+  const code = await cliExitCode(process.argv.slice(2));
   if (code !== undefined) process.exit(code);
 }

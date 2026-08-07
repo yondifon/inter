@@ -317,7 +317,7 @@ async function runDbLoop(
   try {
     store = observeStateStore();
   } catch (e) {
-    err(e instanceof Error ? e.message : String(e));
+    err(`error: ${e instanceof Error ? e.message : String(e)}`);
     // The silent fallback earns its silence only while the DB answers. When
     // both transports are down, an error naming only the database points the
     // reader at the wrong half of the problem.
@@ -339,7 +339,7 @@ async function runDbLoop(
     // Fresh DB start: validate ids and pick up the current cursor.
     const missing = taskIds.filter((id) => !store.getTask(id));
     if (missing.length > 0) {
-      err(`${unknownTaskMessage(missing.join(", "))} (searched ${databasePath()})`);
+      err(`error: ${unknownTaskMessage(missing.join(", "))} (searched ${databasePath()})`);
       return 2;
     }
     // Where the log stands at attach time. Starting from zero instead would

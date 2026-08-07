@@ -76,44 +76,10 @@ struct ContentView: View {
                                     collapsed: collapsedGroups.contains(group.id)
                                 ) { toggleCollapse(group.id) }
                                     .padding(.top, 8)
-                                    .help(group.fullTitle ?? group.title ?? group.id)
+                                    .help(groupHelpText(group))
                             }
                             ForEach(TaskOrganizer.visibleTasks(in: group, collapsed: collapsedGroups)) { task in
-                                TaskRow(
-                                    task: task,
-                                    worker: store.profiles.first { $0.id == task.profileId }?.label ?? task.profileId,
-                                    provider: store.profiles.first { $0.id == task.profileId }?.provider
-                                )
-                                .tag(SidebarSelection.task(task.id))
-                                .listRowBackground(sidebarRowFill(selected: selection == .task(task.id)))
-                                .contextMenu {
-                                    if canComplete(task) {
-                                        Button("Mark as completed", systemImage: "checkmark") {
-                                            taskPendingComplete = task.id
-                                        }
-                                    }
-                                    if canCancel(task) {
-                                        Button("Cancel Task", systemImage: "xmark", role: .destructive) {
-                                            taskPendingCancel = task.id
-                                        }
-                                    }
-                                    if canResume(task) {
-                                        Button("Resume", systemImage: "arrow.clockwise") {
-                                            Task { await performResume(task.id) }
-                                        }
-                                    }
-                                    // The "All" filter mixes active and archived rows, so the
-                                    // action reflects this row's own state, not the filter.
-                                    Button(task.archivedAt != nil ? "Restore" : "Archive",
-                                           systemImage: task.archivedAt != nil ? "arrow.uturn.backward" : "archivebox") {
-                                        setArchived(task.id, task.archivedAt == nil)
-                                    }
-                                }
-                                // Right-clicking a row moves AppKit's real selection to it before
-                                // the menu opens, which is why `sidebarRowFill` above already
-                                // themes it; this only strips the system's own focus ring drawn on
-                                // top of that, the stock blue rounded rectangle.
-                                .focusEffectDisabled()
+                                sidebarRow(for: task)
                             }
                         }
                     }
@@ -180,10 +146,9 @@ struct ContentView: View {
                 }
             }
         } detail: {
-            if case let .task(id) = selection,
-               let item = store.tasks.first(where: { $0.id == id }) {
-                TaskDetail(taskId: id, listItem: item, store: store, setArchived: setArchived)
-                    .id(id)
+            if let detail = selectedTaskDetail {
+                TaskDetail(taskId: detail.id, listItem: detail.item, store: store, setArchived: setArchived)
+                    .id(detail.id)
             } else {
                 ContentUnavailableView("Choose a task", systemImage: "point.3.connected.trianglepath.dotted")
             }
@@ -328,6 +293,66 @@ struct ContentView: View {
         taskGroups.flatMap { TaskOrganizer.visibleTasks(in: $0, collapsed: collapsedGroups) }.map(\.id)
     }
 
+    /// The sidebar selection's row, when the selection still exists.
+    private var selectedTaskDetail: (id: String, item: TaskListItem)? {
+        guard case let .task(id) = selection,
+              let item = store.tasks.first(where: { $0.id == id }) else { return nil }
+        return (id, item)
+    }
+
+    private func profile(for task: TaskListItem) -> Profile? {
+        store.profiles.first { $0.id == task.profileId }
+    }
+
+    /// One sidebar row, lifted out of the list's own expression. Nested
+    /// `ForEach`es inside a `List` inside a `NavigationSplitView` already give
+    /// the type-checker a large system to solve; a row built inline adds its
+    /// modifier chain and context menu to that same expression, and machines
+    /// slower than the author's time out on it. Returning `some View` from a
+    /// named function bounds the search at this call.
+    @ViewBuilder
+    private func sidebarRow(for task: TaskListItem) -> some View {
+        let worker: String = profile(for: task)?.label ?? task.profileId
+        let provider: Provider? = profile(for: task)?.provider
+        TaskRow(task: task, worker: worker, provider: provider)
+            .tag(SidebarSelection.task(task.id))
+            .listRowBackground(sidebarRowFill(selected: selection == .task(task.id)))
+            .contextMenu { sidebarRowMenu(for: task) }
+            // Right-clicking a row moves AppKit's real selection to it before
+            // the menu opens, which is why `sidebarRowFill` above already
+            // themes it; this only strips the system's own focus ring drawn on
+            // top of that, the stock blue rounded rectangle.
+            .focusEffectDisabled()
+    }
+
+    @ViewBuilder
+    private func sidebarRowMenu(for task: TaskListItem) -> some View {
+        if canComplete(task) {
+            Button("Mark as completed", systemImage: "checkmark") {
+                taskPendingComplete = task.id
+            }
+        }
+        if canCancel(task) {
+            Button("Cancel Task", systemImage: "xmark", role: .destructive) {
+                taskPendingCancel = task.id
+            }
+        }
+        if canResume(task) {
+            Button("Resume", systemImage: "arrow.clockwise") {
+                Task { await performResume(task.id) }
+            }
+        }
+        // The "All" filter mixes active and archived rows, so the action
+        // reflects this row's own state, not the filter.
+        Button(archiveToggleLabel(for: task), systemImage: archiveToggleIcon(for: task)) {
+            setArchived(task.id, task.archivedAt == nil)
+        }
+    }
+
+    private func groupHelpText(_ group: TaskGroup) -> String {
+        group.fullTitle ?? group.title ?? group.id
+    }
+
     private func setArchived(_ id: String, _ archived: Bool) {
         let nextID = selection == .task(id)
             ? TaskOrganizer.neighbor(afterRemoving: id, from: listedTaskIDs)
@@ -337,6 +362,14 @@ struct ContentView: View {
             guard changed, selection == .task(id) else { return }
             selection = nextID.map(SidebarSelection.task)
         }
+    }
+
+    private func archiveToggleLabel(for task: TaskListItem) -> String {
+        task.archivedAt != nil ? "Restore" : "Archive"
+    }
+
+    private func archiveToggleIcon(for task: TaskListItem) -> String {
+        task.archivedAt != nil ? "arrow.uturn.backward" : "archivebox"
     }
 
     /// Context menu entries mirror the detail header's preconditions, so a menu
@@ -590,10 +623,7 @@ private struct TaskGroupHeader: View {
 
     var body: some View {
         CollapsibleSection(
-            isExpanded: Binding(
-                get: { !collapsed },
-                set: { expanded in if expanded != !collapsed { toggle() } }
-            ),
+            isExpanded: expandedBinding,
             label: { SidebarSectionLabel(text: title, dense: true) },
             trailing: {
                 Text("\(count)")
@@ -602,6 +632,13 @@ private struct TaskGroupHeader: View {
             }
         )
         .accessibilityLabel("\(title), \(count) task\(count == 1 ? "" : "s")")
+    }
+
+    private var expandedBinding: Binding<Bool> {
+        Binding<Bool>(
+            get: { !collapsed },
+            set: { expanded in if expanded != !collapsed { toggle() } }
+        )
     }
 }
 
@@ -685,7 +722,7 @@ private struct UpdateBanner: View {
                 Image(systemName: "arrow.down")
                     .scaledFont(.callout)
                     .foregroundStyle(.tint)
-                Text("Update available — \(commit.map { String($0.prefix(7)) } ?? "new commit") on remote")
+                Text("Update available — \(shortCommit) on remote")
                     .scaledFont(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -703,6 +740,10 @@ private struct UpdateBanner: View {
             Rectangle().fill(Color(nsColor: .separatorColor)).frame(height: 1)
         }
         .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+
+    private var shortCommit: String {
+        commit.map { String($0.prefix(7)) } ?? "new commit"
     }
 }
 

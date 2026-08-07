@@ -350,6 +350,15 @@ describe("the MCP tasks tool's input schema", () => {
     expect(tasksToolQuerySchema.parse({ limit: 100 }).limit).toBe(100);
     expect(() => tasksToolQuerySchema.parse({ limit: 101 })).toThrow();
   });
+
+  test("accepts the fields selector the other tools share", () => {
+    expect(tasksToolQuerySchema.parse({}).fields).toBeUndefined();
+    expect(tasksToolQuerySchema.parse({ fields: ["all"] }).fields).toEqual(["all"]);
+    expect(tasksToolQuerySchema.parse({ fields: ["completion", "spend"] }).fields)
+      .toEqual(["completion", "spend"]);
+    expect(() => tasksToolQuerySchema.parse({ fields: ["prompt"] })).not.toThrow();
+    expect(() => tasksToolQuerySchema.parse({ fields: ["nope"] })).toThrow();
+  });
 });
 
 describe("the build's own answer to /health", () => {

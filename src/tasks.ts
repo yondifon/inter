@@ -87,6 +87,14 @@ export interface ResumeOptions {
   allowQuestions?: boolean;
   timeoutMs?: number;
   /**
+   * Model for the continued run on the same profile. The provider session is
+   * the conversation; the model is per run, so a session survives the change.
+   * Omitted, the task's own model runs.
+   */
+  model?: string;
+  /** Reasoning effort for the continued run. Omitted, the task's own holds. */
+  effort?: string;
+  /**
    * Hold the resume instead of running it now: the literal `"rate_limit"` to
    * wait for this task's own account to be usable again, an ISO instant, or a
    * duration like `"45m"` / `"4h"`. The task parks as `pending` and the hold
@@ -1343,6 +1351,18 @@ export async function resumeTask(
     if (WORKING_STATES.includes(task.state)) return queueFollowUp(task, instruction, options);
   }
   const old = requireContinuableTask(id, "resumed", instruction);
+  // A held resume replays only its stored instruction when the hold releases,
+  // and a queued follow-up is only an instruction — either one would silently
+  // drop a stated model or effort, so both are refused up front.
+  const runSettings = (["model", "effort"] as const).filter((key) => options[key] !== undefined);
+  if (options.startAt && runSettings.length > 0) {
+    throw new Error(
+      `a held resume replays its instruction only: ${id} — ${runSettings.join(" and ")} now would be dropped when the hold releases; resume without startAt to change them`,
+    );
+  }
+  const model = options.model?.trim() || old.model;
+  if (model.length > 200) throw new Error("model exceeds 200 characters");
+  const effort = options.effort?.trim();
   const profile = await requireSessionProfile(
     old,
     "resume",
@@ -1370,6 +1390,8 @@ export async function resumeTask(
   ].join("\n");
   const task = stateStore().resumeTask(id, {
     ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+    ...(model !== old.model ? { model } : {}),
+    ...(effort && effort !== old.effort ? { effort } : {}),
     ...(replacement ? { scope: replacement.scope } : {}),
     ...(replacement?.grantId ? { grantId: replacement.grantId } : {}),
     ...(options.allowQuestions !== undefined ? { allowQuestions: options.allowQuestions } : {}),
@@ -1393,7 +1415,7 @@ function queueFollowUp(task: Task, instruction: string | undefined, options: Res
       `a queued follow-up needs an instruction: ${task.id} — say what the worker should do once its current run lands`,
     );
   }
-  const conflicting = (["startAt", "scope", "timeoutMs", "allowQuestions"] as const)
+  const conflicting = (["startAt", "scope", "timeoutMs", "allowQuestions", "model", "effort"] as const)
     .filter((key) => options[key] !== undefined);
   if (conflicting.length > 0) {
     throw new Error(

@@ -1,5 +1,6 @@
 import { StateStore } from "./store";
 import type { CleanupPlan, CleanupRecord, CleanupResult } from "./store";
+import { CliRefusal } from "./cli-error";
 
 /**
  * `inter cleanup` is the one path that permanently removes data, and the only
@@ -192,7 +193,7 @@ export function scheduledCleanupDays(env: Record<string, string | undefined> = B
   if (!raw) return undefined;
   const days = parseDays(raw);
   if (days === undefined) {
-    throw new Error(
+    throw new CliRefusal(
       `INTER_CLEANUP_DAYS must be a whole number of days from ${MIN_DAYS} to ${MAX_DAYS}, got: ${raw}`,
     );
   }

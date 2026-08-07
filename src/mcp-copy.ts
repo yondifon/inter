@@ -29,6 +29,7 @@ export const RESUME_DESCRIPTION = [
   "The finished run is not overwritten. It becomes an attempt carrying its own output, completion and session, so inspect with fields: [\"attempts\"] still shows what the earlier run produced.",
   "Pass only the Inter task ID; Inter maps it to the private root provider session.",
   "Optional scope and allowQuestions replace those task settings before continuation; get explicit approval before expanding scope.",
+  "model and effort replace the task's own for the continued run — a provider session is the conversation and the model is per run, so a model change needs no new task. Both are refused together with startAt or queue: a held or queued resume carries only its instruction.",
   "Use reply instead when the task needs input, and handoff when the account itself failed and cannot answer — a rate-limited task carries completion.resetsAt, the time this session becomes resumable again.",
   "A session the provider can no longer reopen — its history was left unusable by an interrupted run — is not a dead end: resume starts a fresh session under the same task id, seeded with the original prompt and a summary of the prior run.",
   "By default a small acknowledgement; pass `fields` to get more.",

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { publicTaskSummary, taskView, TASK_FIELD_GROUPS, waitEventsView, waitTaskView } from "../src/public-task";
+import { publicTaskSummary, taskSummaryView, taskView, TASK_FIELD_GROUPS, waitEventsView, waitTaskView } from "../src/public-task";
 import { runCostFrom } from "../src/tasks";
 import type { Task, TaskSummary } from "../src/types";
 
@@ -341,5 +341,95 @@ describe("public task contract", () => {
     expect(taskView(task, ["all"])).toMatchObject({ id: "inter-task" });
     expect(taskView(task, ["all"])).not.toHaveProperty("sessionId");
     expect(publicTaskSummary(summary)).not.toHaveProperty("sessionId");
+  });
+});
+
+describe("task summary view", () => {
+  function summary(overrides: Partial<TaskSummary> = {}): TaskSummary {
+    return {
+      id: "t-1",
+      profileId: "claude-work",
+      model: "sonnet",
+      cwd: "/repo",
+      state: "running",
+      promptPreview: "Port the parser ".repeat(40),
+      title: "Port the parser",
+      createdAt: "2026-08-02T00:00:00.000Z",
+      updatedAt: "2026-08-02T00:00:01.000Z",
+      costUsd: 0.12,
+      grantId: "grant-9",
+      completion: { code: "completed", blocked: false },
+      error: "the run failed",
+      sessionId: "provider-session",
+      ...overrides,
+    };
+  }
+
+  test("the default is what a listing needs: identity, routing, clock, cost", () => {
+    expect(taskSummaryView(summary())).toEqual({
+      id: "t-1",
+      state: "running",
+      title: "Port the parser",
+      profileId: "claude-work",
+      model: "sonnet",
+      updatedAt: "2026-08-02T00:00:01.000Z",
+      costUsd: 0.12,
+    });
+  });
+
+  test("the default keeps the hundreds-of-characters fields off the listing", () => {
+    // The observed cost of the old shape: every row carried a long prompt
+    // preview, the completion, and the grant — 8k tokens for 8 tasks.
+    const view = taskSummaryView(summary());
+    expect(view).not.toHaveProperty("promptPreview");
+    expect(view).not.toHaveProperty("completion");
+    expect(view).not.toHaveProperty("grantId");
+    expect(view).not.toHaveProperty("cwd");
+    expect(view).not.toHaveProperty("error");
+    expect(view).not.toHaveProperty("sessionId");
+  });
+
+  test("title and cost stay absent when the task has none", () => {
+    const view = taskSummaryView(summary({ title: undefined, costUsd: undefined }));
+    expect(view).toEqual({
+      id: "t-1",
+      state: "running",
+      profileId: "claude-work",
+      model: "sonnet",
+      updatedAt: "2026-08-02T00:00:01.000Z",
+    });
+  });
+
+  test("fields replace the lean default, they do not extend it", () => {
+    const view = taskSummaryView(summary(), ["completion"]);
+    expect(view).toMatchObject({
+      id: "t-1",
+      state: "running",
+      completion: { code: "completed", blocked: false },
+      error: "the run failed",
+    });
+    expect(view).not.toHaveProperty("profileId");
+    expect(view).not.toHaveProperty("model");
+    expect(view).not.toHaveProperty("updatedAt");
+    expect(view).not.toHaveProperty("costUsd");
+  });
+
+  test('"prompt" brings the preview, and nothing heavier than it', () => {
+    const view = taskSummaryView(summary(), ["prompt"]);
+    expect(view).toMatchObject({ id: "t-1", state: "running", promptPreview: summary().promptPreview });
+    expect(view).not.toHaveProperty("completion");
+    expect(view).not.toHaveProperty("grantId");
+  });
+
+  test('"all" is the full summary minus the session id', () => {
+    const view = taskSummaryView(summary(), ["all"]);
+    expect(view).toEqual(publicTaskSummary(summary()));
+    expect(view).not.toHaveProperty("sessionId");
+  });
+
+  test("an archived row still says so", () => {
+    const archivedAt = "2026-08-02T00:00:02.000Z";
+    expect(taskSummaryView(summary({ archivedAt }))).toMatchObject({ archivedAt });
+    expect(taskSummaryView(summary({ archivedAt }), ["spend"])).toMatchObject({ archivedAt, costUsd: 0.12 });
   });
 });

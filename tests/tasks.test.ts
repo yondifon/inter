@@ -17,6 +17,7 @@ import {
   needsInputQuestion,
   priorRunEnding,
   recordProfileTaskOutcome,
+  resumeTask,
   withUnverifiedEvidence,
 } from "../src/tasks";
 import { closeStateStore, stateStore } from "../src/store";
@@ -662,5 +663,121 @@ describe("compactPayload", () => {
     expect(compactPayload(end)).toEqual(end);
     const tool = { type: "tool_execution_start", toolName: "write", args: { path: "a.ts" } };
     expect(compactPayload(tool)).toEqual(tool);
+  });
+});
+
+describe("resume model change", () => {
+  const savedDb = process.env.INTER_DB;
+  const savedRoots = process.env.INTER_ROOTS;
+  const savedPath = process.env.PATH;
+  const scratch: string[] = [];
+
+  afterEach(() => {
+    closeStateStore();
+    if (savedDb === undefined) delete process.env.INTER_DB;
+    else process.env.INTER_DB = savedDb;
+    if (savedRoots === undefined) delete process.env.INTER_ROOTS;
+    else process.env.INTER_ROOTS = savedRoots;
+    process.env.PATH = savedPath;
+    for (const dir of scratch.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** A failed task with a captured provider session, ready to be resumed. */
+  function failedTask(): Task {
+    stateStore().saveProfiles([{
+      id: "fake-claude",
+      label: "Fake Claude",
+      provider: "claude",
+      model: "sonnet",
+      enabled: true,
+      env: {},
+      capabilities: [],
+    }]);
+    const task: Task = {
+      id: crypto.randomUUID(),
+      profileId: "fake-claude",
+      model: "sonnet",
+      prompt: "do work",
+      cwd: ".",
+      state: "failed",
+      error: "session limit",
+      output: "partial findings",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      scope: { read: ["./**"], write: [] },
+      allowQuestions: true,
+      sessionId: "sess-alpha",
+    };
+    stateStore().createTask(task);
+    return task;
+  }
+
+  test("resume with model and effort keeps the task id, profile, and session", async () => {
+    const root = mkdtempSync(join(tmpdir(), "inter-resume-model-"));
+    scratch.push(root);
+    process.env.INTER_DB = join(root, "inter.db");
+    process.env.INTER_ROOTS = root;
+    const binDir = join(root, "bin");
+    mkdirSync(binDir);
+    // A fake claude that never reaches a real account: the worker sandbox
+    // blocks it here anyway, and in an unsandboxed run this script answers
+    // with a completed result instead of a live provider call.
+    writeFileSync(join(binDir, "claude"), [
+      "#!/bin/sh",
+      "printf '%s\\n' '{\"type\":\"system\",\"session_id\":\"sess-alpha\"}'",
+      "printf '%s\\n' '{\"type\":\"result\",\"result\":\"Done.\\nINTER_RESULT: completed\"}'",
+      "",
+    ].join("\n"), { mode: 0o755 });
+    process.env.PATH = `${binDir}:${savedPath}`;
+    const task = failedTask();
+
+    const resumed = await resumeTask(task.id, "keep going", { model: "haiku", effort: "max" });
+
+    expect(resumed.id).toBe(task.id);
+    expect(resumed.model).toBe("haiku");
+    expect(resumed.effort).toBe("max");
+    // The session is the conversation and the model is per run: the same
+    // profile and the same provider session carry the continued turn.
+    expect(resumed.profileId).toBe("fake-claude");
+    expect(resumed.sessionId).toBe("sess-alpha");
+    // Drain the background run so afterEach never closes a store mid-run.
+    await settled(task.id);
+    expect(getTask(task.id)?.state).not.toBe("queued");
+  });
+
+  test("refuses model together with startAt, which would drop it at release", async () => {
+    const root = mkdtempSync(join(tmpdir(), "inter-resume-refuse-"));
+    scratch.push(root);
+    process.env.INTER_DB = join(root, "inter.db");
+    const task = failedTask();
+
+    await expect(resumeTask(task.id, "later", { model: "haiku", startAt: "1h" }))
+      .rejects.toThrow("a held resume replays its instruction only");
+    await expect(resumeTask(task.id, "later", { effort: "max", startAt: "45m" }))
+      .rejects.toThrow("effort now would be dropped when the hold releases");
+    // The refusal is before the run: nothing was started, the state is intact.
+    expect(getTask(task.id)?.state).toBe("failed");
+  });
+
+  test("refuses a model longer than 200 characters", async () => {
+    const root = mkdtempSync(join(tmpdir(), "inter-resume-length-"));
+    scratch.push(root);
+    process.env.INTER_DB = join(root, "inter.db");
+    const task = failedTask();
+
+    await expect(resumeTask(task.id, "keep going", { model: "m".repeat(201) }))
+      .rejects.toThrow("model exceeds 200 characters");
+    expect(getTask(task.id)?.model).toBe("sonnet");
+  });
+
+  test("a queued follow-up takes only an instruction, model included", async () => {
+    const root = mkdtempSync(join(tmpdir(), "inter-resume-queue-"));
+    scratch.push(root);
+    process.env.INTER_DB = join(root, "inter.db");
+    const task: Task = { ...failedTask(), state: "running" };
+    stateStore().saveTask(task);
+
+    await expect(resumeTask(task.id, "then do X", { model: "haiku", queue: "add" }))
+      .rejects.toThrow(/remove model; those settings belong on the resume that starts a run/);
   });
 });
