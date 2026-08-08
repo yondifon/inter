@@ -395,7 +395,7 @@ struct Hop: Equatable, Sendable {
 
     fileprivate static func from(_ detail: String?) -> Hop {
         guard let detail, let arrow = detail.range(of: " → ") else {
-            let fallback = detail ?? "Unknown profile"
+            let fallback = detail ?? "Unknown worker"
             return Hop(fromId: fallback, toId: fallback, fromLabel: fallback, toLabel: fallback, display: fallback)
         }
         let from = String(detail[..<arrow.lowerBound])

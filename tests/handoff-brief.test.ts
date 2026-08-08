@@ -217,4 +217,163 @@ describe("handoff brief", () => {
     expect(brief.prompt).toContain("cannot be opened from here");
     expect(brief.prompt).not.toContain("# Fresh session:");
   });
+
+  test("carries the work and drops heartbeat, lifecycle and progress events", () => {
+    const brief = handoffBrief(task(), [
+      // Inter's own bookkeeping: the app renders these rows, the next worker
+      // does not need them.
+      event({ elapsedMs: 120_000, silentMs: 500, stalled: false }, "heartbeat"),
+      event({ provider: "claude", model: "opus", pid: 99 }, "worker_spawned"),
+      event({}, "created"),
+      event({}, "started"),
+      event({}, "completed"),
+      // Agent-side plumbing: session boot, token tickers, step/turn boundaries,
+      // usage receipts, progress and rate-limit pings.
+      event({ type: "system", subtype: "init", model: "opus", tools: 12 }, "agent.system"),
+      event({
+        type: "system", subtype: "thinking_tokens",
+        estimated_tokens: 1200, estimated_tokens_delta: 40,
+      }, "agent.system"),
+      event({ type: "step_start", part: { type: "step_start" } }, "agent.step_start"),
+      event({ type: "step_finish", part: { reason: "done", tokens: { output: 200 } } }, "agent.step_finish"),
+      event({ type: "result", total_cost_usd: 0.4, num_turns: 30, usage: { output_tokens: 2000 } }, "agent.result"),
+      event({ type: "turn_end", message: { role: "assistant" }, usage: { output: 300 } }, "agent.turn_end"),
+      event({ type: "agent_settled" }, "agent.agent_settled"),
+      event({ type: "tool_progress", item: { type: "tool_progress", tool: "bash", id: "call_1" } }, "agent.tool_progress"),
+      event({ type: "rate_limit_event", rate_limit_info: { status: "allowed" } }, "agent.rate_limit_event"),
+      // The actual work.
+      says("The bug is the off-by-one in listTaskEvents."),
+      calls("Read", { file_path: "/root/project/src/store.ts" }),
+      says("The fix is a single character."),
+    ], "claude");
+
+    expect(brief.tier).toBe("verbatim");
+    expect(brief.prompt).toContain("The bug is the off-by-one in listTaskEvents.");
+    expect(brief.prompt).toContain("[tool] Read file: …/project/src/store.ts");
+    expect(brief.prompt).toContain("The fix is a single character.");
+    // None of the run's bookkeeping survives into the seed.
+    expect(brief.prompt).not.toContain("Running for");
+    expect(brief.prompt).not.toContain("Worker spawned");
+    expect(brief.prompt).not.toContain("Task queued");
+    expect(brief.prompt).not.toContain("Session started");
+    expect(brief.prompt).not.toContain("Thinking");
+    expect(brief.prompt).not.toContain("Step started");
+    expect(brief.prompt).not.toContain("Step finished");
+    expect(brief.prompt).not.toContain("Run summary");
+    expect(brief.prompt).not.toContain("Tool progress");
+    expect(brief.prompt).not.toContain("Rate limit");
+    expect(brief.prompt).not.toContain("Run finished");
+  });
+
+  test("a run of only lifecycle events still produces a usable seed", () => {
+    const brief = handoffBrief(task(), [
+      event({}, "created"),
+      event({ provider: "claude", pid: 7 }, "worker_spawned"),
+      event({ elapsedMs: 60_000, silentMs: 60_000, stalled: true }, "heartbeat"),
+      event({ type: "system", subtype: "init", model: "opus" }, "agent.system"),
+      event({ type: "step_start", part: { type: "step_start" } }, "agent.step_start"),
+      event({ type: "result", total_cost_usd: 0.1, num_turns: 5 }, "agent.result"),
+      event({}, "failed"),
+    ], "claude");
+
+    expect(brief.tier).toBe("verbatim");
+    // The contract and the ending survive even with no work to carry.
+    expect(brief.prompt).toContain(PROMPT);
+    expect(brief.prompt).toContain("You've hit your session limit");
+    expect(brief.prompt).toContain("The previous run produced no readable trace.");
+    expect(brief.prompt).not.toContain("Session started");
+  });
+
+  test("the cap still condenses a long filtered transcript, dense with work", () => {
+    const filler = "x".repeat(400);
+    const events = [
+      ...Array.from({ length: 120 }, (_, index) => says(`turn ${index} ${filler}`)),
+      // Noise between the messages: neither counts toward the digest budget nor
+      // survives into the seed.
+      event({ type: "system", subtype: "thinking_tokens", estimated_tokens: 9999, estimated_tokens_delta: 100 }, "agent.system"),
+      event({ elapsedMs: 999_000, silentMs: 200, stalled: false }, "heartbeat"),
+      says("FINAL: the off-by-one is in listTaskEvents."),
+    ];
+    const brief = handoffBrief(task(), events, "claude");
+
+    expect(brief.tier).toBe("digest");
+    expect(brief.prompt).toContain("FINAL: the off-by-one is in listTaskEvents.");
+    expect(brief.prompt).not.toContain("turn 0 ");
+    expect(brief.prompt).not.toContain("Thinking");
+    expect(brief.prompt).not.toContain("Running for");
+    expect(brief.omittedMessages).toBeGreaterThan(0);
+    expect(brief.chars - PROMPT.length).toBeLessThan(DIGEST_CAP + 2_000);
+  });
+
+  test("drops claude hook notifications but keeps tool hooks and failures", () => {
+    const input = { file_path: "/root/project/src/store.ts" };
+    const brief = handoffBrief(task(), [
+      event({ hook_event_name: "Notification", message: "turn ended cleanly" }, "agent.hook"),
+      calls("Read", input, "toolu_3"),
+      ...hooks("Read", input, "toolu_3"),
+      event({
+        hook_event_name: "PostToolUseFailure",
+        tool_name: "Read",
+        tool_input: input,
+        tool_use_id: "toolu_3",
+        error: "the file changed under the worker",
+      }, "agent.hook"),
+      says("So the failure was real."),
+    ], "claude");
+
+    // The CLI reporting on the run is not the worker talking.
+    expect(brief.prompt).not.toContain("turn ended cleanly");
+    expect(brief.prompt).not.toContain("Notification");
+    expect(brief.prompt).toContain("[tool] Read file: …/project/src/store.ts");
+    expect(brief.prompt).toContain("the file changed under the worker");
+  });
+
+  test("carries a resume's in-flight instruction as the current job", () => {
+    const brief = handoffBrief(task(), [
+      // The original run landed; the run being handed off was a resume of it.
+      event({ previousState: "completed", instruction: "compact the \"Handed off\" row to match the rate-limit row" }, "resumed"),
+      says("On it — editing ActivityStory.swift."),
+      calls("Edit", { file_path: "/root/project/swift/Sources/ActivityStory.swift" }, "toolu_9"),
+      event({ error: "StopFailure: authentication_failed" }, "failed"),
+    ], "claude");
+
+    expect(brief.prompt).toContain("# Current instruction");
+    expect(brief.prompt).toContain("compact the \"Handed off\" row to match the rate-limit row");
+    // The current job leads; the original brief is background beneath it.
+    expect(brief.prompt.indexOf("# Current instruction")).toBeLessThan(brief.prompt.indexOf("# Original task"));
+    expect(brief.prompt).toContain("The brief that started this task, kept for context.");
+    // The marching order names the current job, not the generic first-run line.
+    expect(brief.prompt).toContain("Continue the current instruction above.");
+    expect(brief.prompt).not.toContain("Continue this task from where the previous run stopped");
+  });
+
+  test("a first-run failure produces the same seed as before", () => {
+    const brief = handoffBrief(task(), [
+      event({}, "created"),
+      event({ provider: "claude", pid: 7 }, "worker_spawned"),
+      says("The bug is the off-by-one in listTaskEvents."),
+      event({ error: "rate_limit" }, "failed"),
+    ], "claude");
+
+    // No resume happened, so there is no in-flight instruction to lead with.
+    expect(brief.prompt).not.toContain("# Current instruction");
+    expect(brief.prompt).toContain(
+      "This is the task, verbatim, exactly as it was given to the previous worker. It is the contract; nothing below replaces it.",
+    );
+    expect(brief.prompt).toContain("Continue this task from where the previous run stopped");
+  });
+
+  test("leaves queued follow-ups alone — they stay in the queue, not the seed", () => {
+    const brief = handoffBrief(task(), [
+      event({ instruction: "then write the tests", waiting: 1 }, "follow_up_queued"),
+      says("First run of this task."),
+      event({ error: "rate_limit" }, "failed"),
+    ], "claude");
+
+    // A queued follow-up is not in flight: the run had not started it, and the
+    // queue feeds it into the handed-off session after a clean landing, so
+    // carrying it in the seed would run it twice.
+    expect(brief.prompt).not.toContain("then write the tests");
+    expect(brief.prompt).not.toContain("# Current instruction");
+  });
 });

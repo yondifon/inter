@@ -22,10 +22,11 @@ export const COMPLETE_DESCRIPTION = [
 
 export const RESUME_DESCRIPTION = [
   "Continue a task on the same profile and the same provider session, keeping the same Inter task ID.",
+  "This is the normal way to keep going on work a task already did, completed or not — not a recovery path reserved for failures. Check tasks for the task that already owns the file or feature before delegating a fresh one.",
   "Two uses. Retry a failed, cancelled, or blocked run — instruction optional, and the run picks up where it stopped.",
-  "Or follow up on a completed one: pass instruction saying what to do next and the worker gets it in the session it already finished in, still holding the files it read and the reasoning behind what it built. That is the cheap way to iterate — a fresh delegation re-reads everything and loses why the work is the way it is.",
+  "Or follow up on a completed one: pass instruction saying what to do next and the worker gets it in the session it already finished in, still holding the files it read and the reasoning behind what it built. That is the normal way to iterate, not a special case — a fresh delegation re-reads everything and loses why the work is the way it is.",
   "A completed task without instruction is rejected: there is nothing to retry, so the instruction is the whole job.",
-  "A third use, while a worker is still on the task: pass queue: \"add\" with the instruction and it waits its turn, then Inter sends it into that same session itself the moment the run finishes clean. That is how to stack up several rounds of work without watching for each one to land.",
+  "A third use, while a worker is still on the task: pass queue: \"add\" with the instruction and it waits its turn, then Inter sends it into that same session itself the moment the run finishes clean. That is the normal way to queue a next step on running work, not a workaround — it stacks up several rounds without watching for each one to land.",
   "The finished run is not overwritten. It becomes an attempt carrying its own output, completion and session, so inspect with fields: [\"attempts\"] still shows what the earlier run produced.",
   "Pass only the Inter task ID; Inter maps it to the private root provider session.",
   "Optional scope and allowQuestions replace those task settings before continuation; get explicit approval before expanding scope.",
@@ -62,6 +63,7 @@ export const DELETE_WORKTREE_DESCRIPTION = [
 export const DELEGATE_DESCRIPTION = [
   "Ask an external AI provider to handle a new scoped task.",
   "Reach for this as a normal way to get work done, not only when this session is stuck: hand off implementation, research, writing, analysis, and review, and keep goal-setting, architecture, and final review here.",
+  "Before opening a new one, check tasks for a task that already touched the file or feature this needs and resume it instead — a fresh task re-reads everything and loses the reasoning behind the earlier work.",
   "Also use it to get an independent second opinion, explore an idea with another model, or keep working when the current provider is near its usage limit.",
   "Supports any bounded task that can run from a prompt and cwd; for work already started, background watch to follow it and inspect to read it.",
   "Returns a small acknowledgement by default; use `fields` to request more of the task record, or `[\"all\"]` for the full task minus the provider session ID.",

@@ -109,13 +109,25 @@ const taskFieldSchema = z.array(z.enum(TASK_FIELD_KEYS)).optional()
 // poll route, which asks the store for its own, larger limit directly.
 export const tasksToolQuerySchema = z.object({
   limit: z.number().int().min(1).max(100).default(20),
-  state: taskStateSchema.optional().describe("Only tasks currently in this state."),
+  state: taskStateSchema.or(z.array(taskStateSchema).min(1)).optional()
+    .describe("Only tasks currently in this state; pass an array to match any of those."),
   since: z.string().datetime().optional().describe("Only tasks updated at or after this ISO timestamp."),
+  until: z.string().datetime().optional().describe("Only tasks updated strictly before this ISO timestamp."),
+  order: z.enum(["newest", "oldest"]).default("newest")
+    .describe("Sort by the updated timestamp: newest first (default), or oldest first."),
   profile: z.string().optional().describe("Only tasks sent to this profile id."),
   parent: z.string().optional()
     .describe("A fan-out batch: the task with this id plus every task delegated with it as parent."),
   archived: z.enum(["active", "only", "include"]).default("active"),
   fields: taskFieldSchema,
+}).superRefine((query, ctx) => {
+  if (query.since && query.until && Date.parse(query.until) <= Date.parse(query.since)) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["until"],
+      message: `until (${query.until}) must be strictly after since (${query.since})`,
+    });
+  }
 });
 
 // The one routing input the caller knows better than Inter: how hard the work
@@ -706,7 +718,7 @@ async function createMcpServer(): Promise<McpServer> {
     inputSchema: z.object({}),
   }, async () => result(healthReport()));
   server.registerTool("tasks", {
-    description: "Find recent delegated tasks by state, time, profile, or fan-out batch. Each row is lean by default — id, state, title, profile, model, updatedAt, cost — so a listing stays a listing; pass `fields: [\"all\"]` for the full summary, or a group like `[\"completion\"]` for just that. Use inspect for one task in full, or background watch to follow active work.",
+    description: "Find recent delegated tasks by state (single or any-of list), a since/until time range, or a fan-out batch, newest or oldest first. Each row is lean by default — id, state, title, profile, model, updatedAt, cost — so a listing stays a listing; pass `fields: [\"all\"]` for the full summary, or a group like `[\"completion\"]` for just that. Before delegating a new task, run this with `fields: [\"label\"]` — id, title, and tldr, nothing heavier — to check whether an existing task already owns the file or feature and should be resumed instead. Use inspect for one task in full, or background watch to follow active work.",
     inputSchema: tasksToolQuerySchema,
   }, async (query) => result(
     listTaskSummaries(query).map((summary) => taskSummaryView(summary, query.fields)),

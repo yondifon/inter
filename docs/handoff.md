@@ -69,13 +69,20 @@ Deterministic — a transform over stored rows, no model in the loop. It is buil
 from the task row and its event trace, read through the same normalizer the app's
 trace uses, so it is provider-neutral.
 
-1. **The original prompt, verbatim.** It is the contract and is never condensed,
-   however large.
-2. **Why the previous run ended** — state, completion code, reason, error, the
+1. **The in-flight instruction, when the dead run was a resume.** It leads the
+   seed as the current job — the original prompt below it is background that may
+   already be finished. A first-run failure has none, and the seed starts with
+   the original prompt, exactly as before. A queued follow-up (`queue: "add"`)
+   that never ran is *not* carried: it was never the work in progress, and the
+   queue survives the handoff and feeds it into the handed-off session after a
+   clean landing.
+2. **The original prompt, verbatim.** The contract the task started with. It is
+   never condensed, however large.
+3. **Why the previous run ended** — state, completion code, reason, error, the
    reset time, and its final message.
-3. **What it left on disk** — every path the trace shows it writing, so the next
+4. **What it left on disk** — every path the trace shows it writing, so the next
    worker reads a half-written file instead of starting it again.
-4. **What it said and did**, in one of two tiers:
+5. **What it said and did**, in one of two tiers:
    - **Verbatim** (default, up to 24,000 characters): the previous worker's
      actual messages and tool calls, in order. This is the point of the feature —
      a review that reached its conclusion at turn 40 carries that conclusion
@@ -84,12 +91,19 @@ trace uses, so it is provider-neutral.
      plus the **tail** of the assistant messages kept verbatim. Conclusions live
      at the end, so drops come out of the middle and every drop is stated
      (`N earlier messages omitted…`).
-5. **A continuation instruction** — continue from here, do not repeat finished
-   work.
+6. **A continuation instruction** — continue the current work, do not repeat
+   finished work.
 
 Reasoning blocks are left out: the largest thing in a trace and the least
 load-bearing once the conclusions are carried. Replies a provider streamed a
 chunk at a time (pi, Antigravity) are rejoined into whole messages.
+
+So is everything else that describes the run rather than the work: broker
+heartbeats and state transitions, session/step/turn boundaries, thinking and
+progress tickers, usage receipts, and CLI hook notifications. The seed carries
+only what the next worker needs — the worker's own messages, its tool calls and
+their results, and errors — so the size caps spend their budget on work instead
+of plumbing.
 
 The brief is the run's `shippedPrompt`, so what the second worker received is
 answerable later like any other dispatch. A `handoff_brief` event records the

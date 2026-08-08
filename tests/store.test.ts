@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { Database } from "bun:sqlite";
 import { StateStore } from "../src/store";
 import { LATEST_SCHEMA_VERSION } from "../src/store/schema";
+import { taskSummaryView } from "../src/public-task";
 import type { Profile, Task } from "../src/types";
 
 const roots: string[] = [];
@@ -43,6 +44,11 @@ function task(state: Task["state"] = "queued"): Task {
     createdAt: now,
     updatedAt: now,
   };
+}
+
+/** A task stamped at a fixed instant, so time-filter tests can name exact bounds. */
+function atTask(state: Task["state"], iso: string): Task {
+  return { ...task(state), createdAt: iso, updatedAt: iso };
 }
 
 /** The message an open failure carries, so tests can assert on its text. */
@@ -470,6 +476,21 @@ describe("SQLite state store", () => {
     store.close();
   });
 
+  test("matches any of an array of states", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const done = task("completed");
+    const failed = task("failed");
+    const running = task("running");
+    store.createTask(done);
+    store.createTask(failed);
+    store.createTask(running);
+
+    expect(new Set(store.listTaskSummaries({ state: ["completed", "failed"] }).map(({ id }) => id)))
+      .toEqual(new Set([done.id, failed.id]));
+    store.close();
+  });
+
   test("composes the parent filter with the archived filter", () => {
     const { db } = paths();
     const store = new StateStore({ path: db, seedProfiles: [profile] });
@@ -487,6 +508,80 @@ describe("SQLite state store", () => {
       .toEqual(new Set([parent.id, kept.id, hidden.id]));
     expect(new Set(store.listTaskSummaries({ parent: parent.id, archived: "only" }).map(({ id }) => id)))
       .toEqual(new Set([hidden.id]));
+    store.close();
+  });
+
+  test("filters a since/until range: since inclusive, until strict", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const early = atTask("completed", "2026-08-01T00:00:00.000Z");
+    const mid = atTask("completed", "2026-08-05T00:00:00.000Z");
+    const late = atTask("completed", "2026-08-08T00:00:00.000Z");
+    store.createTask(early);
+    store.createTask(mid);
+    store.createTask(late);
+
+    expect(store.listTaskSummaries({
+      since: "2026-08-02T00:00:00.000Z",
+      until: "2026-08-09T00:00:00.000Z",
+    }).map(({ id }) => id)).toEqual([late.id, mid.id]);
+    // Until alone keeps everything strictly before the bound in.
+    expect(store.listTaskSummaries({ until: "2026-08-05T00:00:00.000Z" }).map(({ id }) => id))
+      .toEqual([early.id]);
+    store.close();
+  });
+
+  test("orders oldest first when asked", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const first = atTask("completed", "2026-08-01T00:00:00.000Z");
+    const middle = atTask("completed", "2026-08-02T00:00:00.000Z");
+    const last = atTask("completed", "2026-08-03T00:00:00.000Z");
+    store.createTask(first);
+    store.createTask(middle);
+    store.createTask(last);
+
+    expect(store.listTaskSummaries({ order: "oldest" }).map(({ id }) => id))
+      .toEqual([first.id, middle.id, last.id]);
+    expect(store.listTaskSummaries({}).map(({ id }) => id))
+      .toEqual([last.id, middle.id, first.id]);
+    store.close();
+  });
+
+  test("applies limit after oldest-first ordering", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const created = [0, 1, 2, 3, 4].map((day) => {
+      const task = atTask("completed", new Date(Date.UTC(2026, 7, 1 + day)).toISOString());
+      store.createTask(task);
+      return task;
+    });
+
+    expect(store.listTaskSummaries({ order: "oldest", limit: 2 }).map(({ id }) => id))
+      .toEqual(created.slice(0, 2).map(({ id }) => id));
+    store.close();
+  });
+
+  test("the label listing composes with state, since/until, order and limit", () => {
+    const { db } = paths();
+    const store = new StateStore({ path: db, seedProfiles: [profile] });
+    const tooEarly = { ...atTask("completed", "2026-08-02T00:00:00.000Z"), title: "A", tldr: "Do A" };
+    const first = { ...atTask("completed", "2026-08-04T00:00:00.000Z"), title: "B", tldr: "Do B" };
+    const wrongState = { ...atTask("failed", "2026-08-06T00:00:00.000Z"), title: "C", tldr: "Do C" };
+    const second = { ...atTask("completed", "2026-08-08T00:00:00.000Z"), title: "D", tldr: "Do D" };
+    for (const t of [tooEarly, first, wrongState, second]) store.createTask(t);
+
+    const rows = store.listTaskSummaries({
+      state: "completed",
+      since: "2026-08-03T00:00:00.000Z",
+      order: "oldest",
+      limit: 2,
+    }).map((row) => taskSummaryView(row, ["label"]));
+
+    expect(rows).toEqual([
+      { id: first.id, state: "completed", title: "B", tldr: "Do B" },
+      { id: second.id, state: "completed", title: "D", tldr: "Do D" },
+    ]);
     store.close();
   });
 

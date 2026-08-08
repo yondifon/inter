@@ -252,8 +252,10 @@ export interface InFlightTask {
 
 export interface TaskListQuery {
   limit?: number;
-  state?: TaskState;
+  state?: TaskState | TaskState[];
   since?: string;
+  until?: string;
+  order?: "newest" | "oldest";
   profile?: string;
   parent?: string;
   archived?: "active" | "only" | "include";
@@ -772,6 +774,10 @@ export class StateStore {
       this.database.query(
         "INSERT INTO task_follow_ups(task_id, instruction, created_at) VALUES (?, ?, ?)",
       ).run(taskId, instruction, new Date().toISOString());
+      // The app refetches a task's full row only when its updated_at moves, so
+      // a queued item must move it for the window to learn the follow-up landed.
+      this.database.query("UPDATE tasks SET updated_at = ? WHERE id = ?")
+        .run(new Date().toISOString(), taskId);
       this.addTaskEvent(taskId, "follow_up_queued", state, {
         instruction,
         waiting: this.countFollowUps(taskId),
@@ -783,6 +789,13 @@ export class StateStore {
     return this.database.query<{ waiting: number }, [string]>(
       "SELECT COUNT(*) AS waiting FROM task_follow_ups WHERE task_id = ?",
     ).get(taskId)?.waiting ?? 0;
+  }
+
+  /** The waiting instructions, oldest first — the order a clean run feeds them back in. */
+  listFollowUps(taskId: string): string[] {
+    return this.database.query<{ instruction: string }, [string]>(
+      "SELECT instruction FROM task_follow_ups WHERE task_id = ? ORDER BY id",
+    ).all(taskId).map(({ instruction }) => instruction);
   }
 
   /**
@@ -810,6 +823,10 @@ export class StateStore {
       const dropped = this.countFollowUps(taskId);
       if (dropped === 0) return;
       this.database.query("DELETE FROM task_follow_ups WHERE task_id = ?").run(taskId);
+      // Same move-the-clock rule as queueFollowUp: a cleared queue is a change
+      // the app's detail refetch must see.
+      this.database.query("UPDATE tasks SET updated_at = ? WHERE id = ?")
+        .run(new Date().toISOString(), taskId);
       this.addTaskEvent(taskId, "follow_ups_dropped", state, { dropped, reason });
     });
   }
@@ -1363,13 +1380,17 @@ export class StateStore {
   getTask(id: string): Task | undefined {
     // The follow-up count rides this read and not TASK_COLUMNS: the app polls
     // the list route every two seconds and would pay the subquery per row for
-    // a number only the opened task shows.
+    // a number only the opened task shows. The waiting instructions get the
+    // same single-read treatment — the app's detail route returns this row.
     const row = this.database.query<TaskRow, [string]>(`
       SELECT ${TASK_COLUMNS},
              (SELECT COUNT(*) FROM task_follow_ups WHERE task_id = tasks.id) AS follow_ups
       FROM tasks WHERE id = ?
     `).get(id);
-    return row ? taskFromRow(row) : undefined;
+    const task = row ? taskFromRow(row) : undefined;
+    if (!task) return undefined;
+    const waiting = this.listFollowUps(id);
+    return waiting.length > 0 ? { ...task, queuedFollowUpItems: waiting } : task;
   }
 
   // The waiter's 100 ms poll only reads `state`, so materialising the whole
@@ -1403,12 +1424,17 @@ export class StateStore {
     const clauses: string[] = [];
     const values: Array<string | number> = [];
     if (query.state) {
-      clauses.push("state = ?");
-      values.push(query.state);
+      const states = Array.isArray(query.state) ? query.state : [query.state];
+      clauses.push(`state IN (${states.map(() => "?").join(",")})`);
+      values.push(...states);
     }
     if (query.since) {
       clauses.push("updated_at >= ?");
       values.push(query.since);
+    }
+    if (query.until) {
+      clauses.push("updated_at < ?");
+      values.push(query.until);
     }
     if (query.profile) {
       clauses.push("profile_id = ?");
@@ -1421,11 +1447,12 @@ export class StateStore {
     }
     clauses.push(archiveClause(query.archived));
     const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
+    const direction = query.order === "oldest" ? "ASC" : "DESC";
     const rows = this.database.query<TaskRow, Array<string | number>>(`
       SELECT ${TASK_COLUMNS}
       FROM tasks
       ${where}
-      ORDER BY updated_at DESC, id DESC
+      ORDER BY updated_at ${direction}, id ${direction}
       LIMIT ?
     `).all(...values, limit);
     return rows.map(taskSummaryFromRow);

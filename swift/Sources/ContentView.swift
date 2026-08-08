@@ -132,12 +132,12 @@ struct ContentView: View {
             .navigationSplitViewColumnWidth(min: Self.minSidebarWidth, ideal: restoredSidebarWidth, max: Self.maxSidebarWidth)
             .toolbar {
                 ToolbarItem {
-                    Button("Install MCP", systemImage: "link.badge.plus") {
+                    Button("Connect CLIs", systemImage: "link.badge.plus") {
                         installResults = MCPConfigInjector.installEverywhere(profiles: store.profiles)
                         showingInstall = true
                     }
                     .labelStyle(.iconOnly)
-                    .help("Add Inter to every CLI's global MCP config")
+                    .help("Connect every CLI on this Mac to Inter")
                 }
                 ToolbarItem {
                     Button("Settings…", systemImage: "gearshape") { settingsPresentation.isPresented = true }
@@ -196,7 +196,7 @@ struct ContentView: View {
         } message: { _ in
             Text("This stops the worker’s process tree. The task can be resumed later.")
         }
-        .alert("Couldn’t update the task.", isPresented: $showingTaskActionError) {
+        .alert("Couldn’t update the task. Try again.", isPresented: $showingTaskActionError) {
             Button("OK", role: .cancel) {}
         }
         .safeAreaInset(edge: .bottom) {
@@ -606,7 +606,7 @@ struct ContentView: View {
     }
 
     private var statusText: String {
-        switch broker.status { case .running: "Broker running"; case .starting: "Starting…"; case .stopped: "Broker offline" }
+        switch broker.status { case .running: "Inter running"; case .starting: "Starting…"; case .stopped: "Inter offline" }
     }
     private var statusColor: Color {
         switch broker.status { case .running: .green; case .starting: .orange; case .stopped: .red }
@@ -754,7 +754,7 @@ private struct InstallResultsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
-                Text("Global MCP install").font(.title3.weight(.semibold))
+                Text("Connect CLIs").font(.title3.weight(.semibold))
                 Spacer()
                 Button("Done") { dismiss() }
                     .keyboardShortcut(.defaultAction)

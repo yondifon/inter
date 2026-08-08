@@ -191,6 +191,17 @@ describe("taskView", () => {
     expect(view).not.toHaveProperty("effort");
   });
 
+  test("label group adds title and tldr and nothing else", () => {
+    const view = taskView(full, ["label"]);
+    expect(view).toHaveProperty("title", full.title);
+    expect(view).toHaveProperty("tldr", full.tldr);
+    expect(view).not.toHaveProperty("cwd");
+    expect(view).not.toHaveProperty("createdAt");
+    expect(view).not.toHaveProperty("parentTaskId");
+    expect(view).not.toHaveProperty("prompt");
+    expect(view).not.toHaveProperty("output");
+  });
+
   test("scope group adds its own fields and nothing else", () => {
     const view = taskView(full, ["scope"]);
     expect(view).toHaveProperty("scope");
@@ -431,5 +442,22 @@ describe("task summary view", () => {
     const archivedAt = "2026-08-02T00:00:02.000Z";
     expect(taskSummaryView(summary({ archivedAt }))).toMatchObject({ archivedAt });
     expect(taskSummaryView(summary({ archivedAt }), ["spend"])).toMatchObject({ archivedAt, costUsd: 0.12 });
+  });
+
+  test('"label" returns exactly id, state, title and tldr — the cheap check-first row', () => {
+    const view = taskSummaryView(summary({ tldr: "Port the parser and run its tests" }), ["label"]);
+    expect(Object.keys(view).sort()).toEqual(["id", "state", "title", "tldr"]);
+    expect(view).toMatchObject({ title: "Port the parser", tldr: "Port the parser and run its tests" });
+  });
+
+  test('"label" omits title and tldr when the task has neither', () => {
+    const view = taskSummaryView(summary({ title: undefined }), ["label"]);
+    expect(Object.keys(view).sort()).toEqual(["id", "state"]);
+  });
+
+  test('"label" still carries archivedAt for an archived task', () => {
+    const archivedAt = "2026-08-02T00:00:02.000Z";
+    const view = taskSummaryView(summary({ archivedAt, tldr: "Port the parser and run its tests" }), ["label"]);
+    expect(Object.keys(view).sort()).toEqual(["archivedAt", "id", "state", "title", "tldr"]);
   });
 });

@@ -205,11 +205,11 @@ struct AboutPage: View {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 8) {
                         PulsingDot(color: .green, diameter: 7, beats: false)
-                        Text("Broker running").scaledFont(.callout, weight: .medium)
+                        Text("Inter running").scaledFont(.callout, weight: .medium)
                     }
 
                     LabeledContent("Version", value: health.version)
-                    LabeledContent("MCP contract", value: "v\(health.mcpContractVersion)")
+                    LabeledContent("Connection version", value: "v\(health.mcpContractVersion)")
 
                     Text(health.build)
                         .scaledFont(.caption, design: .monospaced)
@@ -219,11 +219,11 @@ struct AboutPage: View {
             } else if fetchFailed {
                 HStack(spacing: 8) {
                     Circle().fill(.red).frame(width: 7, height: 7)
-                    Text("Broker unreachable").scaledFont(.callout)
+                    Text("Inter unreachable").scaledFont(.callout)
                         .foregroundStyle(.secondary)
                 }
             } else {
-                ProgressView("Checking broker…").controlSize(.small)
+                ProgressView("Checking Inter…").controlSize(.small)
             }
 
             Spacer()
@@ -231,7 +231,7 @@ struct AboutPage: View {
         .padding(32)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         // Re-run when the broker state settles, so a start that outlived the
-        // one-shot fetch still reconciles to "Broker running".
+        // one-shot fetch still reconciles to "Inter running".
         .task(id: broker.status) { await fetch() }
     }
 
@@ -290,7 +290,7 @@ private struct ProfileDetail: View {
                 }
 
                 VStack(alignment: .leading, spacing: 6 * uiScale) {
-                    SidebarSectionLabel(text: "MCP")
+                    SidebarSectionLabel(text: "Connection")
                         .padding(.top, 18 * uiScale)
                     LabeledContent("Endpoint") {
                         HStack(spacing: 8 * uiScale) {
@@ -301,7 +301,7 @@ private struct ProfileDetail: View {
                         }
                     }
                     .padding(.vertical, 6 * uiScale)
-                    Text("Shared by every worker — reconnect MCP clients after changing it.")
+                    Text("Shared by every worker — reconnect your CLIs after changing it.")
                         .scaledFont(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -322,7 +322,7 @@ private struct ProfileDetail: View {
         } message: {
             Text("Delegated tasks can no longer use this worker. This can’t be undone.")
         }
-        .alert("Couldn’t delete worker.", isPresented: $deleteFailed) {
+        .alert("Couldn’t delete worker. Try again.", isPresented: $deleteFailed) {
             Button("OK", role: .cancel) {}
         }
     }
@@ -460,7 +460,7 @@ private struct EnabledToggle: View {
         .onChange(of: profile.enabled) { _, newValue in
             if newValue == pendingEnabled { pendingEnabled = nil }
         }
-        .alert("Couldn’t change worker state.", isPresented: $saveFailed) {
+        .alert("Couldn’t change worker state. Try again.", isPresented: $saveFailed) {
             Button("OK", role: .cancel) {}
         }
     }

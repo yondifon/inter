@@ -299,6 +299,12 @@ export interface Task {
    * never zero — everywhere the list poll builds a task.
    */
   queuedFollowUps?: number;
+  /**
+   * The waiting instructions themselves, oldest first — the order a clean run
+   * feeds them back in. The single-task read only, like the count, and absent
+   * when nothing is waiting.
+   */
+  queuedFollowUpItems?: string[];
 }
 
 export interface TaskSummary {

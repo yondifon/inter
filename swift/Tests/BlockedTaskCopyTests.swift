@@ -61,7 +61,7 @@ final class BlockedTaskCopyTests: XCTestCase {
 
     // MARK: - worker_error and other codes
 
-    func testWorkerErrorBrokerRestartGetsAPlainInterruptedHeadline() {
+    func testWorkerErrorBrokerRestartGetsAPlainInterruptedHeadlineNamingInter() {
         let explanation = BlockedTaskCopy.explain(
             completion: completion(
                 code: "worker_error",
@@ -73,7 +73,9 @@ final class BlockedTaskCopyTests: XCTestCase {
         XCTAssertFalse(explanation.headline.lowercased().contains("pid"))
         XCTAssertFalse(explanation.headline.lowercased().contains("outlived"))
         XCTAssertTrue(explanation.headline.lowercased().contains("interrupted"))
-        XCTAssertTrue(explanation.headline.lowercased().contains("broker"))
+        // "interrupted" itself contains "inter", so this checks the distinct phrase
+        // "Inter restarted" rather than that coincidental substring.
+        XCTAssertTrue(explanation.headline.lowercased().contains("inter restarted"))
         XCTAssertEqual(explanation.rawReason, "Broker restarted; worker pid 64508 outlived it")
     }
 

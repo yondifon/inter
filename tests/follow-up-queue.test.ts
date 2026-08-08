@@ -96,6 +96,30 @@ describe("queueing a follow-up", () => {
     expect(eventPayload(row.id, "follow_up_queued")?.instruction).toBe("then write the tests");
   });
 
+  test("the task row carries the waiting instructions, oldest first", async () => {
+    const cwd = setup();
+    const row = task(cwd, "running");
+    await resumeTask(row.id, "first", { queue: "add" });
+    await resumeTask(row.id, "second", { queue: "add" });
+    expect(stateStore().getTask(row.id)?.queuedFollowUpItems).toEqual(["first", "second"]);
+    expect(stateStore().listFollowUps(row.id)).toEqual(["first", "second"]);
+  });
+
+  test("queueing and clearing move the task's updated_at", async () => {
+    const cwd = setup();
+    // updated_at has millisecond resolution, so the task predates the queue by
+    // a minute and the bump is observably later instead of racy.
+    const row = task(cwd, "running", { updatedAt: new Date(Date.now() - 60_000).toISOString() });
+    await resumeTask(row.id, "next", { queue: "add" });
+    const afterQueue = stateStore().getTask(row.id)!.updatedAt;
+    expect(afterQueue > row.updatedAt).toBe(true);
+    // The same resolution separates the clear from the queue: give it a beat.
+    await Bun.sleep(2);
+    await resumeTask(row.id, undefined, { queue: "clear" });
+    expect(stateStore().getTask(row.id)!.updatedAt > afterQueue).toBe(true);
+    expect(stateStore().getTask(row.id)?.queuedFollowUpItems).toBeUndefined();
+  });
+
   test("queued and waiting tasks take follow-ups too", async () => {
     const cwd = setup();
     for (const state of ["queued", "pending"] as const) {
@@ -160,6 +184,7 @@ describe("feeding the queue", () => {
     expect(eventPayload(row.id, "resumed")?.instruction).toBe("first");
     // FIFO — the untouched half of the queue still starts with "second".
     expect(stateStore().countFollowUps(row.id)).toBe(1);
+    expect(stateStore().getTask(row.id)?.queuedFollowUpItems).toEqual(["second"]);
     expect(stateStore().takeNextFollowUp(row.id)).toBe("second");
     await settle(row.id);
   });

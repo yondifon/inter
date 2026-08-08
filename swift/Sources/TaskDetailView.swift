@@ -175,7 +175,7 @@ struct TaskDetail: View {
                 Task { await performResume(instruction: instruction) }
             }
         }
-        .alert("Couldn’t update the task.", isPresented: $showingActionError) {
+        .alert("Couldn’t update the task. Try again.", isPresented: $showingActionError) {
             Button("OK", role: .cancel) {}
         }
     }
@@ -315,9 +315,42 @@ struct TaskDetail: View {
             }
         case .activity:
             VStack(alignment: .leading, spacing: 12) {
+                queuedFollowUpsSection
                 eventContent
                 Text("Local trace may contain prompts, tool arguments, file paths, and command output.")
                     .scaledFont(.caption).foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    /// Work already sent that this run has not reached yet — the queue sits at
+    /// the top of the trace so a reader sees what is still coming before they
+    /// read what already ran. Hidden entirely while nothing is waiting.
+    @ViewBuilder private var queuedFollowUpsSection: some View {
+        if let items = task?.queuedFollowUpItems, !items.isEmpty {
+            TaskPanel {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 6 * uiScale) {
+                        Image(systemName: "list.bullet")
+                            .font(.system(size: 10 * uiScale, weight: .medium))
+                        Text(waitingFollowUpsLabel(items.count))
+                            .scaledFont(.caption, weight: .semibold)
+                    }
+                    .foregroundStyle(.secondary)
+                    ForEach(Array(items.enumerated()), id: \.offset) { index, instruction in
+                        HStack(alignment: .firstTextBaseline, spacing: 8 * uiScale) {
+                            Text("\(index + 1).")
+                                .scaledFont(.caption2, design: .monospaced, monospacedDigit: true)
+                                .foregroundStyle(.tertiary)
+                            Text(instruction)
+                                .scaledFont(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                }
             }
         }
     }
@@ -375,10 +408,15 @@ struct TaskDetail: View {
                 Menu {
                     taskActionsMenu
                 } label: {
-                    Image(systemName: "ellipsis.vertical")
-                        .font(.system(size: 12 * uiScale))
-                        .frame(width: 24 * uiScale, height: 24 * uiScale)
-                        .contentShape(.rect)
+                    // A Menu label on macOS drops rotationEffect, so a vertical
+                    // kebab has to be drawn as three stacked dots.
+                    VStack(spacing: 2.5 * uiScale) {
+                        Circle().fill(.secondary).frame(width: 3 * uiScale, height: 3 * uiScale)
+                        Circle().fill(.secondary).frame(width: 3 * uiScale, height: 3 * uiScale)
+                        Circle().fill(.secondary).frame(width: 3 * uiScale, height: 3 * uiScale)
+                    }
+                    .frame(width: 24 * uiScale, height: 24 * uiScale)
+                    .contentShape(.rect)
                 }
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
@@ -401,7 +439,7 @@ struct TaskDetail: View {
                 // The reasoning level the run was dispatched with is part of its
                 // identity like the model, and absent when the caller set none.
                 if let effort = task?.effort, !effort.isEmpty {
-                    TaskMetaChip(text: effort, label: "Effort") {
+                    TaskMetaChip(text: effort, label: "Reasoning effort") {
                         Image(systemName: "brain").font(.system(size: 6 * uiScale, weight: .medium))
                     }
                 }
@@ -1012,7 +1050,7 @@ private struct NeedsInputBanner: View {
         }
         .padding(12)
         .onAppear {
-            AccessibilityNotification.Announcement("Task needs input").post()
+            AccessibilityNotification.Announcement("Worker needs input").post()
         }
     }
 }
@@ -1067,7 +1105,7 @@ enum BlockedTaskCopy {
         default:
             if let reason, reason.range(of: "broker restarted", options: .caseInsensitive) != nil {
                 return Explanation(
-                    headline: "The run was interrupted when the broker restarted.",
+                    headline: "The run was interrupted when Inter restarted.",
                     rawReason: rawReason, deniedPaths: [], suggestedScope: nil
                 )
             }
@@ -1613,24 +1651,32 @@ private struct ActivityHandoffCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            CollapsibleSection(
-                isExpanded: $expanded,
-                label: {
-                    HStack(spacing: 9) {
-                        AccentRule()
-                            .accessibilityHidden(true)
-                        EventIcon(symbol: "arrow.triangle.branch", weight: .semibold)
+            Button {
+                withAnimation(.easeOut(duration: 0.15)) { expanded.toggle() }
+            } label: {
+                HStack(alignment: .center, spacing: 9) {
+                    AccentRule()
+                        .accessibilityHidden(true)
+                    HStack(spacing: 4) {
+                        Text("Handed off")
+                            .scaledFont(.caption2, weight: .semibold)
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                        Text("· \(summary)")
+                            .scaledFont(.caption2)
                             .foregroundStyle(.secondary)
-                            .accessibilityHidden(true)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Handed off").scaledFont(.callout, weight: .medium)
-                            Text(summary).scaledFont(.caption).foregroundStyle(.secondary)
-                        }
+                            .lineLimit(1)
+                            .truncationMode(.tail)
                     }
-                    .padding(.vertical, 10)
-                },
-                panel: false
-            )
+                    Spacer(minLength: 12)
+                }
+                .padding(.vertical, 10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityValue(expanded ? "Expanded" : "Collapsed")
 
             if expanded {
                 VStack(alignment: .leading, spacing: 10) {

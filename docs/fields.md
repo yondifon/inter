@@ -1,7 +1,7 @@
 # Response shape (`fields`)
 
-Nine MCP tools (`delegate`, `reply`, `resume`, `handoff`, `complete`, `cancel`,
-`archive`, `inspect`, `wait`) accept a `fields` selector that controls which parts of the
+Ten MCP tools (`delegate`, `reply`, `resume`, `handoff`, `complete`, `cancel`,
+`archive`, `inspect`, `wait`, `tasks`) accept a `fields` selector that controls which parts of the
 task record come back in the response. The rule is *small by default*: a real `cancel` response
 once spent 18,000 characters to say `state: "cancelled"`, and one `shippedPrompt`
 peaked at 35,405 characters. The caller already wrote the prompt — it should not
@@ -27,11 +27,16 @@ present.
 | `archive` | `[]` | `id`, `state`, `archivedAt` |
 | `inspect` | everything except `prompt`, `shippedPrompt`, `attempts` | the record minus the three heaviest fields |
 | `wait` | `["completion", "spend"]` plus `updatedAt` | `id`, `state`, `updatedAt`, `completion`, `error`, `question`, `costUsd`, `turns` |
+| `tasks` | none (per-row default below) | `id`, `state`, `title`, `profileId`, `model`, `updatedAt`, `costUsd` per row |
 
 `wait` is the one tool called in a loop, so its default is the moving half of a
 task and nothing else — see [follow-along.md](follow-along.md). `updatedAt` is
 added rather than selected because it is the only member of `context` that
 moves and the group is all-or-nothing.
+
+`tasks` lists rows, not one task, so its default row is already this lean
+without needing a group — `fields` on it replaces that row shape per listing
+call the same way it replaces the default everywhere else.
 
 ## `fields` replaces the default
 
@@ -55,6 +60,7 @@ There is no partial-additive shorthand.
 | --- | --- | --- |
 | `routing` | `profileId`, `model`, `effort` | Where the task ran |
 | `context` | `cwd`, `createdAt`, `updatedAt`, `title`, `tldr`, `parentTaskId` | What the task is and when it moved |
+| `label` | `title`, `tldr` | Just enough to recognise which task a row is — the cheap subset of `context` |
 | `scope` | `scope`, `grantId`, `allowQuestions`, `timeoutMs` | File access granted |
 | `prompt` | `prompt` | The caller's original prompt (~8k chars avg, 34k peak) |
 | `shippedPrompt` | `shippedPrompt` | Prompt plus injected memories and protocol text (~8k avg, 35k peak) |
@@ -65,6 +71,19 @@ There is no partial-additive shorthand.
 | `all` | every group | The full record minus `sessionId` |
 
 ## Worked examples
+
+### Checking whether a task already owns this work
+
+Before delegating a new task, list recent ones and see just enough to tell
+them apart:
+
+```
+tasks(fields: ["label"])
+```
+
+Each row returns `{id, state, title, tldr}` (plus `archivedAt` when set) —
+enough to recognise a task that already touched the file or feature, so it can
+be resumed instead of re-delegated.
 
 ### Picking up a dispatched task
 

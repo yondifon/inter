@@ -359,6 +359,38 @@ describe("the MCP tasks tool's input schema", () => {
     expect(() => tasksToolQuerySchema.parse({ fields: ["prompt"] })).not.toThrow();
     expect(() => tasksToolQuerySchema.parse({ fields: ["nope"] })).toThrow();
   });
+
+  test("accepts until and order, defaulting order to newest", () => {
+    expect(tasksToolQuerySchema.parse({ until: "2026-08-05T00:00:00.000Z" }).until)
+      .toBe("2026-08-05T00:00:00.000Z");
+    expect(tasksToolQuerySchema.parse({}).order).toBe("newest");
+    expect(tasksToolQuerySchema.parse({ order: "oldest" }).order).toBe("oldest");
+  });
+
+  test("refuses a non-ISO until the same way it refuses since", () => {
+    expect(() => tasksToolQuerySchema.parse({ until: "yesterday" })).toThrow();
+  });
+
+  test("rejects until at or before since, naming both values", () => {
+    expect(() => tasksToolQuerySchema.parse({
+      since: "2026-08-05T00:00:00.000Z",
+      until: "2026-08-05T00:00:00.000Z",
+    })).toThrow(/until \(2026-08-05T00:00:00.000Z\) must be strictly after since \(2026-08-05T00:00:00.000Z\)/);
+  });
+
+  test("accepts a single state unchanged or an array meaning any-of", () => {
+    expect(tasksToolQuerySchema.parse({ state: "completed" }).state).toBe("completed");
+    expect(tasksToolQuerySchema.parse({ state: ["completed", "failed"] }).state)
+      .toEqual(["completed", "failed"]);
+  });
+
+  test("refuses an empty array of states", () => {
+    expect(() => tasksToolQuerySchema.parse({ state: [] })).toThrow();
+  });
+
+  test("refuses an unknown state inside an array", () => {
+    expect(() => tasksToolQuerySchema.parse({ state: ["completed", "bogus"] })).toThrow();
+  });
 });
 
 describe("the build's own answer to /health", () => {

@@ -130,6 +130,10 @@ struct TaskSnapshot: Codable, Identifiable, Hashable, Sendable {
     /// one at a time as it finishes each. Absent when nothing is waiting, and on
     /// the list rows, which never carry the count.
     var queuedFollowUps: Int? = nil
+    /// The waiting instructions themselves, oldest first — the order the current
+    /// run feeds them back in. Absent when nothing is waiting, and on the list
+    /// rows, which never carry them.
+    var queuedFollowUpItems: [String]? = nil
     /// What this run may read and write. Absent on tasks predating the field.
     var scope: TaskScope?
     /// How the run ended, when it did not land clean. Absent while a task is

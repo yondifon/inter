@@ -106,7 +106,7 @@ struct ProfileFormView: View {
                 try await store.save(profile, isNew: original == nil)
                 dismiss()
             } catch {
-                saveError = "Couldn’t save worker."
+                saveError = "Couldn’t save worker. Check the fields and try again."
             }
         }
     }

@@ -3,6 +3,12 @@ import type { Task, TaskAttempt, TaskState, TaskSummary } from "./types";
 export const TASK_FIELD_GROUPS = {
   routing: ["profileId", "model", "effort", "effortActual"],
   context: ["cwd", "worktree", "createdAt", "updatedAt", "title", "tldr", "parentTaskId"],
+  // A caller checking whether an existing task already owns a piece of work
+  // wants only enough to recognise it — id (always on) plus title and tldr —
+  // not the rest of `context` (cwd, timestamps, parent). Its fields already
+  // sit inside `context` too, so asking for either group returns them; this
+  // is the cheap subset, not a second copy of the data.
+  label: ["title", "tldr"],
   scope: ["scope", "grantId", "allowQuestions", "timeoutMs"],
   prompt: ["prompt"],
   shippedPrompt: ["shippedPrompt"],
@@ -22,7 +28,7 @@ export type TaskField = TaskFieldGroup | "all";
  * group renamed or dropped from {@link TASK_FIELD_GROUPS} fails to compile here.
  */
 export const TASK_FIELD_KEYS = [
-  "routing", "context", "scope", "prompt", "shippedPrompt",
+  "routing", "context", "label", "scope", "prompt", "shippedPrompt",
   "output", "attempts", "completion", "spend", "all",
 ] as const satisfies readonly TaskField[];
 

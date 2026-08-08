@@ -31,7 +31,7 @@ interface TranscriptLine {
 }
 
 export interface HandoffBriefOptions {
-  /** The caller's explicit instruction to the next worker, replacing the generic continuation line. */
+  /** The instruction in flight, from the caller or derived from the run's `resumed` event. */
   instruction?: string;
   /** A fresh session on the same account, instead of a handoff to a new one. */
   sameAccount?: boolean;
@@ -55,9 +55,22 @@ export function handoffBrief(
   const useVerbatim = verbatim.length <= VERBATIM_CAP;
   const carried = useVerbatim ? { text: verbatim, omittedMessages: 0 } : digest(lines);
   const run = (task.attempts?.length ?? 0) + 1;
+  const current = options.instruction?.trim() ?? inFlightInstruction(events);
+  const continueTail = "Do not repeat work the trace above shows as already finished, and do not re-read files whose contents it already reports unless you need to verify them. Anything the previous run left unwritten is still yours to produce.";
   const prompt = [
+    ...(current
+      ? [
+        "# Current instruction",
+        current,
+        "",
+        "A previous run was working on this instruction when it stopped. The original brief below is background — it may already be finished; this instruction is the current job.",
+        "",
+      ]
+      : []),
     "# Original task",
-    "This is the task, verbatim, exactly as it was given to the previous worker. It is the contract; nothing below replaces it.",
+    current
+      ? "The brief that started this task, kept for context. The instruction above is the work."
+      : "This is the task, verbatim, exactly as it was given to the previous worker. It is the contract; nothing below replaces it.",
     "",
     task.prompt,
     "",
@@ -78,7 +91,9 @@ export function handoffBrief(
     carried.text || "_The previous run produced no readable trace._",
     "",
     "# Your instruction",
-    options.instruction?.trim() || "Continue this task from where the previous run stopped. Do not repeat work the trace above shows as already finished, and do not re-read files whose contents it already reports unless you need to verify them. Anything the previous run left unwritten is still yours to produce.",
+    current
+      ? `Continue the current instruction above. ${continueTail}`
+      : `Continue this task from where the previous run stopped. ${continueTail}`,
   ].join("\n");
   return {
     prompt,
@@ -86,6 +101,22 @@ export function handoffBrief(
     omittedMessages: carried.omittedMessages,
     chars: prompt.length,
   };
+}
+
+/**
+ * The instruction the dead run was executing, when it was a resume. `resume`
+ * stores its instruction on the `resumed` event, which survives the run's
+ * failure, so a handoff can carry the in-progress job instead of sending the
+ * next worker back to the original brief. The latest resume wins; a first run
+ * never has one, and the seed stays the plain task.
+ */
+function inFlightInstruction(events: TaskEvent[]): string | undefined {
+  let instruction: string | undefined;
+  for (const event of events) {
+    if (event.type !== "resumed") continue;
+    if (typeof event.payload.instruction === "string") instruction = event.payload.instruction;
+  }
+  return instruction;
 }
 
 function endingLines(task: Task): string[] {
@@ -132,9 +163,11 @@ function writtenSection(task: Task, events: TaskEvent[]): string[] {
 /**
  * One line per thing the worker said or did, provider-neutral. `taskEventView`
  * already normalizes every provider's stream shape, so the brief reads the same
- * rows the app's trace does rather than re-deriving them. Reasoning blocks are
- * left out: they are the largest thing in a trace and the least load-bearing
- * once the conclusions are carried.
+ * rows the app's trace does rather than re-deriving them. Only work survives
+ * the filter: the worker's words, its tool calls and their results, and errors.
+ * Reasoning blocks are left out — the largest thing in a trace and the least
+ * load-bearing once the conclusions are carried — and so is every event about
+ * the run rather than the work (see {@link isWorkView}).
  */
 function transcript(events: TaskEvent[], provider: Provider): TranscriptLine[] {
   const lines: TranscriptLine[] = [];
@@ -146,6 +179,7 @@ function transcript(events: TaskEvent[], provider: Provider): TranscriptLine[] {
   for (const event of events) {
     if (!event.type.startsWith("agent.") && event.type !== "scope_refusal") continue;
     const view = taskEventView(event, provider);
+    if (!isWorkView(event, view)) continue;
     const detail = view.detail?.trim();
     if (view.kind === "message") {
       const chunk = rawDelta(event.payload) ?? detail;
@@ -170,7 +204,6 @@ function transcript(events: TaskEvent[], provider: Provider): TranscriptLine[] {
     }
     // Tool calls only: results repeat a call that already has a line, and the
     // trace marks them minor for exactly that reason.
-    if (view.minor) continue;
     if (view.kind === "tool" || view.kind === "file" || view.kind === "command") {
       const text = join(view.title, detail);
       if (repeatsCall(view, text, seenCalls, lines.at(-1))) continue;
@@ -179,6 +212,24 @@ function transcript(events: TaskEvent[], provider: Provider): TranscriptLine[] {
     }
   }
   return lines;
+}
+
+/**
+ * The seed carries work, not the run. `taskEventView` renders a run's plumbing
+ * as lifecycle, usage, reasoning or raw, or flags it minor: broker heartbeats
+ * and state transitions, session/step/turn boundaries, thinking and progress
+ * tickers, usage receipts. None of it tells a fresh worker anything. The one
+ * shape that slips through the kinds is a claude hook that names no tool call —
+ * the CLI reporting on the run, rendered as a message or lifecycle row — so it
+ * is dropped before the view's kind is trusted.
+ */
+function isWorkView(event: TaskEvent, view: TaskEventView): boolean {
+  if (event.type === "agent.hook") {
+    const hook = String(event.payload.hook_event_name ?? event.payload.hookEventName ?? "");
+    if (!hook.includes("ToolUse") && !hook.includes("Failure")) return false;
+  }
+  if (view.kind === "message" || view.kind === "error") return true;
+  return !view.minor && (view.kind === "tool" || view.kind === "file" || view.kind === "command");
 }
 
 /**
