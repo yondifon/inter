@@ -408,15 +408,7 @@ struct TaskDetail: View {
                 Menu {
                     taskActionsMenu
                 } label: {
-                    // A Menu label on macOS drops rotationEffect, so a vertical
-                    // kebab has to be drawn as three stacked dots.
-                    VStack(spacing: 2.5 * uiScale) {
-                        Circle().fill(.secondary).frame(width: 3 * uiScale, height: 3 * uiScale)
-                        Circle().fill(.secondary).frame(width: 3 * uiScale, height: 3 * uiScale)
-                        Circle().fill(.secondary).frame(width: 3 * uiScale, height: 3 * uiScale)
-                    }
-                    .frame(width: 24 * uiScale, height: 24 * uiScale)
-                    .contentShape(.rect)
+                    MenuKebabLabel()
                 }
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)

@@ -621,6 +621,23 @@ struct IconButton: View {
     }
 }
 
+/// Icon for a "more" `Menu`: the horizontal `ellipsis` symbol, the mac native
+/// form of this control. A vertical kebab is not composable here — this
+/// borderless `Menu` label drops `rotationEffect`, small stacked `Image`s, and
+/// `Shape` fills — while the plain `ellipsis` renders reliably, as the sibling
+/// settings "more" menu already proves. `.foregroundStyle` from the host menu
+/// tints it to match the row's other secondary icons.
+struct MenuKebabLabel: View {
+    @Environment(\.uiScale) private var uiScale
+
+    var body: some View {
+        Image(systemName: "ellipsis")
+            .font(.system(size: 12 * uiScale))
+            .frame(width: 24 * uiScale, height: 24 * uiScale)
+            .contentShape(.rect)
+    }
+}
+
 // MARK: - Collapsible sections
 
 /// Collapsible section header. The whole title line is the toggle — not a tiny
