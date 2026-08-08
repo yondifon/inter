@@ -10,6 +10,7 @@ import {
 } from "../src/task-protocol";
 import {
   antigravityBootstrapRetryReason,
+  cancelTasks,
   compactPayload,
   delegate,
   getTask,
@@ -18,6 +19,7 @@ import {
   priorRunEnding,
   recordProfileTaskOutcome,
   resumeTask,
+  setTasksArchived,
   withUnverifiedEvidence,
 } from "../src/tasks";
 import { closeStateStore, stateStore } from "../src/store";
@@ -779,5 +781,294 @@ describe("resume model change", () => {
 
     await expect(resumeTask(task.id, "then do X", { model: "haiku", queue: "add" }))
       .rejects.toThrow(/remove model; those settings belong on the resume that starts a run/);
+  });
+});
+
+describe("setTasksArchived", () => {
+  const savedDb = process.env.INTER_DB;
+  const scratch: string[] = [];
+
+  function seed(id: string, state: Task["state"] = "completed", archived = false): Task {
+    stateStore().saveProfiles([noopProfile]);
+    const now = new Date().toISOString();
+    const task: Task = {
+      id,
+      profileId: "noop",
+      model: "fake",
+      prompt: "seed",
+      cwd: ".",
+      state,
+      createdAt: now,
+      updatedAt: now,
+      output: "",
+      scope: { read: ["./**"], write: [] },
+      allowQuestions: true,
+    };
+    stateStore().createTask(task);
+    if (archived) stateStore().setTaskArchived(id, true);
+    return task;
+  }
+
+  afterEach(() => {
+    closeStateStore();
+    if (savedDb === undefined) delete process.env.INTER_DB;
+    else process.env.INTER_DB = savedDb;
+    for (const dir of scratch.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("archives several ids in one call", async () => {
+    const root = mkdtempSync(join(tmpdir(), "inter-archive-batch-"));
+    scratch.push(root);
+    process.env.INTER_DB = join(root, "inter.db");
+    seed("a");
+    seed("b");
+    seed("c");
+
+    const outcomes = await setTasksArchived(["a", "b", "c"], true);
+
+    expect(outcomes).toHaveLength(3);
+    expect(outcomes.every((o) => o.ok)).toBe(true);
+    for (const outcome of outcomes) expect(getTask(outcome.id)?.archivedAt).toBeString();
+    expect(stateStore().listTasks()).toEqual([]);
+  });
+
+  test("an unknown id reports its error while the rest still archive", async () => {
+    const root = mkdtempSync(join(tmpdir(), "inter-archive-partial-"));
+    scratch.push(root);
+    process.env.INTER_DB = join(root, "inter.db");
+    seed("a");
+    seed("b");
+
+    const outcomes = await setTasksArchived(["a", "missing", "b"], true);
+
+    expect(outcomes[0]).toMatchObject({ id: "a", ok: true });
+    expect(outcomes[1]).toMatchObject({
+      id: "missing",
+      ok: false,
+      error: "unknown task: missing — call tasks to list recent task ids",
+    });
+    expect(outcomes[2]).toMatchObject({ id: "b", ok: true });
+    expect(getTask("a")?.archivedAt).toBeString();
+    expect(getTask("b")?.archivedAt).toBeString();
+  });
+
+  test("restores several archived ids in one call", async () => {
+    const root = mkdtempSync(join(tmpdir(), "inter-archive-restore-"));
+    scratch.push(root);
+    process.env.INTER_DB = join(root, "inter.db");
+    seed("a", "completed", true);
+    seed("b", "completed", true);
+
+    const outcomes = await setTasksArchived(["a", "b"], false);
+
+    expect(outcomes.every((o) => o.ok)).toBe(true);
+    for (const outcome of outcomes) expect(getTask(outcome.id)?.archivedAt).toBeUndefined();
+    expect(stateStore().listTasks().map((t) => t.id).sort()).toEqual(["a", "b"]);
+  });
+
+  test("a single id yields a single outcome", async () => {
+    const root = mkdtempSync(join(tmpdir(), "inter-archive-single-"));
+    scratch.push(root);
+    process.env.INTER_DB = join(root, "inter.db");
+    seed("a");
+
+    const outcomes = await setTasksArchived(["a"], true);
+
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]).toMatchObject({ id: "a", ok: true });
+    expect(getTask("a")?.archivedAt).toBeString();
+  });
+
+  test("archiving a running task cancels it and archives it", async () => {
+    const root = mkdtempSync(join(tmpdir(), "inter-archive-running-"));
+    scratch.push(root);
+    process.env.INTER_DB = join(root, "inter.db");
+    seed("a", "running");
+
+    const outcomes = await setTasksArchived(["a"], true);
+
+    expect(outcomes[0]).toMatchObject({ id: "a", ok: true, stopped: true });
+    const task = getTask("a")!;
+    expect(task.state).toBe("cancelled");
+    expect(task.archivedAt).toBeString();
+    expect(task.error).toBe("archived while running — stopped first");
+    expect(task.completion).toMatchObject({
+      blocked: true,
+      code: "cancelled",
+      reason: "archived while running — stopped first",
+    });
+    expect(stateStore().listTaskEvents("a").map(({ type }) => type)).toContain("cancelled");
+    expect(stateStore().listTasks()).toEqual([]);
+  });
+
+  test("archiving an already-settled task behaves exactly as today", async () => {
+    const root = mkdtempSync(join(tmpdir(), "inter-archive-settled-"));
+    scratch.push(root);
+    process.env.INTER_DB = join(root, "inter.db");
+    seed("a", "completed");
+
+    const outcomes = await setTasksArchived(["a"], true);
+
+    expect(outcomes[0]).toMatchObject({ id: "a", ok: true, stopped: false });
+    const task = getTask("a")!;
+    expect(task.state).toBe("completed");
+    expect(task.archivedAt).toBeString();
+    expect(stateStore().listTaskEvents("a").map(({ type }) => type)).not.toContain("cancelled");
+  });
+
+  test("a batch mixing running and settled tasks handles each correctly", async () => {
+    const root = mkdtempSync(join(tmpdir(), "inter-archive-mixed-"));
+    scratch.push(root);
+    process.env.INTER_DB = join(root, "inter.db");
+    seed("run-1", "running");
+    seed("done", "completed");
+    seed("run-2", "needs_input");
+
+    const outcomes = await setTasksArchived(["run-1", "done", "run-2"], true);
+
+    expect(outcomes.map((o) => ({ id: o.id, ok: o.ok, stopped: o.ok ? o.stopped : undefined }))).toEqual([
+      { id: "run-1", ok: true, stopped: true },
+      { id: "done", ok: true, stopped: false },
+      { id: "run-2", ok: true, stopped: true },
+    ]);
+    expect(getTask("run-1")?.state).toBe("cancelled");
+    expect(getTask("done")?.state).toBe("completed");
+    expect(getTask("run-2")?.state).toBe("cancelled");
+    for (const id of ["run-1", "done", "run-2"]) expect(getTask(id)?.archivedAt).toBeString();
+  });
+
+  test("a stop that fails refuses the archive for that id", async () => {
+    const root = mkdtempSync(join(tmpdir(), "inter-archive-stop-fail-"));
+    scratch.push(root);
+    process.env.INTER_DB = join(root, "inter.db");
+    seed("stuck", "answered");
+    seed("ok", "running");
+
+    const outcomes = await setTasksArchived(["stuck", "ok"], true);
+
+    expect(outcomes[0]).toMatchObject({
+      id: "stuck",
+      ok: false,
+      error: "task cannot be cancelled from state answered: stuck",
+    });
+    expect(getTask("stuck")?.state).toBe("answered");
+    expect(getTask("stuck")?.archivedAt).toBeUndefined();
+    expect(outcomes[1]).toMatchObject({ id: "ok", ok: true });
+    expect(getTask("ok")?.state).toBe("cancelled");
+  });
+
+  test("restoring never resumes a cancelled task", async () => {
+    const root = mkdtempSync(join(tmpdir(), "inter-archive-restore-state-"));
+    scratch.push(root);
+    process.env.INTER_DB = join(root, "inter.db");
+    seed("a", "running");
+
+    await setTasksArchived(["a"], true);
+    expect(getTask("a")?.state).toBe("cancelled");
+    expect(getTask("a")?.archivedAt).toBeString();
+
+    const restored = await setTasksArchived(["a"], false);
+
+    expect(restored[0]).toMatchObject({ id: "a", ok: true });
+    expect(getTask("a")?.archivedAt).toBeUndefined();
+    expect(getTask("a")?.state).toBe("cancelled");
+  });
+});
+
+describe("cancelTasks", () => {
+  const savedDb = process.env.INTER_DB;
+  const scratch: string[] = [];
+
+  function seed(id: string, state: Task["state"] = "queued"): Task {
+    stateStore().saveProfiles([noopProfile]);
+    const now = new Date().toISOString();
+    const task: Task = {
+      id,
+      profileId: "noop",
+      model: "fake",
+      prompt: "seed",
+      cwd: ".",
+      state,
+      createdAt: now,
+      updatedAt: now,
+      output: "",
+      scope: { read: ["./**"], write: [] },
+      allowQuestions: true,
+    };
+    stateStore().createTask(task);
+    return task;
+  }
+
+  afterEach(() => {
+    closeStateStore();
+    if (savedDb === undefined) delete process.env.INTER_DB;
+    else process.env.INTER_DB = savedDb;
+    for (const dir of scratch.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("cancels several ids in one call", async () => {
+    const root = mkdtempSync(join(tmpdir(), "inter-cancel-batch-"));
+    scratch.push(root);
+    process.env.INTER_DB = join(root, "inter.db");
+    seed("a", "queued");
+    seed("b", "running");
+    seed("c", "needs_input");
+
+    const outcomes = await cancelTasks(["a", "b", "c"], "no longer wanted");
+
+    expect(outcomes).toHaveLength(3);
+    expect(outcomes.every((o) => o.ok)).toBe(true);
+    for (const outcome of outcomes) {
+      expect(getTask(outcome.id)?.state).toBe("cancelled");
+      expect(getTask(outcome.id)?.error).toBe("no longer wanted");
+    }
+  });
+
+  test("an already-settled id reports its error while the rest still cancel", async () => {
+    const root = mkdtempSync(join(tmpdir(), "inter-cancel-partial-"));
+    scratch.push(root);
+    process.env.INTER_DB = join(root, "inter.db");
+    seed("a", "queued");
+    seed("done", "completed");
+    seed("b", "queued");
+
+    const outcomes = await cancelTasks(["a", "done", "b"], "stop");
+
+    expect(outcomes[0]).toMatchObject({ id: "a", ok: true });
+    expect(outcomes[1]).toMatchObject({
+      id: "done",
+      ok: false,
+      error: "task cannot be cancelled from state completed: done",
+    });
+    expect(outcomes[2]).toMatchObject({ id: "b", ok: true });
+    expect(getTask("a")?.state).toBe("cancelled");
+    expect(getTask("b")?.state).toBe("cancelled");
+    expect(getTask("done")?.state).toBe("completed");
+  });
+
+  test("an unknown id reports its error and the rest still cancel", async () => {
+    const root = mkdtempSync(join(tmpdir(), "inter-cancel-unknown-"));
+    scratch.push(root);
+    process.env.INTER_DB = join(root, "inter.db");
+    seed("a", "queued");
+
+    const outcomes = await cancelTasks(["missing", "a"], "stop");
+
+    expect(outcomes[0]).toMatchObject({ id: "missing", ok: false });
+    expect(outcomes[1]).toMatchObject({ id: "a", ok: true });
+    expect(getTask("a")?.state).toBe("cancelled");
+  });
+
+  test("a single id yields a single outcome", async () => {
+    const root = mkdtempSync(join(tmpdir(), "inter-cancel-single-"));
+    scratch.push(root);
+    process.env.INTER_DB = join(root, "inter.db");
+    seed("a", "queued");
+
+    const outcomes = await cancelTasks(["a"], "stop");
+
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]).toMatchObject({ id: "a", ok: true });
+    expect(getTask("a")?.state).toBe("cancelled");
   });
 });

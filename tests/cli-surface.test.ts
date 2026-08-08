@@ -16,6 +16,8 @@ let base: string;
 let taskId: string;
 let profileId = "surface-fake";
 let tasksToolQuerySchema: typeof import("../src/cli").tasksToolQuerySchema;
+let archiveTaskIdSchema: typeof import("../src/cli").archiveTaskIdSchema;
+let cancelTaskIdSchema: typeof import("../src/cli").cancelTaskIdSchema;
 
 const mask = "••••••••";
 
@@ -70,6 +72,8 @@ beforeAll(async () => {
   process.env.INTER_PORT = String(port);
   const cli = await import("../src/cli");
   tasksToolQuerySchema = cli.tasksToolQuerySchema;
+  archiveTaskIdSchema = cli.archiveTaskIdSchema;
+  cancelTaskIdSchema = cli.cancelTaskIdSchema;
   cli.startBroker();
   base = `http://127.0.0.1:${port}`;
   seedProfile({
@@ -390,6 +394,34 @@ describe("the MCP tasks tool's input schema", () => {
 
   test("refuses an unknown state inside an array", () => {
     expect(() => tasksToolQuerySchema.parse({ state: ["completed", "bogus"] })).toThrow();
+  });
+});
+
+describe("the MCP archive tool's taskId schema", () => {
+  test("accepts a single id unchanged", () => {
+    expect(archiveTaskIdSchema.parse("task-1")).toBe("task-1");
+  });
+
+  test("accepts an array of ids", () => {
+    expect(archiveTaskIdSchema.parse(["task-1", "task-2"])).toEqual(["task-1", "task-2"]);
+  });
+
+  test("refuses an empty array", () => {
+    expect(() => archiveTaskIdSchema.parse([])).toThrow();
+  });
+});
+
+describe("the MCP cancel tool's taskId schema", () => {
+  test("accepts a single id unchanged", () => {
+    expect(cancelTaskIdSchema.parse("task-1")).toBe("task-1");
+  });
+
+  test("accepts an array of ids", () => {
+    expect(cancelTaskIdSchema.parse(["task-1", "task-2"])).toEqual(["task-1", "task-2"]);
+  });
+
+  test("refuses an empty array", () => {
+    expect(() => cancelTaskIdSchema.parse([])).toThrow();
   });
 });
 

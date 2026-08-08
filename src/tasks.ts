@@ -26,7 +26,7 @@ import { contextMapSection, ensureContextMap, queueContextFold } from "./context
 import { HOLD_EXPIRY_MS, resolveStartAt } from "./holds";
 import { settled } from "./public-task";
 import { TaskWaiter, type TaskWaitResult, type WaitUntil } from "./task-waiter";
-import type { Profile, SelectionDecision, Task, TaskScope, TaskSummary } from "./types";
+import type { Profile, SelectionDecision, Task, TaskScope, TaskState, TaskSummary } from "./types";
 
 const MAX_EVENT_LINE = 64 * 1024;
 const MAX_EVENTS = 5_000;
@@ -303,6 +303,67 @@ export function listTaskSummaries(query: TaskListQuery = {}): TaskSummary[] {
 
 export function setTaskArchived(id: string, archived: boolean): Task {
   return stateStore().setTaskArchived(id, archived);
+}
+
+export type TaskOutcome =
+  | { id: string; ok: true; task: Task; stopped?: boolean }
+  | { id: string; ok: false; error: string };
+
+// The reason an archive-driven stop lands on the record, so a cancelled task
+// whose cancellation came from archiving is recognisable later.
+const ARCHIVE_STOPS_REASON = "archived while running — stopped first";
+
+// The non-settled states whose worker is still live or still to start:
+// archiving one of these must stop it before the task can be hidden.
+const ARCHIVE_STOPS_STATES = new Set<TaskState>([
+  "queued", "pending", "running", "needs_input", "answered", "blocked",
+]);
+
+async function archiveTask(id: string, archived: boolean): Promise<TaskOutcome> {
+  let stopped = false;
+  try {
+    const task = requireTask(id);
+    if (archived && ARCHIVE_STOPS_STATES.has(task.state)) {
+      await cancelTask(id, ARCHIVE_STOPS_REASON);
+      stopped = true;
+    }
+    return { id, ok: true, stopped, task: setTaskArchived(id, archived) };
+  } catch (error) {
+    return { id, ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/**
+ * Archive or restore several tasks at once, each id handled independently.
+ * Archiving a task that is not settled cancels it first — through the same
+ * path as `cancel` — then archives it, so it is never hidden while its worker
+ * is alive. An id whose stop fails is not archived and reports its error.
+ * Restore never touches state: a restored task stays cancelled.
+ */
+export async function setTasksArchived(ids: readonly string[], archived: boolean): Promise<TaskOutcome[]> {
+  const outcomes: TaskOutcome[] = [];
+  for (const id of ids) {
+    outcomes.push(await archiveTask(id, archived));
+  }
+  return outcomes;
+}
+
+/**
+ * Cancel several tasks at once, each id handled independently and in order, so
+ * one id that cannot be cancelled (unknown, or already settled) does not leave
+ * the rest of the batch unattempted. Each live worker is stopped before the
+ * next id is tried.
+ */
+export async function cancelTasks(ids: readonly string[], reason?: string): Promise<TaskOutcome[]> {
+  const outcomes: TaskOutcome[] = [];
+  for (const id of ids) {
+    try {
+      outcomes.push({ id, ok: true, task: await cancelTask(id, reason) });
+    } catch (error) {
+      outcomes.push({ id, ok: false, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  return outcomes;
 }
 
 export interface WorktreeDeleteResult {

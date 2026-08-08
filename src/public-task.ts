@@ -1,4 +1,5 @@
 import type { Task, TaskAttempt, TaskState, TaskSummary } from "./types";
+import type { TaskOutcome } from "./tasks";
 
 export const TASK_FIELD_GROUPS = {
   routing: ["profileId", "model", "effort", "effortActual"],
@@ -121,6 +122,39 @@ export function taskView(task: Task, fields: readonly TaskField[]): TaskFieldVie
     ...(want.has("costUsd") && task.costUsd !== undefined ? { costUsd: task.costUsd } : {}),
     ...(want.has("turns") && task.turns !== undefined ? { turns: task.turns } : {}),
   };
+}
+
+export type TaskErrorView = { id: string; error: string };
+
+/** A per-id archive or cancel entry; `stopped` is set when archiving also cancelled the task. */
+export type TaskOutcomeEntry = TaskFieldView & { stopped?: boolean };
+
+/**
+ * The batch-tool response for `archive` and `cancel`. One id keeps the
+ * single-task shape exactly — a `taskView`, never an array. A batch is one
+ * entry per id in input order: a `taskView` for each that applied, `{id,
+ * error}` for each that did not. `fields` selects each taskView's record the
+ * same way it does on the single call, so a per-id entry is byte-for-byte what
+ * that id alone would have returned. Archiving a live task adds `stopped: true`
+ * to its entry, so a caller can see the cancellation that came with the
+ * archive.
+ */
+export function taskOutcomeView(
+  ids: readonly string[],
+  outcomes: readonly TaskOutcome[],
+  fields: readonly TaskField[],
+): TaskOutcomeEntry | Array<TaskOutcomeEntry | TaskErrorView> {
+  const entry = (outcome: Extract<TaskOutcome, { ok: true }>): TaskOutcomeEntry => ({
+    ...taskView(outcome.task, fields),
+    ...(outcome.stopped ? { stopped: true } : {}),
+  });
+  if (ids.length === 1) {
+    const outcome = outcomes[0];
+    if (!outcome.ok) throw new Error(outcome.error);
+    return entry(outcome);
+  }
+  return outcomes.map((outcome) =>
+    outcome.ok ? entry(outcome) : { id: outcome.id, error: outcome.error });
 }
 
 /**

@@ -54,7 +54,7 @@ enum CodeLanguage: Equatable {
 }
 
 struct CodeSpan: Equatable {
-    enum Kind: Equatable { case plain, comment, string, number, keyword }
+    enum Kind: Equatable { case plain, comment, string, number, keyword, type }
 
     let kind: Kind
     let text: String
@@ -101,8 +101,14 @@ enum SyntaxHighlighter {
                 emit(.number, through: numberEnd(chars, from: index))
             } else if isWordStart(chars[index]) {
                 let end = wordEnd(chars, from: index)
-                if words.contains(String(chars[index..<end])) {
+                let word = String(chars[index..<end])
+                if words.contains(word) {
                     emit(.keyword, through: end)
+                } else if language == .cFamily, word.first?.isUppercase == true {
+                    // A capitalised name is a type by convention in every cFamily
+                    // member — Swift, TypeScript, Go, Rust, Java, C — so this reads
+                    // right without a per-language type table.
+                    emit(.type, through: end)
                 } else {
                     plain.append(contentsOf: chars[index..<end])
                     index = end
@@ -236,30 +242,64 @@ enum SyntaxHighlighter {
         }
     }
 
+    // "of", "range", "select", "template", and "union" are real keywords in some
+    // cFamily member, but they are also ordinary Swift/TypeScript identifiers —
+    // an argument label, a variable, a type name — and those two languages are
+    // read here far more often than the ones that reserve those words.
     private static let cFamilyKeywords: Set<String> = [
-        "as", "async", "await", "break", "case", "catch", "class", "const", "continue",
-        "crate", "default", "defer", "deinit", "do", "dyn", "else", "enum", "export",
-        "extends", "extension", "false", "fileprivate", "final", "finally", "fn", "for",
-        "from", "func", "function", "guard", "if", "impl", "implements", "import", "in",
-        "init", "inout", "interface", "internal", "is", "let", "match", "mod", "mut",
-        "mutating", "new", "nil", "null", "open", "override", "package", "private",
-        "protocol", "pub", "public", "repeat", "return", "self", "some", "static",
-        "struct", "super", "switch", "this", "throw", "throws", "trait", "true", "try",
-        "type", "typealias", "undefined", "use", "var", "void", "where", "while", "yield",
+        "abstract", "any", "as", "associatedtype", "async", "await", "break", "case",
+        "catch", "chan", "class", "const", "constexpr", "continue", "crate", "declare",
+        "default", "defer", "deinit", "delete", "do", "dyn", "else", "enum", "export",
+        "extends", "extension", "fallthrough", "false", "fileprivate", "final", "finally",
+        "fn", "for", "from", "func", "function", "goto", "guard", "if", "impl",
+        "implements", "import", "in", "indirect", "infer", "init", "inline", "inout",
+        "instanceof", "interface", "internal", "is", "keyof", "lazy", "let",
+        "match", "mod", "mut", "mutating", "namespace", "new", "nil", "null",
+        "open", "operator", "override", "package", "private", "protocol", "pub",
+        "public", "readonly", "repeat", "required", "rethrows", "return",
+        "satisfies", "self", "sizeof", "some", "static", "struct", "subscript",
+        "super", "switch", "this", "throw", "throws", "trait", "true", "try",
+        "type", "typedef", "typealias", "typeof", "undefined", "unowned", "unsafe",
+        "use", "using", "var", "void", "volatile", "weak", "where", "while", "willSet",
+        "didSet", "yield",
     ]
 
+    // "source" is a real bash builtin but also this app's own name for the text a
+    // reader is looking at — the far more common thing to see it modifying Python
+    // or shell content — so it stays a plain identifier here.
     private static let hashFamilyKeywords: Set<String> = [
-        "and", "as", "assert", "break", "case", "class", "continue", "def", "del", "do",
-        "done", "elif", "else", "elsif", "end", "esac", "except", "export", "false", "fi",
-        "finally", "for", "from", "function", "global", "if", "import", "in", "is",
-        "lambda", "local", "module", "nil", "none", "not", "or", "pass", "raise",
-        "require", "return", "self", "then", "true", "try", "unless", "until", "while",
-        "with", "yield",
+        "and", "as", "assert", "async", "await", "break", "case", "class",
+        "continue", "declare", "def", "del", "do", "done", "elif", "else", "elsif",
+        "end", "esac", "except", "exit", "export", "false", "False", "fi", "finally",
+        "for", "from", "function", "global", "if", "import", "in", "is", "lambda",
+        "local", "module", "nil", "none", "None", "nonlocal", "not", "or", "pass",
+        "raise", "readonly", "require", "return", "self", "shift", "then",
+        "trap", "true", "True", "try", "unless", "until", "while", "with",
+        "yield",
     ]
 }
 
 enum CodeStyle {
+    private final class Box {
+        let value: AttributedString
+        init(_ value: AttributedString) { self.value = value }
+    }
+
+    /// A row's body re-runs on redraws that have nothing to do with its own
+    /// text — scrolling, a sibling's state change — so the highlighted result
+    /// is cached by its exact input instead of retokenized every time. Bounded
+    /// by both count and text size so one huge diff block cannot pin the rest.
+    private static let cache: NSCache<NSString, Box> = {
+        let cache = NSCache<NSString, Box>()
+        cache.countLimit = 500
+        cache.totalCostLimit = 20_000_000
+        return cache
+    }()
+
     static func highlighted(_ text: String, language: CodeLanguage) -> AttributedString {
+        let key = "\(language)\u{0}\(text)" as NSString
+        if let boxed = cache.object(forKey: key) { return boxed.value }
+
         var result = AttributedString()
         for span in SyntaxHighlighter.spans(text, language: language) {
             var piece = AttributedString(span.text)
@@ -268,6 +308,7 @@ enum CodeStyle {
             if let tint = tint(span.kind) { piece.foregroundColor = tint }
             result.append(piece)
         }
+        cache.setObject(Box(result), forKey: key, cost: text.utf8.count)
         return result
     }
 
@@ -278,6 +319,7 @@ enum CodeStyle {
         case .string: SyntaxTint.string
         case .number: SyntaxTint.number
         case .keyword: SyntaxTint.keyword
+        case .type: SyntaxTint.type
         }
     }
 }

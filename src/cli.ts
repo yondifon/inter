@@ -9,6 +9,7 @@ import {
   appendTaskEvent,
   assertTaskCompletion,
   cancelTask,
+  cancelTasks,
   delegate,
   deleteTaskWorktree,
   getTask,
@@ -20,6 +21,7 @@ import {
   resumeTask,
   scopeInheritanceWarning,
   setTaskArchived,
+  setTasksArchived,
   unknownTaskMessage,
   waitForTasks,
 } from "./tasks";
@@ -54,7 +56,7 @@ import { defaultModelFor } from "./provider-defaults";
 import { normalizeProfile } from "./profile-input";
 import { deleteMemory, getMemory, listMemories, setMemory } from "./memories";
 import { profilesForCaller, publicProfile, publicProfiles } from "./profile-view";
-import { publicTaskSummary, taskSummaryView, taskView, waitEventsView, waitTaskView, settled, TASK_FIELD_KEYS, type TaskField } from "./public-task";
+import { publicTaskSummary, taskOutcomeView, taskSummaryView, taskView, waitEventsView, waitTaskView, settled, TASK_FIELD_KEYS, type TaskField } from "./public-task";
 import { projectCwd } from "./worktree";
 import { mcpWaitBlockMs } from "./mcp-wait";
 import { loadRoutingPolicy } from "./routing-policy";
@@ -97,6 +99,10 @@ const scopeSchema = z.object({
 const taskStateSchema = z.enum([
   "queued", "pending", "running", "needs_input", "answered", "blocked", "completed", "failed", "cancelled",
 ]);
+
+export const archiveTaskIdSchema = z.string().or(z.array(z.string()).min(1));
+
+export const cancelTaskIdSchema = z.string().or(z.array(z.string()).min(1));
 
 const taskFieldSchema = z.array(z.enum(TASK_FIELD_KEYS)).optional()
   .describe(
@@ -841,14 +847,18 @@ async function createMcpServer(): Promise<McpServer> {
     });
   });
   server.registerTool("cancel", {
-    description: "Stop a delegated task and its worker process tree. Works on queued, running, needs_input, and blocked tasks, so a task parked on a question you do not want to answer is not a dead end. This does not delete the task record. By default a small acknowledgement; pass `fields` to get more.",
+    description: "Stop a delegated task and its worker process tree. Works on queued, running, needs_input, and blocked tasks, so a task parked on a question you do not want to answer is not a dead end. This does not delete the task record. Pass `taskId` as a single id or an array of ids to cancel several at once. A batch reports each id's outcome; a task that cannot be cancelled (already settled, or an unknown id) is reported rather than failing the rest of the batch. The `reason` applies to every id in the batch. Returns the core acknowledgement (id, state) — for a batch, one per id; pass `fields` to get more.",
     inputSchema: z.object({
-      taskId: z.string(),
+      taskId: cancelTaskIdSchema
+        .describe("Inter task id, or an array of ids, to cancel in one call."),
       reason: z.string().min(1).max(500).optional()
-        .describe("Stored as the task error and shown to the user."),
+        .describe("Stored as the task error and shown to the user. Applies to every id in a batch."),
       fields: taskFieldSchema,
     }),
-  }, async ({ taskId, reason, fields }) => result(taskView(await cancelTask(taskId, reason), fields ?? DEFAULT_CANCEL_FIELDS)));
+  }, async ({ taskId, reason, fields }) => {
+    const ids = typeof taskId === "string" ? [taskId] : taskId;
+    return result(taskOutcomeView(ids, await cancelTasks(ids, reason), fields ?? DEFAULT_CANCEL_FIELDS));
+  });
   server.registerTool("complete", {
     description: COMPLETE_DESCRIPTION,
     inputSchema: z.object({
@@ -862,13 +872,17 @@ async function createMcpServer(): Promise<McpServer> {
   }, async ({ taskId, assertedBy, reason, fields }) =>
     result(taskView(await assertTaskCompletion(taskId, assertedBy, reason), fields ?? DEFAULT_COMPLETE_FIELDS)));
   server.registerTool("archive", {
-    description: "Archive or restore a delegated task without deleting its history. Archived tasks stay addressable by Inter task ID and are hidden from active task lists by default. Returns the core acknowledgement (id, state); pass `fields` to get more.",
+    description: "Archive or restore a delegated task without deleting its history. Archived tasks stay addressable by Inter task ID and are hidden from active task lists by default. A task that is not settled is stopped first, then archived, so it is never hidden while its worker is alive — its response entry carries `stopped: true` and its state reads `cancelled`. Pass `taskId` as a single id or an array of ids to handle several at once. A batch reports each id's outcome; an id that cannot be archived (unknown, or one whose stop failed) is reported rather than failing the rest of the batch. Returns the core acknowledgement (id, state) — for a batch, one per id; pass `fields` to get more.",
     inputSchema: z.object({
-      taskId: z.string(),
+      taskId: archiveTaskIdSchema
+        .describe("Inter task id, or an array of ids, to archive or restore in one call."),
       archived: z.boolean().default(true),
       fields: taskFieldSchema,
     }),
-  }, async ({ taskId, archived, fields }) => result(taskView(setTaskArchived(taskId, archived), fields ?? DEFAULT_ARCHIVE_FIELDS)));
+  }, async ({ taskId, archived, fields }) => {
+    const ids = typeof taskId === "string" ? [taskId] : taskId;
+    return result(taskOutcomeView(ids, await setTasksArchived(ids, archived), fields ?? DEFAULT_ARCHIVE_FIELDS));
+  });
   server.registerTool("worktree-remove", {
     description: DELETE_WORKTREE_DESCRIPTION,
     inputSchema: z.object({

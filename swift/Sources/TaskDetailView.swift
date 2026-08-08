@@ -315,17 +315,17 @@ struct TaskDetail: View {
             }
         case .activity:
             VStack(alignment: .leading, spacing: 12) {
-                queuedFollowUpsSection
                 eventContent
                 Text("Local trace may contain prompts, tool arguments, file paths, and command output.")
                     .scaledFont(.caption).foregroundStyle(.tertiary)
+                queuedFollowUpsSection
             }
         }
     }
 
     /// Work already sent that this run has not reached yet — the queue sits at
-    /// the top of the trace so a reader sees what is still coming before they
-    /// read what already ran. Hidden entirely while nothing is waiting.
+    /// the bottom of the trace so a reader reads what already ran before what
+    /// comes next. Hidden entirely while nothing is waiting.
     @ViewBuilder private var queuedFollowUpsSection: some View {
         if let items = task?.queuedFollowUpItems, !items.isEmpty {
             TaskPanel {
@@ -338,17 +338,7 @@ struct TaskDetail: View {
                     }
                     .foregroundStyle(.secondary)
                     ForEach(Array(items.enumerated()), id: \.offset) { index, instruction in
-                        HStack(alignment: .firstTextBaseline, spacing: 8 * uiScale) {
-                            Text("\(index + 1).")
-                                .scaledFont(.caption2, design: .monospaced, monospacedDigit: true)
-                                .foregroundStyle(.tertiary)
-                            Text(instruction)
-                                .scaledFont(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(2)
-                                .textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
+                        QueuedFollowUpRow(position: index + 1, instruction: instruction)
                     }
                 }
             }
@@ -1188,6 +1178,63 @@ private struct BlockedBanner: View {
         case 1: "It changed 1 file before stopping: \(touchedFiles[0])."
         case 2...3: "It changed \(touchedFiles.count) files before stopping: \(touchedFiles.joined(separator: ", "))."
         default: "It changed \(touchedFiles.count) files before stopping, including \(touchedFiles.prefix(3).joined(separator: ", "))."
+        }
+    }
+}
+
+/// One waiting follow-up. The two-line preview stays on the row; the chevron
+/// reveals the full text below it, the way a trace row opens its details. Each
+/// row keeps its own state, so one can be open while the others stay closed.
+private struct QueuedFollowUpRow: View {
+    let position: Int
+    let instruction: String
+    @State private var expanded = false
+    @Environment(\.uiScale) private var uiScale
+
+    /// A chevron earns its place only when the text can outgrow the two-line
+    /// preview — explicit newlines, or a length that is likely to wrap past it.
+    private var offersExpansion: Bool {
+        instruction.split(whereSeparator: \.isNewline).count > 2 || instruction.count > 200
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 8 * uiScale) {
+                Text("\(position).")
+                    .scaledFont(.caption2, design: .monospaced, monospacedDigit: true)
+                    .foregroundStyle(.tertiary)
+                Text(instruction)
+                    .scaledFont(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                if offersExpansion {
+                    IconButton(
+                        symbol: expanded ? "chevron.down" : "chevron.right",
+                        label: expanded ? "Hide full text" : "Show full text",
+                        tint: AnyShapeStyle(.tertiary)
+                    ) {
+                        withAnimation(.easeOut(duration: 0.15)) { expanded.toggle() }
+                    }
+                    .scaledFont(.caption2, weight: .semibold)
+                }
+            }
+            if expanded {
+                // The number stays invisible on the expanded line so the full
+                // text lines up under its own preview rather than the column.
+                HStack(alignment: .firstTextBaseline, spacing: 8 * uiScale) {
+                    Text("\(position).")
+                        .scaledFont(.caption2, design: .monospaced, monospacedDigit: true)
+                        .hidden()
+                    Text(instruction)
+                        .scaledFont(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .transition(.opacity)
+            }
         }
     }
 }

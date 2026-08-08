@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { publicTaskSummary, taskSummaryView, taskView, TASK_FIELD_GROUPS, waitEventsView, waitTaskView } from "../src/public-task";
+import { publicTaskSummary, taskOutcomeView, taskSummaryView, taskView, TASK_FIELD_GROUPS, waitEventsView, waitTaskView } from "../src/public-task";
 import { runCostFrom } from "../src/tasks";
+import type { TaskOutcome } from "../src/tasks";
 import type { Task, TaskSummary } from "../src/types";
 
 function pollingTask(overrides: Partial<Task> = {}): Task {
@@ -459,5 +460,54 @@ describe("task summary view", () => {
     const archivedAt = "2026-08-02T00:00:02.000Z";
     const view = taskSummaryView(summary({ archivedAt, tldr: "Port the parser and run its tests" }), ["label"]);
     expect(Object.keys(view).sort()).toEqual(["archivedAt", "id", "state", "title", "tldr"]);
+  });
+});
+
+describe("taskOutcomeView", () => {
+  const ok = (id: string): TaskOutcome => ({ id, ok: true, task: pollingTask({ id }) });
+  const fail = (id: string): TaskOutcome => ({ id, ok: false, error: `unknown task: ${id}` });
+
+  test("a single id returns the taskView shape, not an array", () => {
+    const view = taskOutcomeView(["task-1"], [ok("task-1")], []);
+    expect(view).toEqual(taskView(pollingTask({ id: "task-1" }), []));
+    expect(Array.isArray(view)).toBe(false);
+  });
+
+  test("a single unknown id throws, exactly as the one-id call does today", () => {
+    expect(() => taskOutcomeView(["nope"], [fail("nope")], [])).toThrow("unknown task: nope");
+  });
+
+  test("a batch reports each id's outcome, in input order", () => {
+    const view = taskOutcomeView(["a", "nope", "b"], [ok("a"), fail("nope"), ok("b")], []);
+    expect(view).toEqual([
+      taskView(pollingTask({ id: "a" }), []),
+      { id: "nope", error: "unknown task: nope" },
+      taskView(pollingTask({ id: "b" }), []),
+    ]);
+  });
+
+  test("fields apply to each per-id taskView", () => {
+    const view = taskOutcomeView(["a"], [ok("a")], ["output"]);
+    expect(view).toEqual(taskView(pollingTask({ id: "a" }), ["output"]));
+  });
+
+  test("a stopped entry says so plainly, and only for the ones stopped", () => {
+    const view = taskOutcomeView(["a", "b"], [
+      { id: "a", ok: true, task: pollingTask({ id: "a" }), stopped: true },
+      { id: "b", ok: true, task: pollingTask({ id: "b" }) },
+    ], []);
+    expect(view).toEqual([
+      { ...taskView(pollingTask({ id: "a" }), []), stopped: true },
+      taskView(pollingTask({ id: "b" }), []),
+    ]);
+  });
+
+  test("a stopped single id still carries stopped", () => {
+    const view = taskOutcomeView(
+      ["a"],
+      [{ id: "a", ok: true, task: pollingTask({ id: "a" }), stopped: true }],
+      [],
+    );
+    expect(view).toMatchObject({ id: "a", stopped: true });
   });
 });

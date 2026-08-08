@@ -119,8 +119,53 @@ final class SyntaxHighlightTests: XCTestCase {
         XCTAssertTrue(spans.contains(CodeSpan(kind: .keyword, text: "let")))
     }
 
+    func testUnterminatedBacktickTemplateReachesEndOfFileWithoutLosingText() {
+        let source = """
+        let a = `never closes
+        still inside it
+        """
+        let spans = SyntaxHighlighter.spans(source, language: .cFamily)
+
+        XCTAssertEqual(spans.map(\.text).joined(), source)
+        XCTAssertEqual(spans.last?.kind, .string)
+    }
+
+    func testCommentLookalikeInsideAStringStaysAString() {
+        let spans = SyntaxHighlighter.spans(#"let msg = "see // this # too""#, language: .cFamily)
+
+        XCTAssertTrue(spans.contains(CodeSpan(kind: .string, text: #""see // this # too""#)))
+        XCTAssertFalse(spans.contains { $0.kind == .comment })
+    }
+
+    func testCapitalisedNamesReadAsTypesInCFamilyOnly() {
+        let cSpans = SyntaxHighlighter.spans("let items: Array<String> = URLSession.shared", language: .cFamily)
+        XCTAssertTrue(cSpans.contains(CodeSpan(kind: .type, text: "Array")))
+        XCTAssertTrue(cSpans.contains(CodeSpan(kind: .type, text: "String")))
+        XCTAssertTrue(cSpans.contains(CodeSpan(kind: .type, text: "URLSession")))
+
+        let shellSpans = SyntaxHighlighter.spans("export HOME=/root", language: .hashFamily)
+        XCTAssertFalse(shellSpans.contains { $0.kind == .type })
+    }
+
+    func testPythonCapitalisedLiteralsAreKeywords() {
+        let spans = SyntaxHighlighter.spans("ready = True if value is None else False", language: .hashFamily)
+
+        XCTAssertTrue(spans.contains(CodeSpan(kind: .keyword, text: "True")))
+        XCTAssertTrue(spans.contains(CodeSpan(kind: .keyword, text: "None")))
+        XCTAssertTrue(spans.contains(CodeSpan(kind: .keyword, text: "False")))
+    }
+
     func testEmptyInputProducesNoSpans() {
         XCTAssertEqual(SyntaxHighlighter.spans("", language: .cFamily), [])
         XCTAssertEqual(SyntaxHighlighter.spans("", language: .none), [])
+    }
+
+    func testHighlightedCachesByExactTextAndLanguage() {
+        let a = CodeStyle.highlighted("let x = 1", language: .cFamily)
+        let b = CodeStyle.highlighted("let x = 1", language: .cFamily)
+        let c = CodeStyle.highlighted("let x = 1", language: .hashFamily)
+
+        XCTAssertEqual(a, b)
+        XCTAssertNotEqual(a, c)
     }
 }

@@ -22,9 +22,9 @@ present.
 | `reply` | `[]` | `id`, `state`, `cursor` |
 | `resume` | `[]` | `id`, `state`, `cursor` |
 | `handoff` | `["routing"]` | `id`, `state`, `profileId`, `model`, `effort`, `cursor`, `warnings` (when applicable) |
-| `cancel` | `[]` | `id`, `state` |
+| `cancel` | `[]` | `id`, `state` — one entry per id when called with an array |
 | `complete` | `[]` | `id`, `state` |
-| `archive` | `[]` | `id`, `state`, `archivedAt` |
+| `archive` | `[]` | `id`, `state`, `archivedAt` — one entry per id when called with an array |
 | `inspect` | everything except `prompt`, `shippedPrompt`, `attempts` | the record minus the three heaviest fields |
 | `wait` | `["completion", "spend"]` plus `updatedAt` | `id`, `state`, `updatedAt`, `completion`, `error`, `question`, `costUsd`, `turns` |
 | `tasks` | none (per-row default below) | `id`, `state`, `title`, `profileId`, `model`, `updatedAt`, `costUsd` per row |
@@ -37,6 +37,18 @@ moves and the group is all-or-nothing.
 `tasks` lists rows, not one task, so its default row is already this lean
 without needing a group — `fields` on it replaces that row shape per listing
 call the same way it replaces the default everywhere else.
+
+`archive` and `cancel` accept a single task id or an array. A single id
+returns one entry, unchanged; an array returns one entry per id, in input
+order. An id that could not be acted on (for example one that does not exist)
+comes back as `{id, error}` without failing the rest of the batch.
+
+Archiving a task that is not settled stops it first — the same path as
+`cancel` — then archives it, so a live task is never hidden while its worker
+runs. Its entry carries `stopped: true` and its state reads `cancelled`, and
+the stored cancellation reason names archiving. If the stop fails the task is
+not archived. Restoring (`archived: false`) never resumes a task: a restored
+task stays cancelled.
 
 ## `fields` replaces the default
 

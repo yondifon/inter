@@ -178,12 +178,13 @@ enum DiffTint {
     static let removed = Color.red
 }
 
-/// Syntax colour: four tints, none of them the diff's red or green — a string
+/// Syntax colour: five tints, none of them the diff's red or green — a string
 /// tinted red inside a removed line would read as part of the removal rather
 /// than as a string. Kept to a small palette on purpose; a colour per token
 /// class competes with the diff's own signal instead of sitting under it.
 enum SyntaxTint {
     static let keyword = tone(light: 0x8A3F_FCFF, dark: 0xC9A0_FFFF)
+    static let type = tone(light: 0x1D5F_D6FF, dark: 0x7FB1_FFFF)
     static let string = tone(light: 0xA162_0AFF, dark: 0xE0A4_58FF)
     static let number = tone(light: 0x0F76_6EFF, dark: 0x5FCF_C6FF)
     static let comment = tone(light: 0x6B72_80FF, dark: 0x8B94_9EFF)

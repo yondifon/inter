@@ -5,16 +5,23 @@ survives — its title, prompt, spend, event trace and provider session all stay
 so a cancelled task can be resumed, handed off, or archived like any other.
 
 ```
-cancel(taskId, reason?)
+cancel(taskId | taskId[], reason?)
 ```
 
 Valid from `queued`, `running`, `needs_input` and `blocked`. A task parked on a
 question you do not want to answer is therefore not a dead end. Cancelling an
 already-cancelled task returns it unchanged rather than failing.
 
+`taskId` takes a single id or an array. A single id returns one entry, as
+always; an array returns one entry per id, in input order. Each id is handled
+independently, so a task that cannot be cancelled — already settled, or an
+unknown id — comes back as `{id, error}` without leaving the rest of the batch
+unattempted. The response says plainly which ids were stopped and which were
+not.
+
 `reason` is stored as the task's error and shown wherever the failure is, so it
-is the one place to say *why* this run was stopped. Each surface supplies its own
-default when the caller omits it.
+is the one place to say *why* this run was stopped. It applies to every id in a
+batch. Each surface supplies its own default when the caller omits it.
 
 The worker gets `SIGTERM`, then `SIGKILL` two seconds later if it is still
 alive. Completion is recorded as `blocked: true, code: "cancelled"` — or
@@ -31,7 +38,7 @@ this.
 
 | Surface | Call |
 | --- | --- |
-| MCP | `cancel(taskId, reason?)` |
+| MCP | `cancel(taskId | taskId[], reason?)` |
 | REST | `DELETE /api/tasks/:id?reason=...` |
 | Claude Code channel | its own `cancel` tool, proxying the REST route |
 | macOS app | the Cancel button in the detail header, and the sidebar context menu |

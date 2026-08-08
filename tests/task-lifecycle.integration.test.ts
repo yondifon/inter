@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -9,6 +9,7 @@ import {
   handoffTask,
   reply,
   resumeTask,
+  setTasksArchived,
   waitForTasks,
 } from "../src/tasks";
 import { closeStateStore, stateStore } from "../src/store";
@@ -114,6 +115,55 @@ describe("task lifecycle integration", () => {
       completion: { code: "cancelled", blocked: true },
     });
     expect(stateStore().listTaskEvents(task.id).at(-1)?.type).toBe("cancelled");
+  });
+
+  integrationTest("archiving a running task stops its worker before hiding it", async () => {
+    const root = mkdtempSync(join(tmpdir(), "inter-archive-run-"));
+    roots.push(root);
+    process.env.INTER_DB = join(root, "inter.db");
+    process.env.INTER_ROOTS = root;
+    const binDir = join(root, "bin");
+    mkdirSync(binDir);
+    const pidFile = join(root, "worker.pid");
+    writeFileSync(join(binDir, "claude"), [
+      "#!/bin/sh",
+      `echo $$ > "${pidFile}"`,
+      "sleep 30",
+    ].join("\n"), { mode: 0o755 });
+    process.env.PATH = `${binDir}:${initialPath}`;
+    const profile: Profile = {
+      id: "fake-claude",
+      label: "Fake Claude",
+      provider: "claude",
+      model: "sonnet",
+      enabled: true,
+      env: {},
+      capabilities: [],
+    };
+    stateStore().saveProfiles([profile]);
+    const task = await delegate(profile.id, "wait", root, undefined, undefined, {
+      scope: { read: ["**"], write: ["**"] },
+    });
+    for (let attempt = 0; attempt < 200; attempt++) {
+      if (existsSync(pidFile)) break;
+      await Bun.sleep(25);
+    }
+    expect(existsSync(pidFile)).toBe(true);
+    const pid = Number(readFileSync(pidFile, "utf8"));
+    expect(() => process.kill(pid, 0)).not.toThrow();
+
+    await setTasksArchived([task.id], true);
+
+    expect(getTask(task.id)).toMatchObject({ state: "cancelled", archivedAt: expect.any(String) });
+    for (let attempt = 0; attempt < 200; attempt++) {
+      try {
+        process.kill(pid, 0);
+      } catch {
+        return;
+      }
+      await Bun.sleep(50);
+    }
+    throw new Error(`worker process ${pid} survived archiving`);
   });
 
   integrationTest("self-cancels at the delegated timeout", async () => {
