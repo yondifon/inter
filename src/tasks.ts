@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, relative, resolve } from "node:path";
@@ -17,7 +17,7 @@ import { handoffBrief } from "./handoff-brief";
 import { normalizeTaskScope, sandboxedCommand, scopeCoversPath, scopeRefusedWrite } from "./task-scope";
 import { loadWorkerRules, loadMapConfig, DEFAULT_MAP_CONFIG } from "./worker-config";
 import { workerPath } from "./worker-path";
-import { createTaskWorktree, projectCwd, removeTaskWorktree, requireTaskWorktree } from "./worktree";
+import { createTaskWorktree, projectCwd, removeTaskBranch, removeTaskWorktree, requireTaskWorktree } from "./worktree";
 import { captureWorkerIdentity } from "./worker-identity";
 import { deniedScopePaths, promptReadPaths } from "./prompt-paths";
 import { stateStore, type StateStore, type TaskEvent, type TaskListQuery } from "./store";
@@ -303,6 +303,47 @@ export function listTaskSummaries(query: TaskListQuery = {}): TaskSummary[] {
 
 export function setTaskArchived(id: string, archived: boolean): Task {
   return stateStore().setTaskArchived(id, archived);
+}
+
+export interface WorktreeDeleteResult {
+  taskId: string;
+  /** The checkout: removed by this call, or already gone. */
+  checkout: "removed" | "already gone";
+  /** The task's branch: left alone, deleted by this call, or already gone. */
+  branch: "kept" | "deleted" | "already gone";
+}
+
+/**
+ * Removes a task's git worktree on demand, without archiving or waiting for
+ * cleanup. Only a settled task that ran with `worktree: true` qualifies; a
+ * checkout a worker is in, or that a reply would put a worker back into, is
+ * refused. The branch survives unless `deleteBranch` says otherwise.
+ */
+export async function deleteTaskWorktree(
+  id: string,
+  deleteBranch = false,
+): Promise<WorktreeDeleteResult> {
+  const task = requireTask(id);
+  const worktree = task.worktree;
+  if (!worktree) {
+    throw new Error(
+      `task did not run in a worktree: ${id} — only tasks delegated with worktree: true have a checkout to remove`,
+    );
+  }
+  if (!settled(task.state)) {
+    throw new Error(
+      `task is still active and holds its worktree: ${id} — state ${task.state}; wait for it to settle before removing the checkout`,
+    );
+  }
+  if (task.state === "needs_input") {
+    throw new Error(
+      `task is waiting on a reply that would reuse its worktree: ${id} — reply to it or cancel it, then remove the checkout`,
+    );
+  }
+  const checkoutGone = !existsSync(worktree.path);
+  await removeTaskWorktree(worktree);
+  const branch = deleteBranch ? await removeTaskBranch(worktree) : "kept";
+  return { taskId: id, checkout: checkoutGone ? "already gone" : "removed", branch };
 }
 
 export function getTask(id: string): Task | undefined {

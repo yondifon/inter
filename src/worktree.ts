@@ -70,6 +70,23 @@ export async function removeTaskWorktree(worktree: TaskWorktree): Promise<void> 
   rmSync(worktree.path, { recursive: true, force: true });
 }
 
+/**
+ * Deletes the task's own branch. Only the `task/<taskId>` ref it names ever
+ * goes, with `-D` because the caller opted into the delete and the branch may
+ * hold unmerged work. Reports whether this call deleted it, it was already
+ * absent, or git kept it.
+ */
+export async function removeTaskBranch(
+  worktree: TaskWorktree,
+): Promise<"deleted" | "already gone" | "kept"> {
+  const root = await gitOutput(worktree.originCwd, ["rev-parse", "--show-toplevel"]);
+  if (!root) return "already gone";
+  const exists = await gitOutput(root, ["rev-parse", "--verify", "--quiet", `refs/heads/${worktree.branch}`]);
+  if (!exists) return "already gone";
+  const run = await git(root, ["branch", "-D", worktree.branch]);
+  return run.ok ? "deleted" : "kept";
+}
+
 /** The git directories a worktree run touches, all of them outside its tree. */
 export interface WorktreeGitPaths {
   /** The checkout itself, whose `.git` is a pointer file rather than a directory. */

@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Database } from "bun:sqlite";
-import { cancelTask, delegate } from "../src/tasks";
+import { cancelTask, delegate, deleteTaskWorktree } from "../src/tasks";
 import { closeStateStore, stateStore } from "../src/store";
 import { settled } from "../src/public-task";
 import { runCleanup } from "../src/cleanup";
@@ -212,6 +212,108 @@ describe("worktree tasks", () => {
       Bun.spawnSync(["git", "-C", cwd, "rev-parse", "--verify", `task/${task.id}`]).exitCode,
     ).toBe(0);
   }, 30_000);
+
+  /** A task row with a worktree, without launching anything. */
+  function seedWorktreeTask(cwd: string, state: Task["state"]): Task {
+    const id = crypto.randomUUID();
+    const task: Task = {
+      id,
+      profileId: profile.id,
+      model: "fake",
+      prompt: "work",
+      cwd,
+      state,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      output: "",
+      scope: { read: ["**"], write: ["**"] },
+      allowQuestions: true,
+      worktree: { originCwd: cwd, path: join(worktreesRoot(), id), branch: `task/${id}` },
+    };
+    stateStore().createTask(task);
+    return task;
+  }
+
+  test("removes the checkout on demand and keeps the branch", async () => {
+    const cwd = setup();
+    const task = await delegate(profile.id, "work", cwd, undefined, undefined, { worktree: true });
+    await settle(task.id);
+    expect(existsSync(task.cwd)).toBe(true);
+
+    const result = await deleteTaskWorktree(task.id);
+    expect(result).toEqual({ taskId: task.id, checkout: "removed", branch: "kept" });
+    expect(existsSync(task.cwd)).toBe(false);
+    expect(
+      Bun.spawnSync(["git", "-C", cwd, "rev-parse", "--verify", `task/${task.id}`]).exitCode,
+    ).toBe(0);
+    expect(Bun.spawnSync(["git", "-C", cwd, "worktree", "list"]).stdout.toString())
+      .not.toContain(worktreesRoot());
+  }, 30_000);
+
+  test("deleteBranch removes the task's own branch and nothing else", async () => {
+    const cwd = setup();
+    const task = await delegate(profile.id, "work", cwd, undefined, undefined, { worktree: true });
+    await settle(task.id);
+
+    const result = await deleteTaskWorktree(task.id, true);
+    expect(result).toEqual({ taskId: task.id, checkout: "removed", branch: "deleted" });
+    expect(existsSync(task.cwd)).toBe(false);
+    expect(
+      Bun.spawnSync(["git", "-C", cwd, "rev-parse", "--verify", `task/${task.id}`]).exitCode,
+    ).not.toBe(0);
+    expect(Bun.spawnSync(["git", "-C", cwd, "rev-parse", "--verify", "main"]).exitCode).toBe(0);
+  }, 30_000);
+
+  test("a second delete reports the checkout as already gone", async () => {
+    const cwd = setup();
+    const task = await delegate(profile.id, "work", cwd, undefined, undefined, { worktree: true });
+    await settle(task.id);
+
+    expect(await deleteTaskWorktree(task.id, true))
+      .toEqual({ taskId: task.id, checkout: "removed", branch: "deleted" });
+    expect(await deleteTaskWorktree(task.id, true))
+      .toEqual({ taskId: task.id, checkout: "already gone", branch: "already gone" });
+    expect(await deleteTaskWorktree(task.id))
+      .toEqual({ taskId: task.id, checkout: "already gone", branch: "kept" });
+  }, 30_000);
+
+  test("refuses while the task is still active", async () => {
+    const cwd = setup();
+    const id = seedWorktreeTask(cwd, "running").id;
+    await expect(deleteTaskWorktree(id)).rejects.toThrow(/still active/);
+    expect(existsSync(join(worktreesRoot(), id))).toBe(false);
+  });
+
+  test("refuses while the task waits on a reply", async () => {
+    const cwd = setup();
+    const id = seedWorktreeTask(cwd, "needs_input").id;
+    await expect(deleteTaskWorktree(id)).rejects.toThrow(/waiting on a reply/);
+  });
+
+  test("refuses a task that never ran in a worktree", async () => {
+    const cwd = setup();
+    const id = crypto.randomUUID();
+    stateStore().createTask({
+      id,
+      profileId: profile.id,
+      model: "fake",
+      prompt: "work",
+      cwd,
+      state: "completed",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      output: "",
+      scope: { read: ["**"], write: ["**"] },
+      allowQuestions: true,
+    });
+
+    await expect(deleteTaskWorktree(id)).rejects.toThrow(/did not run in a worktree/);
+  });
+
+  test("refuses an unknown task id", async () => {
+    setup();
+    await expect(deleteTaskWorktree(crypto.randomUUID())).rejects.toThrow(/unknown task/);
+  });
 
   // The feature is only worth having if a worker can actually commit: the
   // objects and the branch live in the origin repository, outside the tree the

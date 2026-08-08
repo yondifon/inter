@@ -78,6 +78,15 @@ git -C <repo> merge task/<taskId>
 archived, and untouched since the retention cutoff. It never deletes a branch,
 so the work survives the checkout.
 
-`resume`, `reply` and `handoff` all continue in the same checkout. Once it has
-been cleaned up they refuse, naming the branch that holds the work, rather than
-starting a second checkout from a `HEAD` that has since moved.
+The `worktree-remove` MCP tool deletes a task's checkout on demand, without
+waiting for cleanup and without archiving the task. Only a settled task that
+ran with `worktree: true` has a checkout to remove; a task that is still
+running or waiting on a reply is refused. The branch survives the removal
+unless `deleteBranch: true` is passed, which also deletes the `task/<taskId>`
+branch — nothing else. Removing a checkout that is already gone reports it as
+already gone instead of failing.
+
+`resume`, `reply` and `handoff` all continue in the same checkout. Once it is
+gone — cleaned up or removed by the tool — they refuse, naming the branch that
+holds the work, rather than starting a second checkout from a `HEAD` that has
+since moved.

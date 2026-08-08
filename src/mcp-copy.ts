@@ -51,6 +51,14 @@ export const HANDOFF_DESCRIPTION = [
   "Returns where the task landed (id, state, profile, model); pass `fields` for more.",
 ].join(" ");
 
+export const DELETE_WORKTREE_DESCRIPTION = [
+  "Delete a task's git worktree on demand — the checkout a worktree: true task ran in — without archiving the task or waiting for cleanup.",
+  "Only a settled task delegated with worktree: true has a checkout to remove; a task still running or waiting on a reply keeps its worktree.",
+  "The branch the worker committed on, task/<taskId>, survives unless you pass deleteBranch: true, which deletes that one branch and nothing else.",
+  "Removing a checkout that is already gone is not an error — the result says what was removed and whether the branch survives.",
+  "After it, resume, reply and handoff refuse the task rather than re-opening a checkout that is no longer there.",
+].join(" ");
+
 export const DELEGATE_DESCRIPTION = [
   "Ask an external AI provider to handle a new scoped task.",
   "Reach for this as a normal way to get work done, not only when this session is stuck: hand off implementation, research, writing, analysis, and review, and keep goal-setting, architecture, and final review here.",

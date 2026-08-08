@@ -4,7 +4,7 @@
  * in one module, so none of those surfaces can drift.
  */
 export const VERSION = "0.6.0";
-export const MCP_CONTRACT_VERSION = 26;
+export const MCP_CONTRACT_VERSION = 27;
 
 declare const INTER_BUILD_STAMP: string | undefined;
 /**

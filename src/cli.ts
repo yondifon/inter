@@ -10,6 +10,7 @@ import {
   assertTaskCompletion,
   cancelTask,
   delegate,
+  deleteTaskWorktree,
   getTask,
   handoffTask,
   listTasks,
@@ -48,7 +49,7 @@ import type {
   Task,
 } from "./types";
 import { taskEventView } from "./events";
-import { COMPLETE_DESCRIPTION, DELEGATE_DESCRIPTION, HANDOFF_DESCRIPTION, MCP_INSTRUCTIONS, RESUME_DESCRIPTION } from "./mcp-copy";
+import { COMPLETE_DESCRIPTION, DELEGATE_DESCRIPTION, DELETE_WORKTREE_DESCRIPTION, HANDOFF_DESCRIPTION, MCP_INSTRUCTIONS, RESUME_DESCRIPTION } from "./mcp-copy";
 import { defaultModelFor } from "./provider-defaults";
 import { normalizeProfile } from "./profile-input";
 import { deleteMemory, getMemory, listMemories, setMemory } from "./memories";
@@ -856,6 +857,14 @@ async function createMcpServer(): Promise<McpServer> {
       fields: taskFieldSchema,
     }),
   }, async ({ taskId, archived, fields }) => result(taskView(setTaskArchived(taskId, archived), fields ?? DEFAULT_ARCHIVE_FIELDS)));
+  server.registerTool("worktree-remove", {
+    description: DELETE_WORKTREE_DESCRIPTION,
+    inputSchema: z.object({
+      taskId: z.string().describe("Inter task id of the worktree task whose checkout to remove."),
+      deleteBranch: z.boolean().default(false)
+        .describe("Also delete the task's own branch, task/<taskId>. The branch survives by default."),
+    }),
+  }, async ({ taskId, deleteBranch }) => result(await deleteTaskWorktree(taskId, deleteBranch)));
   server.registerTool("profiles", {
     description: "Everything needed to pick a destination: configured provider profiles with their capabilities and default models, plus — on request — their model catalogs, availability, and rate-limit headroom. This is the one capacity read; use route to have Inter choose for you.",
     inputSchema: z.object({
