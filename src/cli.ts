@@ -54,6 +54,7 @@ import { normalizeProfile } from "./profile-input";
 import { deleteMemory, getMemory, listMemories, setMemory } from "./memories";
 import { profilesForCaller, publicProfile, publicProfiles } from "./profile-view";
 import { publicTaskSummary, taskSummaryView, taskView, waitEventsView, waitTaskView, settled, TASK_FIELD_KEYS, type TaskField } from "./public-task";
+import { projectCwd } from "./worktree";
 import { mcpWaitBlockMs } from "./mcp-wait";
 import { loadRoutingPolicy } from "./routing-policy";
 import { loadWorkerRules } from "./worker-config";
@@ -173,6 +174,13 @@ const delegateToolSchema = z.object({
     ),
   timeoutMs: z.number().int().min(1).max(86_400_000).optional()
     .describe("Hard runtime limit. The task lands in failed with code timeout."),
+  worktree: z.boolean().optional()
+    .describe(
+      "Give the task its own checkout of the repository at cwd, on the branch task/<taskId>, so the worker commits there " +
+      "instead of in the user's working tree and several tasks can run on one repository at once. cwd must be inside a " +
+      "git repository with at least one commit. Tell the user which branch to review when the task lands; inter cleanup " +
+      "removes the checkout, never the branch.",
+    ),
   fields: taskFieldSchema,
 });
 
@@ -296,7 +304,11 @@ const serveOptions = {
         return Response.json({ error: "path or symbol is required" }, { status: 400 });
       }
       const tier = url.searchParams.get("tier") === "full" ? "full" : "skeleton";
-      const result = await mapLookup(task.cwd, { paths, symbols, tier }, task.scope.read);
+      // A worktree task is not in the project's working tree, so the project's
+      // map does not describe what this worker can see.
+      const result = task.worktree
+        ? undefined
+        : await mapLookup(task.cwd, { paths, symbols, tier }, task.scope.read);
       if (!result) return Response.json({ error: "map lookup is disabled" }, { status: 404 });
       const asJson = request.headers.get("accept")?.includes("application/json");
       return asJson
@@ -340,7 +352,7 @@ const serveOptions = {
       const taskId = decodeURIComponent(eventTaskId);
       const task = getTask(taskId);
       if (!task) return Response.json({ error: "unknown task" }, { status: 404 });
-      const profile = (await loadConfig(task.cwd)).profiles.find(({ id }) => id === task.profileId);
+      const profile = (await loadConfig(projectCwd(task))).profiles.find(({ id }) => id === task.profileId);
       if (!profile) return Response.json({ error: "unknown task profile" }, { status: 404 });
       const after = Math.max(0, Number(url.searchParams.get("after") ?? 0) || 0);
       const waitMs = Math.min(30_000, Math.max(0, Number(url.searchParams.get("waitMs") ?? 0) || 0));
@@ -462,7 +474,7 @@ const serveOptions = {
       if (body === undefined) return invalidJsonBody();
       const parsed = delegateBodySchema.safeParse(body);
       if (!parsed.success) return Response.json({ error: describeZodIssue(parsed.error) }, { status: 400 });
-      const { profile, prompt, cwd, model, parent, scope, allowQuestions, timeoutMs, tldr, title } = parsed.data;
+      const { profile, prompt, cwd, model, parent, scope, allowQuestions, timeoutMs, tldr, title, worktree } = parsed.data;
       try {
         const task = await delegate(profile, prompt, cwd, model, parent, {
           scope,
@@ -470,6 +482,7 @@ const serveOptions = {
           timeoutMs,
           tldr,
           title,
+          ...(worktree ? { worktree } : {}),
         });
         return Response.json(
           startedTask(task, DEFAULT_DELEGATE_FIELDS),
@@ -616,7 +629,7 @@ async function createMcpServer(): Promise<McpServer> {
   server.registerTool("delegate", {
     description: DELEGATE_DESCRIPTION,
     inputSchema: delegateToolSchema,
-  }, async ({ profile, model, preference, prompt, cwd, parent, scope, allowQuestions, difficulty, effort, tldr, title, timeoutMs, fields }) => {
+  }, async ({ profile, model, preference, prompt, cwd, parent, scope, allowQuestions, difficulty, effort, tldr, title, timeoutMs, worktree, fields }) => {
     const resolvedFields = fields ?? DEFAULT_DELEGATE_FIELDS;
     const plan = await planDispatch({ prompt, cwd, profile, model, preference, difficulty, effort });
     const task = await delegate(plan.profileId, prompt, cwd, plan.model, parent, {
@@ -626,6 +639,7 @@ async function createMcpServer(): Promise<McpServer> {
       tldr,
       title,
       timeoutMs,
+      ...(worktree ? { worktree } : {}),
       selection: plan.decision,
     });
     return result({
@@ -810,7 +824,7 @@ async function createMcpServer(): Promise<McpServer> {
     const task = await handoffTask(taskId, profile, { model, effort, scope });
     return result({
       ...startedTask(task, fields ?? DEFAULT_HANDOFF_FIELDS),
-      ...(await warningsFor(task.cwd, task)),
+      ...(await warningsFor(projectCwd(task), task)),
     });
   });
   server.registerTool("cancel", {

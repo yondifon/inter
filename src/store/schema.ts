@@ -38,6 +38,7 @@ const MIGRATIONS = [
   [16, "task follow-up queue"],
   [17, "task actual reasoning effort"],
   [18, "profile failures keyed per model"],
+  [19, "task git worktrees"],
 ] as const;
 
 /**
@@ -234,6 +235,11 @@ export function migrateDatabase(db: Database): { needsSessionBackfill: boolean }
     // distinct from the requested `effort` so a worker that ran at another level
     // is visible instead of reported at the level it was asked for.
     ["effort_actual", "TEXT"],
+    // A task delegated with its own checkout. NULL on every ordinary task, which
+    // runs in the caller's directory and has no branch of its own.
+    ["origin_cwd", "TEXT"],
+    ["worktree_path", "TEXT"],
+    ["worktree_branch", "TEXT"],
   ] as const) {
     if (!taskColumns.has(column)) {
       db.exec(`ALTER TABLE tasks ADD COLUMN ${column} ${type}`);

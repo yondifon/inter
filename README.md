@@ -268,6 +268,7 @@ file's list is what a dispatch into that project sees.
 | [docs/complete.md](docs/complete.md) | Asserting completion when the worker never attested it |
 | [docs/handoff.md](docs/handoff.md) | Moving a dead task across profiles |
 | [docs/pi.md](docs/pi.md) | Pi provider reference — dispatch, resume, sandbox, and verification |
+| [docs/worktree.md](docs/worktree.md) | Task worktrees — a checkout and branch per task, and committing inside the sandbox |
 | [docs/scope.md](docs/scope.md) | Data scope rules — bare dir vs. `/**` vs. `**`, grants, and EPERM gotchas |
 | [docs/gotchas.md](docs/gotchas.md) | Failure modes worth knowing before you hit them, and their fixes |
 

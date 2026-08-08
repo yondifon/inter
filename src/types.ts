@@ -238,6 +238,16 @@ export interface MemoryProject {
   updatedAt: string;
 }
 
+/** A task's own checkout of its repository, when it was delegated with one. */
+export interface TaskWorktree {
+  /** The repository directory the caller delegated against. */
+  originCwd: string;
+  /** Root of the checkout the worker runs in. */
+  path: string;
+  /** Branch the worker commits on. It survives cleanup; the checkout does not. */
+  branch: string;
+}
+
 export interface Task {
   id: string;
   profileId: string;
@@ -246,6 +256,13 @@ export interface Task {
   /** The prompt actually sent to the worker: caller text plus memories and protocol wrapper. */
   shippedPrompt?: string;
   cwd: string;
+  /**
+   * Present when the run happens in a dedicated checkout instead of the
+   * caller's directory. `cwd` is then inside that checkout, while everything
+   * keyed to the project — grants, memories, config, the context map — stays on
+   * {@link TaskWorktree.originCwd}.
+   */
+  worktree?: TaskWorktree;
   state: TaskState;
   createdAt: string;
   updatedAt: string;

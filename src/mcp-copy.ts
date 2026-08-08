@@ -70,6 +70,8 @@ export const DELEGATE_DESCRIPTION = [
   "Always pass tldr: one plain sentence saying what the task will do and to what, because the user reads it on the task list, not the prompt.",
   "Always pass title too: a short imperative label (max 60 chars, no markdown) of what the task does, readable at a glance in a sidebar — tldr is the sentence you read when you stop on it, title is what you read in the list.",
   "When fanning out several tasks for one goal, pass the first task's id as parent on the rest so the switchboard groups the batch.",
+  "Pass worktree: true when the work should land as commits, or when more than one task is running against the same repository: the task gets its own checkout of cwd on the branch task/<taskId>, so the worker commits there and the user's working tree and the other tasks are untouched. Tell the user which branch to review when the task lands.",
+  "worktree: true widens what the task can read: committing requires the repository's object store, so the worker can read anything ever committed there — including files outside its read scope — and the context map is not shipped to it. Get the user's agreement before using it on a repository whose history holds anything they would not send to that provider.",
   "The returned Inter task ID is the only continuation handle; provider session IDs are private implementation data.",
   `Dispatch returns immediately. Background \`${watchCommand()}\` in your own shell tool right after and get on with other work — it sleeps for free and reports the moment the task needs you, no turn spent watching it. Inspect once something has settled to read the result in full.`,
 ].join(" ");

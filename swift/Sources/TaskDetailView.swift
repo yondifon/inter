@@ -376,6 +376,9 @@ struct TaskDetail: View {
                     taskActionsMenu
                 } label: {
                     Image(systemName: "ellipsis.vertical")
+                        .font(.system(size: 12 * uiScale))
+                        .frame(width: 24 * uiScale, height: 24 * uiScale)
+                        .contentShape(.rect)
                 }
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
@@ -1242,7 +1245,10 @@ private struct ActivityWorkRow: View {
     /// collapsing the row once is enough to drop the highlight for good —
     /// nothing here re-asserts it after that.
     private let isFocusTarget: Bool
+    /// Whether the landing highlight has already faded out.
+    @State private var focusFaded = false
     @Environment(\.taskCwd) private var taskCwd
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(event: TaskEventSnapshot, muted: Bool = false, live: Bool = false, initiallyExpanded: Bool = false) {
         self.event = event
@@ -1328,6 +1334,7 @@ private struct ActivityWorkRow: View {
             .padding(.vertical, 5)
             .padding(.horizontal, isFocused ? 8 : 0)
             .background(isFocused ? Surface.selection : Color.clear, in: RoundedRectangle(cornerRadius: Radius.small))
+            .task { await fadeFocusHighlightIfNeeded() }
         }
     }
 
@@ -1392,8 +1399,23 @@ private struct ActivityWorkRow: View {
     /// current row" elsewhere in the app (`Surface.selection`) — tied to
     /// `showingRawDetails` rather than `isFocusTarget` alone, so collapsing
     /// the row drops the highlight along with it, the same action that stops
-    /// the trace fighting the operator's own scroll.
-    private var isFocused: Bool { isFocusTarget && showingRawDetails }
+    /// the trace fighting the operator's own scroll. `focusFaded` ends the
+    /// highlight on its own after the pane lands.
+    private var isFocused: Bool { isFocusTarget && showingRawDetails && !focusFaded }
+
+    /// The landing highlight marks where the pane arrived, not a selection
+    /// the reader made, so it lets go a moment later instead of staying as a
+    /// permanent fill behind the run's closing answer.
+    private func fadeFocusHighlightIfNeeded() async {
+        guard isFocusTarget, !focusFaded else { return }
+        try? await Task.sleep(for: .seconds(1.5))
+        guard !Task.isCancelled, isFocusTarget, !focusFaded else { return }
+        if reduceMotion {
+            focusFaded = true
+        } else {
+            withAnimation(.easeOut(duration: 0.4)) { focusFaded = true }
+        }
+    }
 
     /// Compact one-line details stay on the title line; anything taller drops
     /// below it. Usage and signal shapes render in their own cards, so a stray

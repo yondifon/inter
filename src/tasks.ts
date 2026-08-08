@@ -17,6 +17,7 @@ import { handoffBrief } from "./handoff-brief";
 import { normalizeTaskScope, sandboxedCommand, scopeCoversPath, scopeRefusedWrite } from "./task-scope";
 import { loadWorkerRules, loadMapConfig, DEFAULT_MAP_CONFIG } from "./worker-config";
 import { workerPath } from "./worker-path";
+import { createTaskWorktree, projectCwd, removeTaskWorktree, requireTaskWorktree } from "./worktree";
 import { captureWorkerIdentity } from "./worker-identity";
 import { deniedScopePaths, promptReadPaths } from "./prompt-paths";
 import { stateStore, type StateStore, type TaskEvent, type TaskListQuery } from "./store";
@@ -80,6 +81,12 @@ export interface DelegateOptions {
   tldr?: string;
   /** Short label for the task, what a sidebar reads at a glance. */
   title?: string;
+  /**
+   * Run in a checkout of this repository made for the task, on a branch of its
+   * own, so the worker can commit without touching the caller's working tree
+   * and several tasks can run on one repo at once.
+   */
+  worktree?: boolean;
 }
 
 export interface ResumeOptions {
@@ -461,7 +468,14 @@ export async function delegate(
     parentTaskId,
     options,
   );
-  stateStore().createTask(task);
+  try {
+    stateStore().createTask(task);
+  } catch (error) {
+    // The checkout exists before the row does, and nothing else would ever
+    // name it again.
+    if (task.worktree) await removeTaskWorktree(task.worktree);
+    throw error;
+  }
   if (options.selection) {
     stateStore().recordTaskSelection(task.id, {
       ...options.selection,
@@ -540,12 +554,17 @@ async function prepareTask(
 
   const now = new Date().toISOString();
   const granted = resolveScope(workspace, profileId, options.scope, prompt);
+  const id = crypto.randomUUID();
+  // Only the run moves into the checkout: the grant resolved above, and the
+  // memories and map read at launch, all stay on the cwd the caller named.
+  const checkout = options.worktree ? await createTaskWorktree(workspace, id) : undefined;
   const task: Task = {
-    id: crypto.randomUUID(),
+    id,
     profileId,
     model,
     prompt,
-    cwd: workspace,
+    cwd: checkout?.cwd ?? workspace,
+    ...(checkout ? { worktree: checkout.worktree } : {}),
     state: "queued",
     createdAt: now,
     updatedAt: now,
@@ -608,6 +627,16 @@ function resolveScope(
   return { scope: normalizeTaskScope(undefined, workspace) };
 }
 
+/**
+ * A settled run's writes fold into the project's map. A worktree run's writes
+ * are in its own checkout, so folding them would record, against the project,
+ * content the project's tree does not have.
+ */
+function foldContext(task: Pick<Task, "cwd" | "worktree" | "id">): void {
+  if (task.worktree) return;
+  queueContextFold(task.cwd, task.id);
+}
+
 /** A dead-end id should say where the live ones are listed. */
 export function unknownTaskMessage(taskId: string): string {
   return `unknown task: ${taskId} — call tasks to list recent task ids`;
@@ -668,15 +697,20 @@ async function runTask(
   try {
     scratchDir = mkdtempSync(resolve(tmpdir(), "inter-worker-"));
     const hookUrl = `${Bun.env.INTER_BROKER_URL ?? `http://127.0.0.1:${Bun.env.INTER_PORT ?? 7331}`}/api/hooks/${task.id}`;
+    const project = projectCwd(task);
+    const worktree = requireTaskWorktree(task);
     // The map is an accelerator; a project that wrote a broken `[map]` table
     // ships today's behaviour rather than a failed run.
-    const mapConfig = await loadMapConfig(task.cwd).catch(() => DEFAULT_MAP_CONFIG);
-    const rules = await loadWorkerRules(task.cwd);
+    const mapConfig = await loadMapConfig(project).catch(() => DEFAULT_MAP_CONFIG);
+    const rules = await loadWorkerRules(project);
     const buildPrompt = (source: string) => workerPrompt(
       contextMapSection(
-        promptWithMemories(source, stateStore().listMemories(task.cwd)),
+        promptWithMemories(source, stateStore().listMemories(project)),
         task,
-        mapConfig,
+        // The map is built from the project's working tree, which a worktree
+        // run is not in: its checkout is HEAD, and the map would describe the
+        // user's uncommitted edits as if the worker could see them.
+        task.worktree ? { ...mapConfig, ship: false, lookup: false } : mapConfig,
       ),
       task.allowQuestions,
       task.scope,
@@ -736,7 +770,7 @@ async function runTask(
       const command = resumeWith
         ? resumeCommandFor(profile, prompt, task.cwd, resumeWith, task.model, hookUrl, task.effort)
         : commandFor(profile, prompt, task.cwd, task.model, hookUrl, task.effort);
-      const child = Bun.spawn(sandboxedCommand(command, task.cwd, task.scope, profile, scratchDir), {
+      const child = Bun.spawn(sandboxedCommand(command, task.cwd, task.scope, profile, scratchDir, worktree), {
         cwd: task.cwd,
         detached: true,
         env,
@@ -1289,7 +1323,7 @@ async function requireSessionProfile(
   verb: "reply to" | "resume",
   hint = "",
 ): Promise<Profile> {
-  const profile = (await loadConfig(task.cwd)).profiles.find((item) => item.id === task.profileId);
+  const profile = (await loadConfig(projectCwd(task))).profiles.find((item) => item.id === task.profileId);
   if (!profile || !canResumeSession(profile)) {
     throw new Error(sessionResumeUnsupported(task.profileId, profile));
   }
@@ -1310,6 +1344,7 @@ export async function reply(
       ? `task does not need input: ${id} — state is blocked; use resume with your answer as the instruction`
       : `task does not need input: ${id} (state: ${old.state})`);
   }
+  requireTaskWorktree(old);
   const profile = await requireSessionProfile(old, "reply to");
   const prompt = continuationPrompt(
     old.prompt,
@@ -1318,7 +1353,7 @@ export async function reply(
   );
   // A replacement scope is a fresh statement of what this cwd may touch, so it
   // becomes the grant later delegations inherit.
-  const replacement = options.scope ? resolveScope(old.cwd, old.profileId, options.scope) : undefined;
+  const replacement = options.scope ? resolveScope(projectCwd(old), old.profileId, options.scope) : undefined;
   const task = stateStore().answerTask(id, {
     answer,
     ...(replacement ? { scope: replacement.scope } : {}),
@@ -1351,6 +1386,7 @@ export async function resumeTask(
     if (WORKING_STATES.includes(task.state)) return queueFollowUp(task, instruction, options);
   }
   const old = requireContinuableTask(id, "resumed", instruction);
+  requireTaskWorktree(old);
   // A held resume replays only its stored instruction when the hold releases,
   // and a queued follow-up is only an instruction — either one would silently
   // drop a stated model or effort, so both are refused up front.
@@ -1376,7 +1412,7 @@ export async function resumeTask(
   }
   // A replacement scope is a fresh statement of what this cwd may touch, so it
   // becomes the grant later delegations inherit.
-  const replacement = options.scope ? resolveScope(old.cwd, old.profileId, options.scope) : undefined;
+  const replacement = options.scope ? resolveScope(projectCwd(old), old.profileId, options.scope) : undefined;
   const followUp = old.state === "completed";
   const given = instruction?.trim();
   const resumeInstruction = given || "Continue the original task from where the previous run stopped.";
@@ -1517,8 +1553,9 @@ export async function handoffTask(
       `handoff needs a different profile: task ${id} is already on ${profileId} — use resume to continue on the same account and provider session`,
     );
   }
+  requireTaskWorktree(old);
   // The destination must be usable in the task's workspace, not just anywhere.
-  const config = await loadConfig(old.cwd);
+  const config = await loadConfig(projectCwd(old));
   const profile = config.profiles.find((item) => item.id === profileId);
   if (!profile) throw new Error(unknownProfileMessage(profileId, config.profiles));
   if (!profile.enabled) throw new Error(`profile disabled: ${profileId}`);
@@ -1530,8 +1567,8 @@ export async function handoffTask(
   // A stated scope is fresh approval for this destination and becomes its grant,
   // exactly as on delegate and resume. Anything else keeps the task's own scope:
   // a handoff must never widen what a task may touch on the way out.
-  const replacement = options.scope ? resolveScope(old.cwd, profileId, options.scope) : undefined;
-  const approvedHere = stateStore().latestScopeGrant(old.cwd, profileId)?.profileId === profileId;
+  const replacement = options.scope ? resolveScope(projectCwd(old), profileId, options.scope) : undefined;
+  const approvedHere = stateStore().latestScopeGrant(projectCwd(old), profileId)?.profileId === profileId;
   // Built before the row moves: `old` still names the profile whose work this
   // is, and still carries the failure the brief has to explain.
   const brief = handoffBrief(
@@ -1604,7 +1641,7 @@ export async function cancelTask(id: string, reason = "cancelled by caller", tim
     }
   }
   taskWaiter.notify(id);
-  queueContextFold(cancelled.cwd, cancelled.id);
+  foldContext(cancelled);
   return cancelled;
 }
 
@@ -1661,7 +1698,7 @@ export async function assertTaskCompletion(id: string, assertedBy: string, reaso
   }
   const completed = stateStore().assertTaskCompletion(id, { assertedBy: by, reason: why });
   taskWaiter.notify(id);
-  queueContextFold(completed.cwd, completed.id);
+  foldContext(completed);
   return completed;
 }
 
@@ -1694,7 +1731,7 @@ export async function markTaskCompleted(id: string, assertedBy: string, reason: 
     active.forceKill = setTimeout(() => killProcessGroup(active.child, "SIGKILL"), FORCE_KILL_GRACE_MS);
   }
   taskWaiter.notify(id);
-  queueContextFold(completed.cwd, completed.id);
+  foldContext(completed);
   return completed;
 }
 
@@ -1728,7 +1765,7 @@ function update(task: Task, patch: Partial<Task>, expectedStates: Task["state"][
   // settled task may have written files, so its writes fold into the map. The
   // fold is queued, never awaited: it is housekeeping, not part of the settle.
   if (patch.state && settled(patch.state)) {
-    queueContextFold(task.cwd, task.id);
+    foldContext(task);
     // Same rule for the follow-up queue: the settle is what decides whether the
     // next instruction goes in, and it must not wait on the run that follows. A
     // copy, because a fed follow-up moves the live row out of the state that

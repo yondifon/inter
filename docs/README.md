@@ -14,6 +14,7 @@
 | [pi.md](pi.md) | Pi provider reference — dispatch, resume, sandbox, and verification |
 | [cleanup.md](cleanup.md) | Permanently deleting old task activity — what goes, what never does |
 | [worker-rules.md](worker-rules.md) | Setting a project's own worker rules in `.inter.toml` — and what stays fixed |
+| [worktree.md](worktree.md) | Task worktrees — a checkout and branch per task, and committing inside the sandbox |
 | [scope.md](scope.md) | Data scope rules — bare dir vs. `/**` vs. `**`, grants, and EPERM gotchas |
 | [gotchas.md](gotchas.md) | Failure modes worth knowing before you hit them, and their fixes |
 

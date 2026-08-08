@@ -1,6 +1,9 @@
+import { existsSync } from "node:fs";
 import { StateStore } from "./store";
 import type { CleanupPlan, CleanupRecord, CleanupResult } from "./store";
 import { CliRefusal } from "./cli-error";
+import { removeTaskWorktree, worktreesRoot } from "./worktree";
+import { settled } from "./public-task";
 
 /**
  * `inter cleanup` is the one path that permanently removes data, and the only
@@ -44,7 +47,8 @@ export function cleanupUsage(): string {
 
   Only tasks that have finished and that you archived are ever eligible.
   Work that is running or waiting on you, work you have not archived, and
-  project memories are never deleted.`;
+  project memories are never deleted. A task that ran in its own worktree
+  loses the worktree; the branch it committed on stays in your repository.`;
 }
 
 export function parseCleanupArgs(argv: readonly string[]): CleanupArgs | { error: string } {
@@ -102,13 +106,67 @@ const KEPT =
   "still lists and opens as before. Only the step-by-step activity of the runs\n" +
   "goes. Project memories are never touched.";
 
+/** Only the checkouts still on disk; a second pass at the same retention finds none. */
+function settledWorktrees(store: StateStore, cutoff: string) {
+  return store.settledWorktrees(cutoff).filter(({ worktree }) => existsSync(worktree.path));
+}
+
+/**
+ * A checkout belongs to the task whose activity is going, so it goes too. That
+ * is not the same as removing the work: the branch it was made on stays in the
+ * repository, which is where a person reviews or merges it.
+ *
+ * Each task's state is read again here rather than trusted from the plan: a
+ * resume puts a worker back into its checkout, and this must never delete a
+ * tree something is writing to.
+ */
+async function removeSettledWorktrees(store: StateStore, cutoff: string): Promise<number> {
+  let removed = 0;
+  for (const { taskId, worktree } of settledWorktrees(store, cutoff)) {
+    const task = store.getTask(taskId);
+    if (!task?.archivedAt || !settled(task.state)) continue;
+    await removeTaskWorktree(worktree);
+    removed += 1;
+  }
+  return removed;
+}
+
+/** Checkouts nothing will ever take, because cleanup only takes archived work. */
+function keptWorktrees(store: StateStore, cutoff: string): number {
+  const taken = new Set(settledWorktrees(store, cutoff).map(({ taskId }) => taskId));
+  return store.taskWorktrees()
+    .filter(({ taskId, worktree }) => !taken.has(taskId) && existsSync(worktree.path))
+    .length;
+}
+
+function worktreeLines(worktrees: number, kept: number, verb: string): string[] {
+  return [
+    ...(worktrees > 0
+      ? [
+        "",
+        `${verb} ${count(worktrees, "task worktree")} in ${worktreesRoot()}.`,
+        "The branch each one was made on stays in its repository.",
+      ]
+      : []),
+    ...(kept > 0
+      ? [
+        "",
+        `${count(kept, "other task worktree")} stay${kept === 1 ? "s" : ""} in ${worktreesRoot()}.`,
+        "Archive those tasks to have cleanup take their worktrees too.",
+      ]
+      : []),
+  ];
+}
+
 export function previewReport(
   plan: CleanupPlan,
   args: Pick<CleanupArgs, "olderThanDays" | "chosenDays">,
   last?: CleanupRecord,
+  worktrees = 0,
+  kept = 0,
 ): string {
   const age = `${args.olderThanDays} day${args.olderThanDays === 1 ? "" : "s"}`;
-  const nothing = nothingToDelete(plan, age);
+  const nothing = worktrees > 0 ? undefined : nothingToDelete(plan, age);
   const lines = [
     nothing
       ? "Nothing has been deleted, and nothing would be."
@@ -124,6 +182,7 @@ export function previewReport(
     "",
     KEPT,
   ]));
+  lines.push(...worktreeLines(worktrees, kept, "Also removes"));
   if (plan.heldBack > 0) {
     lines.push(
       "",
@@ -161,23 +220,33 @@ function nothingToDelete(plan: CleanupPlan, age: string): string | undefined {
     : `The finished, archived work older than ${age} has no activity left to delete.`;
 }
 
-export function deletedReport(result: CleanupResult, olderThanDays: number): string {
+export function deletedReport(
+  result: CleanupResult,
+  olderThanDays: number,
+  worktrees = 0,
+  kept = 0,
+): string {
   const age = `${olderThanDays} day${olderThanDays === 1 ? "" : "s"}`;
   const nothing = nothingToDelete(result, age);
-  if (nothing) return `Nothing was deleted. ${nothing}`;
+  if (nothing && worktrees === 0) return `Nothing was deleted. ${nothing}`;
+  if (nothing) {
+    return [`No activity was deleted. ${nothing}`, ...worktreeLines(worktrees, kept, "Removed")].join("\n");
+  }
   return [
     `Deleted the activity of ${count(result.tasks, "task")}: ${states(result)}.`,
     `${count(result.events, "activity record")} removed. Database file ${
       bytes(result.fileBytesBefore)} to ${bytes(result.fileBytesAfter)}.`,
     "",
     KEPT,
+    ...worktreeLines(worktrees, kept, "Removed"),
   ].join("\n");
 }
 
 /** One line for the broker log, since nobody is watching an automatic pass. */
-export function cleanupLogLine(result: CleanupResult): string {
+export function cleanupLogLine(result: CleanupResult, worktrees = 0): string {
   return `cleanup: removed ${count(result.events, "activity record")} from ${
-    count(result.tasks, "task")} archived before ${day(result.cutoff)}; file ${
+    count(result.tasks, "task")} archived before ${day(result.cutoff)}${
+    worktrees > 0 ? `, and ${count(worktrees, "task worktree")}` : ""}; file ${
     bytes(result.fileBytesBefore)} to ${bytes(result.fileBytesAfter)}`;
 }
 
@@ -203,27 +272,29 @@ export function scheduledCleanupDays(env: Record<string, string | undefined> = B
 export function startScheduledCleanup(store: StateStore, days: number, log = console.log): void {
   log(
     `automatic cleanup on: tasks finished and archived more than ${days} days ago lose their ` +
-    `recorded activity. First pass in ${FIRST_PASS_DELAY_MS / 60_000} minutes, then daily.`,
+    `recorded activity, and any worktree they ran in. First pass in ${FIRST_PASS_DELAY_MS / 60_000} minutes, then daily.`,
   );
-  const pass = () => {
+  const pass = async () => {
     try {
-      const result = store.deleteSettledTaskActivity(cutoffFor(days));
+      const cutoff = cutoffFor(days);
+      const worktrees = await removeSettledWorktrees(store, cutoff);
+      const result = store.deleteSettledTaskActivity(cutoff);
       // A pass that removed nothing is the normal case once the backlog is
       // gone; saying so daily would train the reader to skip the line that
       // matters.
-      if (result.events > 0) log(cleanupLogLine(result));
+      if (result.events > 0 || worktrees > 0) log(cleanupLogLine(result, worktrees));
     } catch (error) {
       log(`cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   };
   const first = setTimeout(() => {
-    pass();
-    setInterval(pass, PASS_INTERVAL_MS).unref?.();
+    void pass();
+    setInterval(() => void pass(), PASS_INTERVAL_MS).unref?.();
   }, FIRST_PASS_DELAY_MS);
   first.unref?.();
 }
 
-export function runCleanup(argv: readonly string[]): number {
+export async function runCleanup(argv: readonly string[]): Promise<number> {
   const parsed = parseCleanupArgs(argv);
   if ("error" in parsed) {
     console.error(`${parsed.error}\n\n${cleanupUsage()}`);
@@ -235,11 +306,24 @@ export function runCleanup(argv: readonly string[]): number {
   const store = new StateStore({ maintenance: true });
   try {
     const cutoff = cutoffFor(parsed.olderThanDays);
+    const kept = keptWorktrees(store, cutoff);
     if (!parsed.execute) {
-      console.log(previewReport(store.cleanupPlan(cutoff), parsed, store.lastCleanup()));
+      console.log(previewReport(
+        store.cleanupPlan(cutoff),
+        parsed,
+        store.lastCleanup(),
+        settledWorktrees(store, cutoff).length,
+        kept,
+      ));
       return 0;
     }
-    console.log(deletedReport(store.deleteSettledTaskActivity(cutoff), parsed.olderThanDays));
+    const worktrees = await removeSettledWorktrees(store, cutoff);
+    console.log(deletedReport(
+      store.deleteSettledTaskActivity(cutoff),
+      parsed.olderThanDays,
+      worktrees,
+      kept,
+    ));
     return 0;
   } finally {
     store.close();

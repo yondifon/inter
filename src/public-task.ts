@@ -2,7 +2,7 @@ import type { Task, TaskAttempt, TaskState, TaskSummary } from "./types";
 
 export const TASK_FIELD_GROUPS = {
   routing: ["profileId", "model", "effort", "effortActual"],
-  context: ["cwd", "createdAt", "updatedAt", "title", "tldr", "parentTaskId"],
+  context: ["cwd", "worktree", "createdAt", "updatedAt", "title", "tldr", "parentTaskId"],
   scope: ["scope", "grantId", "allowQuestions", "timeoutMs"],
   prompt: ["prompt"],
   shippedPrompt: ["shippedPrompt"],
@@ -79,6 +79,7 @@ export function taskView(task: Task, fields: readonly TaskField[]): TaskFieldVie
 
     // context
     ...(want.has("cwd") ? { cwd: task.cwd } : {}),
+    ...(want.has("worktree") && task.worktree ? { worktree: task.worktree } : {}),
     ...(want.has("createdAt") ? { createdAt: task.createdAt } : {}),
     ...(want.has("updatedAt") ? { updatedAt: task.updatedAt } : {}),
     ...(want.has("title") && task.title ? { title: task.title } : {}),

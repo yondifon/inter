@@ -1,8 +1,9 @@
-import { closeSync, existsSync, lstatSync, openSync, readdirSync, readSync, realpathSync, statSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { Profile, TaskScope } from "./types";
 import { resolveWorkerExecutable } from "./worker-path";
+import type { WorktreeGitPaths } from "./worktree";
 
 export const FULL_WORKSPACE_SCOPE: TaskScope = { read: ["**"], write: ["**"] };
 
@@ -20,6 +21,7 @@ export function sandboxedCommand(
   scope: TaskScope,
   profile: Profile,
   scratchDir: string,
+  worktree?: WorktreeGitPaths,
 ): string[] {
   if (process.platform !== "darwin" || !existsSync("/usr/bin/sandbox-exec")) {
     throw new Error("per-task scope enforcement requires macOS sandbox-exec");
@@ -29,7 +31,7 @@ export function sandboxedCommand(
   return [
     "/usr/bin/sandbox-exec",
     "-p",
-    sandboxProfile(cwd, scope, profile, resolvedCommand, scratchDir),
+    sandboxProfile(cwd, scope, profile, resolvedCommand, scratchDir, worktree),
     ...resolvedCommand,
   ];
 }
@@ -40,6 +42,7 @@ export function sandboxProfile(
   profile: Profile,
   command: string[],
   scratchDir = "/private/tmp/inter-worker",
+  worktree?: WorktreeGitPaths,
 ): string {
   const workspace = realpathIfPresent(cwd);
   const scratch = realpathIfPresent(scratchDir);
@@ -83,7 +86,7 @@ export function sandboxProfile(
   const tempRoots = unique([tmpdir().replace(/\/+$/, ""), realpathIfPresent(tmpdir())]);
   const tempCacheRules = tempRoots.flatMap((root) => [
     `(allow file-write* (literal ${quote(root)}))`,
-    `(allow file-write* (regex #"^${escapeRegExp(root)}/xcrun_db[^/]*$"))`,
+    `(allow file-write* (regex ${quoteRegex(`^${escapeRegExp(root)}/xcrun_db[^/]*$`)}))`,
   ]);
   // Path resolution stats every component including the final target, so the
   // temp root needs subpath metadata (a literal covers the dir itself but not
@@ -111,9 +114,62 @@ export function sandboxProfile(
     ...runtimeWrites,
     ...tempCacheRules,
     ...providerRules,
+    ...(worktree ? worktreeGitRules(worktree) : []),
     ...readRules,
     ...writeRules,
   ].join("");
+}
+
+// Everything a commit needs that a delete does not. `file-write*` would also
+// carry file-write-unlink, and unlink on the origin's object store is `rm -rf
+// .git/objects` — a worker able to destroy the repository it was lent.
+const CREATE_ONLY = "file-write-create file-write-mode file-write-times file-write-flags";
+const REPLACE_ONLY = `${CREATE_ONLY} file-write-data`;
+
+// A linked worktree keeps nothing but a pointer file: its objects and the
+// branch it commits to live in the origin repository, outside the sandboxed
+// tree, so under the deny-default every git write EPERMs. What is opened is
+// the narrowest set a commit needs. New objects may be created but existing
+// ones cannot be rewritten or removed; the only ref that may move is this
+// task's own branch, so neither the user's branches nor another task's survive
+// contact with a worker. Reads cover the whole object store, which is what
+// makes a commit possible at all and is also the one thing a worktree widens:
+// repository history is readable regardless of the task's read scope.
+function worktreeGitRules(worktree: WorktreeGitPaths): string[] {
+  const common = realpathIfPresent(worktree.commonDir);
+  const gitDir = realpathIfPresent(worktree.gitDir);
+  const objects = join(common, "objects");
+  // Git writes a loose object to a temp file in its fan-out directory and
+  // renames it into place, so the temp names are the only paths under the
+  // store that need their data rewritten or removed.
+  const temporaries = `^${escapeRegExp(objects)}/([^/]+/)?tmp_[^/]*$`;
+  // Creating a file checks the parent directory's write vnode as well as the
+  // path itself, so every directory on the way down to the ref is listed.
+  const parents = [
+    common,
+    ...["refs", "refs/heads", "refs/heads/task", "logs", "logs/refs", "logs/refs/heads", "logs/refs/heads/task"]
+      .map((dir) => join(common, dir)),
+  ];
+  const ref = join(common, worktree.ref);
+  // Git moves a branch by renaming its lock over it, which unlinks what was
+  // there. Only this task's own ref is exposed to that.
+  const replaceable = [ref, `${ref}.lock`, join(common, "packed-refs.lock")];
+  return [
+    `(allow file-read* (literal ${quote(join(realpathIfPresent(worktree.root), ".git"))}))`,
+    `(allow file-read* (subpath ${quote(common)}))`,
+    ...ancestorPaths(dirname(common)).map((path) =>
+      `(allow file-read-metadata (literal ${quote(path)}))`
+    ),
+    `(allow ${CREATE_ONLY} (subpath ${quote(objects)}))`,
+    `(allow ${REPLACE_ONLY} file-write-unlink (regex ${quoteRegex(temporaries)}))`,
+    ...[...parents, join(common, "logs", worktree.ref)].map((path) =>
+      `(allow ${REPLACE_ONLY} (literal ${quote(path)}))`
+    ),
+    ...replaceable.map((path) =>
+      `(allow ${REPLACE_ONLY} file-write-unlink (literal ${quote(path)}))`
+    ),
+    `(allow file-write* (subpath ${quote(gitDir)}))`,
+  ];
 }
 
 // OpenCode finds the project boundary through Git before it loads project
@@ -127,19 +183,35 @@ function opencodeBootstrapRules(workspace: string): string[] {
     resolve(workspace, name),
     resolve(workspace, ".opencode", name),
   ]);
-  const gitDir = resolve(workspace, ".git");
-  if (existsSync(gitDir)) {
-    paths.push(
-      gitDir,
-      resolve(gitDir, "HEAD"),
-      resolve(gitDir, "config"),
-      resolve(gitDir, "commondir"),
-      resolve(gitDir, "opencode"),
-    );
+  const marker = resolve(workspace, ".git");
+  if (existsSync(marker)) {
+    // In a worktree `.git` is a pointer file, and the identity files OpenCode
+    // reads are in the directory it names, not beside the pointer.
+    const linked = linkedGitDir(marker);
+    for (const gitDir of unique([marker, ...(linked ? [linked] : [])])) {
+      paths.push(
+        gitDir,
+        resolve(gitDir, "HEAD"),
+        resolve(gitDir, "config"),
+        resolve(gitDir, "commondir"),
+        resolve(gitDir, "opencode"),
+      );
+    }
   } else {
     for (const name of configNames) paths.push(resolve(homedir(), name));
   }
   return unique(paths).map((path) => `(allow file-read* (literal ${quote(path)}))`);
+}
+
+/** The directory a worktree's `.git` pointer names, or nothing for a real `.git`. */
+function linkedGitDir(marker: string): string | undefined {
+  try {
+    if (!statSync(marker).isFile()) return undefined;
+    const pointer = /^gitdir:\s*(.+)$/m.exec(readFileSync(marker, "utf8"));
+    return pointer ? resolve(dirname(marker), pointer[1]!.trim()) : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 // Mirrors the seatbelt write rules so the broker can call a refusal before the
@@ -481,6 +553,13 @@ function unique(values: string[]): string[] {
 
 function quote(value: string): string {
   return JSON.stringify(value);
+}
+
+// Seatbelt regex literals are not JSON strings: JSON.stringify doubles every
+// backslash the pattern needs, so an escaped `.` stops matching the character
+// it was written for. Only the quote itself needs escaping here.
+function quoteRegex(pattern: string): string {
+  return `#"${pattern.replaceAll('"', '\\"')}"`;
 }
 
 function escapeRegExp(value: string): string {

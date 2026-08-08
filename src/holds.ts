@@ -1,6 +1,7 @@
 import type { StateStore } from "./store";
 import type { ProfileStatus } from "./profile-status";
 import type { TaskHold } from "./types";
+import { projectCwd } from "./worktree";
 
 /**
  * The hold sweep: one 30-second interval that evaluates due holds and releases
@@ -90,7 +91,7 @@ async function evaluateHold(
     const statuses = await deps.listStatuses({
       profile: hold.awaitProfile,
       ...(hold.awaitModel ? { model: hold.awaitModel } : {}),
-      cwd: task.cwd,
+      cwd: projectCwd(task),
     });
     const down = statuses.find((status) => status.state === "unavailable");
     if (down) {

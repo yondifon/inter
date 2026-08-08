@@ -27,6 +27,7 @@ import type {
   TaskState,
   TaskSummary,
   TaskScope,
+  TaskWorktree,
   ContextFile,
   ContextFileProject,
   ContextMapRow,
@@ -67,6 +68,9 @@ interface TaskRow {
   prompt: string;
   shipped_prompt: string | null;
   cwd: string;
+  origin_cwd: string | null;
+  worktree_path: string | null;
+  worktree_branch: string | null;
   state: TaskState;
   output: string;
   error: string | null;
@@ -92,7 +96,8 @@ interface TaskRow {
   follow_ups?: number;
 }
 
-const TASK_COLUMNS = `id, profile_id, model, prompt, shipped_prompt, cwd, state, output, error,
+const TASK_COLUMNS = `id, profile_id, model, prompt, shipped_prompt, cwd,
+             origin_cwd, worktree_path, worktree_branch, state, output, error,
              question, parent_task_id, scope_json, grant_id, allow_questions, timeout_ms,
              effort, effort_actual, tldr, title, session_id, completion_json, attempts_json, cost_usd, turns, archived_at,
              created_at, updated_at`;
@@ -830,12 +835,15 @@ export class StateStore {
   createTask(task: Task): void {
     this.database.query(`
       INSERT INTO tasks(
-        id, profile_id, model, prompt, cwd, state, output, error, question,
+        id, profile_id, model, prompt, cwd, origin_cwd, worktree_path, worktree_branch,
+        state, output, error, question,
         parent_task_id, scope_json, grant_id, allow_questions, timeout_ms,
         effort, tldr, title, session_id, completion_json, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      task.id, task.profileId, task.model, task.prompt, task.cwd, task.state,
+      task.id, task.profileId, task.model, task.prompt, task.cwd,
+      task.worktree?.originCwd ?? null, task.worktree?.path ?? null, task.worktree?.branch ?? null,
+      task.state,
       task.output, task.error ?? null, task.question ?? null, task.parentTaskId ?? null,
       JSON.stringify(task.scope), task.grantId ?? null, task.allowQuestions ? 1 : 0,
       task.timeoutMs ?? null, task.effort ?? null, task.tldr ?? null, task.title ?? null, task.sessionId ?? null,
@@ -1494,6 +1502,48 @@ export class StateStore {
   }
 
   /**
+   * The checkouts of the tasks a cleanup at this cutoff would take. Removing
+   * them is the caller's job — this query is the list, so the preview and the
+   * delete work from the same one. The task id comes along because a checkout
+   * must be re-checked against its task's state at the moment it is removed:
+   * a resume can put a worker back into one between the plan and the delete.
+   */
+  settledWorktrees(cutoff: string): Array<{ taskId: string; worktree: TaskWorktree }> {
+    return this.worktreeRows(
+      `WHERE id IN (${ELIGIBLE_TASK_IDS}) AND worktree_path IS NOT NULL`,
+      [cutoff, cutoff],
+    );
+  }
+
+  /**
+   * Every checkout on the books, whatever state its task is in. Cleanup takes
+   * only the archived ones, so this is how the rest stay visible instead of
+   * accumulating unnamed.
+   */
+  taskWorktrees(): Array<{ taskId: string; worktree: TaskWorktree }> {
+    return this.worktreeRows("WHERE worktree_path IS NOT NULL", []);
+  }
+
+  private worktreeRows(
+    where: string,
+    parameters: string[],
+  ): Array<{ taskId: string; worktree: TaskWorktree }> {
+    return this.database.query<
+      { id: string; origin_cwd: string; worktree_path: string; worktree_branch: string },
+      string[]
+    >(`SELECT id, origin_cwd, worktree_path, worktree_branch FROM tasks ${where}`)
+      .all(...parameters)
+      .map((row) => ({
+        taskId: row.id,
+        worktree: {
+          originCwd: row.origin_cwd,
+          path: row.worktree_path,
+          branch: row.worktree_branch,
+        },
+      }));
+  }
+
+  /**
    * Permanently deletes the recorded activity of every eligible task, and
    * reports exactly what went. Irreversible: there is no archive behind this and
    * nothing to restore from.
@@ -2080,6 +2130,15 @@ function taskFromRow(row: TaskRow): Task {
     prompt: row.prompt,
     ...(row.shipped_prompt ? { shippedPrompt: row.shipped_prompt } : {}),
     cwd: row.cwd,
+    ...(row.origin_cwd && row.worktree_path && row.worktree_branch
+      ? {
+        worktree: {
+          originCwd: row.origin_cwd,
+          path: row.worktree_path,
+          branch: row.worktree_branch,
+        },
+      }
+      : {}),
     state: row.state,
     output: row.output,
     createdAt: row.created_at,
